@@ -18,7 +18,7 @@
     <div class="brand">
       <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" class="logo-bg"/><path d="M7 20c4 0 4-8 9-8s5 8 9 8" stroke="#f2b33d" stroke-width="3" fill="none" stroke-linecap="round"/><circle cx="7" cy="20" r="2.6" fill="#47b881"/><circle cx="25" cy="20" r="2.6" fill="#5b8def"/></svg>
       <span class="wordmark">ApiMan</span>
-      <span class="mode-badge" id="modeBadge"></span>
+      <span class="pill" id="modeBadge"></span>
     </div>
     <div class="top-actions">
       <button id="btnNew" class="btn">New</button>
@@ -43,7 +43,7 @@
   </header>
 
   <aside class="side">
-    <div class="seg" role="tablist" aria-label="Sidebar">
+    <div class="seg block" role="tablist" aria-label="Sidebar">
       <button role="tab" class="seg-btn on" data-view="collections" aria-selected="true">Collections</button>
       <button role="tab" class="seg-btn" data-view="environments" aria-selected="false">Environments</button>
       <button role="tab" class="seg-btn" data-view="history" aria-selected="false">History</button>
@@ -91,7 +91,7 @@
         <input id="url" placeholder="Enter a URL, e.g. {{baseUrl}}/users" aria-label="URL" spellcheck="false" autocomplete="off">
         <button class="send" id="btnSend" title="Send (Ctrl/Cmd+Enter)">Send</button>
       </div>
-      <div class="resolved" id="resolved" hidden></div>
+      <div class="resolved" id="resolved" aria-live="polite"></div>
 
       <div class="split">
         <section class="pane-col req-col" aria-label="Request">
@@ -107,34 +107,40 @@
           <div class="pane" data-pane="auth" hidden><div id="authEditor"></div></div>
           <div class="pane" data-pane="headers" hidden><div id="headersKv"></div></div>
           <div class="pane" data-pane="body" hidden>
-            <div class="body-modes" id="bodyModes" role="radiogroup" aria-label="Body type"></div>
+            <div class="pane-tools">
+              <div class="seg" id="bodyModes" role="radiogroup" aria-label="Body type"></div>
+              <span id="bodyExtras" class="field-row"></span>
+            </div>
             <div id="bodyEditor"></div>
           </div>
           <div class="pane" data-pane="scripts" hidden>
-            <div class="script-switch" role="tablist">
-              <button class="chip on" data-script="pre">Pre-request</button>
-              <button class="chip" data-script="test">Tests</button>
-              <span class="hint">Runs sandboxed: no network calls of its own, no access to stored data. <button class="linkish" id="btnSnippets">Snippets</button></span>
+            <div class="pane-tools">
+              <div class="seg" role="radiogroup" aria-label="Script">
+                <button class="seg-btn on" data-script="pre">Pre-request</button>
+                <button class="seg-btn" data-script="test">Tests</button>
+              </div>
+              <button class="btn small ghost" id="btnSnippets">Snippets</button>
+              <span class="hint">Runs sandboxed: no network calls of its own, no access to stored data.</span>
             </div>
-            <textarea class="code" id="scriptText" spellcheck="false" placeholder="pm.test(&quot;Status is 200&quot;, () => pm.response.to.have.status(200));"></textarea>
+            <textarea class="code" id="scriptText" spellcheck="false" aria-label="Script"></textarea>
           </div>
           <div class="pane" data-pane="docs" hidden>
-            <textarea class="prose" id="docsText" placeholder="Describe what this request does, its parameters and gotchas."></textarea>
+            <textarea class="prose" id="docsText" aria-label="Documentation" placeholder="Describe what this request does, its parameters and gotchas."></textarea>
           </div>
         </section>
 
         <section class="pane-col resp-col" aria-label="Response">
-          <div class="resp-status" id="respStatus"></div>
-          <div class="tabs" id="respTabs" role="tablist" hidden>
+          <div class="tabs" id="respTabs" role="tablist">
             <button class="tab on" data-tab="rbody">Body</button>
             <button class="tab" data-tab="rheaders">Headers<span class="count" id="cntRHeaders"></span></button>
             <button class="tab" data-tab="rcookies">Cookies<span class="count" id="cntRCookies"></span></button>
             <button class="tab" data-tab="rtests">Tests<span class="count" id="cntRTests"></span></button>
             <button class="tab" data-tab="rconsole">Console<span class="count" id="cntRConsole"></span></button>
+            <div class="resp-meta" id="respStatus"></div>
           </div>
-          <div class="pane resp-pane" data-pane="rbody">
-            <div class="resp-tools" id="respTools" hidden>
-              <div class="seg mini" role="radiogroup" aria-label="Body view">
+          <div class="pane" data-pane="rbody">
+            <div class="pane-tools" id="respTools" hidden>
+              <div class="seg" role="radiogroup" aria-label="Body view">
                 <button class="seg-btn on" data-view="pretty">Pretty</button>
                 <button class="seg-btn" data-view="raw">Raw</button>
                 <button class="seg-btn" data-view="preview">Preview</button>
@@ -157,7 +163,7 @@
 
 <dialog id="dlg" aria-labelledby="dlgTitle">
   <form method="dialog" class="dlg-shell">
-    <header class="dlg-head"><h2 id="dlgTitle"></h2><button class="btn icon" value="cancel" aria-label="Close">✕</button></header>
+    <header class="dlg-head"><h2 id="dlgTitle"></h2><button class="btn icon" value="cancel" aria-label="Close" title="Close"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button></header>
     <div class="dlg-body" id="dlgBody"></div>
     <footer class="dlg-foot" id="dlgFoot"></footer>
   </form>

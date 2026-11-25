@@ -999,30 +999,47 @@ function originOf(url) {
 const approvedOrigins = new Set(); // "itemKey -> origin" pairs the user allowed this session
 
 /**
- * Scripts can't make network calls, but they can change variables. A changed URL-like variable
- * (baseUrl, host, ...) could quietly send your token somewhere else on the NEXT request, so those
- * changes need your OK; in the runner (no one to ask) they are not saved. Every change is logged.
+ * Scripts can't make network calls, but they can change (or delete) variables, and a variable can
+ * decide where a later request goes. So instead of guessing from names, resolve the URL of every
+ * saved request in every collection (environments and globals are shared) with the variables
+ * before and after the script ran. If any destination would change, the user must approve; in
+ * the runner (no one to ask) all of the script's variable changes are dropped. Because no saved
+ * variable can move a destination without approval, the saved variables are a trusted baseline
+ * for the per-request check in execute().
  */
-async function guardVarChanges(before, after, ask, logs) {
-  const risky = [];
+async function guardVarChanges(cid, ed, before, after, ask, logs) {
+  const changed = [];
   for (const scope of ['environment', 'collection', 'globals']) {
     const b = before[scope], a = after[scope];
     for (const k of new Set([...Object.keys(b), ...Object.keys(a)])) {
       if (b[k] === a[k]) continue;
-      const removed = !(k in a);
-      logs.push({ level: 'info', text: `Script ${removed ? 'removed' : 'set'} ${scope} variable "${k}"`, src: 'ApiMan' });
-      if (!removed && (/:\/\//.test(a[k]) || /url|host|domain|endpoint|server|origin/i.test(k))) risky.push({ scope, k, value: a[k] });
+      changed.push(`${scope}.${k}`);
+      logs.push({ level: 'info', text: `Script ${k in a ? 'set' : 'removed'} ${scope} variable "${k}"`, src: 'ApiMan' });
     }
   }
-  if (!risky.length) return after;
-  const list = risky.map((r) => `  ${r.scope}.${r.k} = ${r.value.length > 80 ? `${r.value.slice(0, 77)}...` : r.value}`).join('\n');
-  const ok = ask ? await ask(`A script wants to change where future requests go:\n\n${list}\n\nSave these changes? Only allow this if you trust the scripts in this collection.`) : false;
-  if (ok) return after;
-  for (const r of risky) {
-    if (r.k in before[r.scope]) after[r.scope][r.k] = before[r.scope][r.k]; else delete after[r.scope][r.k];
-    logs.push({ level: 'warn', text: `Not saved: ${r.scope} variable "${r.k}" (a script tried to change a URL-like value${ask ? '' : '; run the request on its own to approve it'}).`, src: 'ApiMan' });
+  if (!changed.length) return after;
+
+  await Promise.all(state.colList.map((c) => withCol(c.id).catch(() => {})));
+  const varsFor = (sc, colId) => merged({ globals: sc.globals, environment: sc.environment, local: {},
+    collection: colId === cid ? sc.collection : colObj(state.cols[colId]) });
+  const moved = [];
+  const check = (name, rawUrl, colId) => {
+    const from = originOf(resolve(rawUrl, varsFor(before, colId)));
+    const to = originOf(resolve(rawUrl, varsFor(after, colId)));
+    if (from !== to) moved.push(`  ${name}: ${from || '(unresolved)'} → ${to || '(unresolved)'}`);
+  };
+  for (const c of state.colList) {
+    const col = state.cols[c.id];
+    if (col) eachRequest(col.item, (it) => check(`${c.name} / ${it.name || 'Untitled'}`, urlIn(it.request && it.request.url).raw, c.id));
   }
-  return after;
+  if (!cid) check(ed.name, ed.url, null);
+  if (!moved.length) return after;
+
+  const shown = moved.slice(0, 6).join('\n') + (moved.length > 6 ? `\n  …and ${moved.length - 6} more` : '');
+  const ok = ask ? await ask(`A script changed variables (${changed.join(', ')}) so that these requests would go to a different server:\n\n${shown}\n\nSave the changes? Only allow this if you trust the scripts in this collection.`) : false;
+  if (ok) return after;
+  logs.push({ level: 'warn', text: `Not saved: the script's variable changes (${changed.join(', ')}) would change where ${moved.length} request${moved.length > 1 ? 's' : ''} go${ask ? '' : '. Send the request on its own to approve them'}.`, src: 'ApiMan' });
+  return JSON.parse(JSON.stringify(before));
 }
 
 /**
@@ -1104,7 +1121,7 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
   }
   if (persist) {
     try {
-      scopes = await guardVarChanges(before, scopes, ask, logs);
+      scopes = await guardVarChanges(cid, ed, before, scopes, ask, logs);
       await persistScopes(cid, before, scopes, logs);
     } catch (e) { logs.push({ level: 'error', text: `Couldn't save variable changes: ${e.message}`, src: 'ApiMan' }); }
   }
@@ -1255,7 +1272,7 @@ function renderCollectionTree() {
     return [h('div', { class: 'empty-side' },
       h('p', null, 'No collections yet.'),
       h('p', null, 'Create one to save requests, or import an export from Postman.'),
-      h('div', { class: 'kv-foot' },
+      h('div', { class: 'actions' },
         h('button', { class: 'btn small', onclick: () => newCollection() }, 'New collection'),
         h('button', { class: 'btn small', onclick: () => openImport() }, 'Import')))];
   }
@@ -1373,7 +1390,7 @@ function renderHistoryList() {
     },
       h('span', { class: `mtag ${e.method}` }, e.method),
       h('span', { class: 'name' }, e.url || e.name),
-      h('span', { class: `status-mini code-big ${sc}`, style: 'font-size:12px' }, e.status || 'ERR')));
+      h('span', { class: `status-code sm ${e.status ? sc : 's-err'}` }, e.status || 'Error')));
   }
   return out;
 }
@@ -1601,7 +1618,7 @@ function renderTabs() {
         t.dirty ? h('span', { class: 'dot', title: 'Unsaved changes' }) : null,
         h('button', { class: 'x', title: 'Close tab', 'aria-label': `Close ${t.ed.name}`, onclick: (e) => { e.stopPropagation(); closeTab(i); } }, icon('x')));
     }),
-    h('button', { class: 'newtab', title: 'New request tab', 'aria-label': 'New request tab', onclick: () => openTab(newTab()) }, '+'));
+    h('button', { class: 'newtab', title: 'New request tab', 'aria-label': 'New request tab', onclick: () => openTab(newTab()) }, icon('plus')));
   const on = strip.querySelector('.rtab.on');
   if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
@@ -1642,7 +1659,8 @@ function renderCrumb() {
 function renderResolved() {
   const t = cur();
   const el = $('#resolved');
-  if (!t || !t.ed.url.includes('{{')) { el.hidden = true; return; }
+  // The line always keeps its height, so the panes below never jump while you type.
+  if (!t || !t.ed.url.includes('{{')) { el.replaceChildren(); return; }
   const vars = merged(scopesFor(t.cid));
   const parts = [];
   let last = 0;
@@ -1654,7 +1672,6 @@ function renderResolved() {
   }
   parts.push(t.ed.url.slice(last));
   el.replaceChildren('Resolves to ', ...parts);
-  el.hidden = false;
 }
 
 function renderCounts() {
@@ -1664,14 +1681,17 @@ function renderCounts() {
   const n = (x) => (x ? String(x) : '');
   $('#cntParams').textContent = n(ed.params.filter((p) => !p.disabled && p.key).length);
   $('#cntHeaders').textContent = n(ed.headers.filter((p) => !p.disabled && p.key).length);
-  $('#cntAuth').textContent = { bearer: '•', basic: '•', apikey: '•' }[ed.auth.type] || '';
-  $('#cntBody').textContent = ed.body.mode !== 'none' ? '•' : '';
+  // Numbers count things; a dot means "configured".
+  $('#cntAuth').classList.toggle('dot', ['bearer', 'basic', 'apikey'].includes(ed.auth.type));
+  $('#cntAuth').textContent = $('#cntAuth').classList.contains('dot') ? 'set' : '';
+  $('#cntBody').classList.toggle('dot', ed.body.mode !== 'none');
+  $('#cntBody').textContent = ed.body.mode !== 'none' ? 'set' : '';
   $('#cntScripts').textContent = n((ed.pre.trim() ? 1 : 0) + (ed.test.trim() ? 1 : 0));
 }
 
 function switchPane(tabsSel, name) {
   const tabs = $(tabsSel);
-  $$('.tab', tabs).forEach((b) => { const on = b.dataset.tab === name; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
+  $$('.tab', tabs).forEach((b) => { const on = b.dataset.tab === name; b.classList.toggle('on', on); b.setAttribute('aria-selected', String(on)); });
   $$(':scope > .pane', tabs.parentElement).forEach((p) => { p.hidden = p.dataset.pane !== name; });
 }
 
@@ -1770,7 +1790,7 @@ function authForm(model, { allowInherit, inheritText, onChange }) {
         oninput: (e) => { model[key] = e.target.value; onChange(); },
       });
       return h('div', { class: 'field' }, h('label', null, label),
-        secret ? h('div', { class: 'kv-foot', style: 'margin:0' }, input,
+        secret ? h('div', { class: 'field-row' }, input,
           h('button', { class: 'btn icon', type: 'button', title: 'Show / hide', 'aria-label': 'Show or hide', onclick: (e) => { reveal = !reveal; input.type = reveal ? 'text' : 'password'; e.currentTarget.replaceChildren(icon(reveal ? 'eyeOff' : 'eye')); } }, icon('eye')))
           : input);
     };
@@ -1786,14 +1806,14 @@ function authForm(model, { allowInherit, inheritText, onChange }) {
         draw();
       },
     }, ...types.map(([v, l]) => h('option', { value: v, ...(model.type === v ? { selected: true } : {}) }, l)));
-    const kids = [h('div', { class: 'field', style: 'max-width:340px' }, h('label', null, 'Type'), sel)];
+    const kids = [h('div', { class: 'field narrow' }, h('label', null, 'Type'), sel)];
     if (model.type === 'inherit') kids.push(h('p', { class: 'note' }, inheritText ? inheritText() : 'Uses the auth of the folder or collection this request is saved in.'));
     if (model.type === 'noauth') kids.push(h('p', { class: 'hint' }, 'No Authorization header is added.'));
     if (model.type === 'bearer') kids.push(field('Token', 'token', { secret: true, placeholder: 'eyJhbGciOi… or {{token}}' }));
-    if (model.type === 'basic') kids.push(h('div', { class: 'row-2' }, field('Username', 'username'), field('Password', 'password', { secret: true })));
+    if (model.type === 'basic') kids.push(h('div', { class: 'grid-2' }, field('Username', 'username'), field('Password', 'password', { secret: true })));
     if (model.type === 'apikey') {
-      kids.push(h('div', { class: 'row-2' }, field('Key', 'key', { placeholder: 'X-Api-Key' }), field('Value', 'value', { secret: true, placeholder: '{{apiKey}}' })));
-      kids.push(h('div', { class: 'field', style: 'max-width:340px' }, h('label', null, 'Add to'),
+      kids.push(h('div', { class: 'grid-2' }, field('Key', 'key', { placeholder: 'X-Api-Key' }), field('Value', 'value', { secret: true, placeholder: '{{apiKey}}' })));
+      kids.push(h('div', { class: 'field narrow' }, h('label', null, 'Add to'),
         h('select', { onchange: (e) => { model.in = e.target.value; onChange(); } },
           h('option', { value: 'header', ...(model.in !== 'query' ? { selected: true } : {}) }, 'Header'),
           h('option', { value: 'query', ...(model.in === 'query' ? { selected: true } : {}) }, 'Query parameter'))));
@@ -1826,20 +1846,20 @@ const BODY_MODES = [['none', 'None'], ['raw', 'Raw'], ['formdata', 'Form data'],
 function renderBody() {
   const t = cur();
   const b = t.ed.body;
-  const modes = $('#bodyModes');
-  const chips = BODY_MODES.map(([m, label]) => h('button', {
-    class: `chip ${b.mode === m ? 'on' : ''}`, role: 'radio', 'aria-checked': b.mode === m,
+  $('#bodyModes').replaceChildren(...BODY_MODES.map(([m, label]) => h('button', {
+    class: `seg-btn ${b.mode === m ? 'on' : ''}`, role: 'radio', 'aria-checked': String(b.mode === m),
     onclick: () => { b.mode = m; renderBody(); renderCounts(); markDirty(); },
-  }, label));
+  }, label)));
+  const extras = [];
   if (b.mode === 'raw') {
-    chips.push(h('select', { 'aria-label': 'Raw format', onchange: (e) => { b.lang = e.target.value; markDirty(); renderBody(); } },
+    extras.push(h('select', { 'aria-label': 'Raw format', onchange: (e) => { b.lang = e.target.value; markDirty(); renderBody(); } },
       ...[['json', 'JSON'], ['text', 'Text'], ['xml', 'XML'], ['html', 'HTML'], ['javascript', 'JavaScript']]
         .map(([v, l]) => h('option', { value: v, ...(b.lang === v ? { selected: true } : {}) }, l))));
-    if (b.lang === 'json') chips.push(h('button', { class: 'btn small ghost', onclick: () => {
+    if (b.lang === 'json') extras.push(h('button', { class: 'btn small ghost', onclick: () => {
       try { b.raw = JSON.stringify(JSON.parse(b.raw), null, 2); renderBody(); markDirty(); } catch (e) { toast(`Not valid JSON: ${e.message}`); }
     } }, 'Beautify'));
   }
-  modes.replaceChildren(...chips);
+  $('#bodyExtras').replaceChildren(...extras);
 
   const box = $('#bodyEditor');
   const area = (key, placeholder, rows = 14) => h('textarea', {
@@ -1874,7 +1894,7 @@ function tabIndent(e) {
 
 function renderScripts() {
   const t = cur();
-  $$('.script-switch .chip').forEach((c) => c.classList.toggle('on', c.dataset.script === t.scriptKind));
+  $$('[data-script]').forEach((c) => { const on = c.dataset.script === t.scriptKind; c.classList.toggle('on', on); c.setAttribute('aria-checked', String(on)); });
   $('#scriptText').value = t.scriptKind === 'pre' ? t.ed.pre : t.ed.test;
   $('#scriptText').placeholder = t.scriptKind === 'pre'
     ? '// Runs before the request is sent\npm.environment.set("requestId", pm.variables.replaceIn("{{$guid}}"));'
@@ -1904,36 +1924,32 @@ function renderResponse() {
   const out = t.out;
   $('#btnSend').textContent = t.sending ? 'Cancel' : 'Send';
   $('#btnSend').classList.toggle('busy', !!t.sending);
-  if (t.sending) {
-    status.replaceChildren(h('span', { class: 'resp-empty' }, `Sending ${t.ed.method} request…`));
-    $('#respTabs').hidden = true;
+  const clearCounts = () => { for (const id of ['#cntRHeaders', '#cntRCookies', '#cntRTests', '#cntRConsole']) $(id).textContent = ''; };
+  if (t.sending || !out) {
+    status.replaceChildren(t.sending ? h('span', null, 'Sending…') : '');
+    clearCounts();
+    t.respTab = 'rbody';
+    switchPane('#respTabs', 'rbody');
     $('#respTools').hidden = true;
-    $('#respBody').replaceChildren();
-    return;
-  }
-  if (!out) {
-    status.replaceChildren(h('span', { class: 'resp-empty' }, 'Send the request to see the response here. Ctrl/Cmd+Enter sends.'));
-    $('#respTabs').hidden = true;
-    $('#respTools').hidden = true;
-    $('#respBody').replaceChildren();
+    $('#respBody').replaceChildren(h('div', { class: 'empty-state' }, t.sending
+      ? h('p', { class: 'hint' }, `Waiting for the response to ${t.ed.method} ${t.ed.url || 'this request'}…`)
+      : [h('p', { class: 'hint' }, 'Send the request to see its response here.'),
+        h('p', { class: 'hint' }, h('kbd', null, 'Ctrl'), ' / ', h('kbd', null, '⌘'), ' + ', h('kbd', null, 'Enter'), ' sends, ',
+          h('kbd', null, 'Ctrl'), ' / ', h('kbd', null, '⌘'), ' + ', h('kbd', null, 'S'), ' saves.')]));
     return;
   }
   const res = out.res;
-  const chips = (out.warnings || []).map((w) => h('span', { class: 'warn-chip', title: w }, w.length > 70 ? `${w.slice(0, 68)}…` : w));
-  if (out.error) {
-    status.replaceChildren(h('span', { class: 'code-big err' }, 'Error'), h('span', { class: 'err-text' }, out.error), ...chips);
-  } else {
-    const sc = `s${String(res.status)[0]}`;
-    status.replaceChildren(
-      h('span', { class: `code-big ${sc}` }, String(res.status)),
-      h('span', { class: 'reason' }, res.reason || ''),
-      h('span', { class: 'metric' }, 'Time ', h('b', null, fmtMs(res.timeMs))),
-      h('span', { class: 'metric' }, 'Size ', h('b', null, fmtSize(res.size) + (res.truncated ? ' (truncated)' : ''))),
-      ...(out.wire && res.finalUrl && res.finalUrl !== out.wire.url ? [h('span', { class: 'metric', title: res.finalUrl }, 'Redirected')] : []),
-      ...chips);
-  }
   const hasRes = res && !out.error;
-  $('#respTabs').hidden = false;
+  status.replaceChildren(...(hasRes ? [
+    h('span', null, h('span', { class: `status-code s${String(res.status)[0]}` }, String(res.status)), res.reason ? ` ${res.reason}` : ''),
+    h('span', null, h('b', null, fmtMs(res.timeMs))),
+    h('span', null, h('b', null, fmtSize(res.size)), res.truncated ? ' (truncated)' : ''),
+    ...(out.wire && res.finalUrl && res.finalUrl !== out.wire.url ? [h('span', { class: 'pill', title: res.finalUrl }, 'Redirected')] : []),
+  ] : [h('span', { class: 'status-code s-err' }, 'Error')]));
+  const notes = [
+    ...(out.error ? [h('p', { class: 'note err' }, out.error)] : []),
+    ...(out.warnings || []).map((w) => h('p', { class: 'note warn' }, w)),
+  ];
   const tests = out.tests || [];
   const failed = tests.filter((x) => x.passed === false).length;
   const passed = tests.filter((x) => x.passed === true).length;
@@ -1949,7 +1965,7 @@ function renderResponse() {
   // body
   $('#respTools').hidden = !hasRes;
   $$('#respTools .seg-btn').forEach((b) => b.classList.toggle('on', b.dataset.view === t.bodyView));
-  $('#respBody').replaceChildren(hasRes ? bodyView(res, t.bodyView) : h('p', { class: 'hint' }, out.error ? 'No response body.' : ''));
+  $('#respBody').replaceChildren(...notes, ...(notes.length && hasRes ? [h('div', { class: 'gap' })] : []), ...(hasRes ? [bodyView(res, t.bodyView)] : []));
   // headers
   $('#respHeaders').replaceChildren(...(hasRes ? res.headers.map(([k, v]) => h('tr', null, h('td', null, k), h('td', { class: 'mono' }, v))) : []));
   // cookies
@@ -1961,7 +1977,7 @@ function renderResponse() {
   $('#respTests').replaceChildren(tests.length
     ? h('div', null, h('p', { class: 'hint' }, `${passed} passed, ${failed} failed${tests.length - passed - failed ? `, ${tests.length - passed - failed} skipped` : ''}`),
       ...tests.map((x) => h('div', { class: 'test-row' },
-        h('span', { class: `badge ${x.passed === false ? 'fail' : 'pass'}` }, x.passed === false ? 'FAIL' : x.passed === null ? 'SKIP' : 'PASS'),
+        h('span', { class: `pill ${x.passed === false ? 'err' : x.passed === null ? '' : 'ok'}` }, x.passed === false ? 'Fail' : x.passed === null ? 'Skip' : 'Pass'),
         h('div', null, h('div', null, x.name), x.error && x.passed === false ? h('div', { class: 'msg' }, x.error) : null))))
     : h('p', { class: 'hint' }, 'No tests ran. Add some in Scripts → Tests, for example pm.test("Status is 200", () => pm.response.to.have.status(200)).'));
   // console
@@ -2150,15 +2166,18 @@ function openDialog({ title, body, buttons = [], wide = false, onClose }) {
   }, b.label)));
   dlg.onclose = () => { if (onClose) onClose(); };
   if (!dlg.open) dlg.showModal();
+  // Start on the first field, not on the close button.
+  const first = $('#dlgBody').querySelector('input:not([type=checkbox]):not([type=file]):not([disabled]), select, textarea');
+  if (first) first.focus();
 }
 function closeDialog() { $('#dlg').close(); }
 
 function dlgTabs(defs) {
-  const bar = h('div', { class: 'dlg-tabs', role: 'tablist' });
+  const bar = h('div', { class: 'seg dlg-tabs', role: 'tablist' });
   const panes = defs.map((d) => h('div', { 'data-pane': d.key, hidden: d !== defs[0] }, d.content));
   defs.forEach((d, i) => bar.append(h('button', {
-    type: 'button', class: `tab ${i === 0 ? 'on' : ''}`, role: 'tab',
-    onclick: (e) => { $$('.tab', bar).forEach((b) => b.classList.toggle('on', b === e.currentTarget)); panes.forEach((p) => { p.hidden = p.dataset.pane !== d.key; }); },
+    type: 'button', class: `seg-btn ${i === 0 ? 'on' : ''}`, role: 'tab',
+    onclick: (e) => { $$('.seg-btn', bar).forEach((b) => b.classList.toggle('on', b === e.currentTarget)); panes.forEach((p) => { p.hidden = p.dataset.pane !== d.key; }); },
   }, d.label)));
   return [bar, ...panes];
 }
@@ -2234,7 +2253,7 @@ async function editEnvironment(id) {
     title: isGlobals ? 'Globals' : id ? 'Edit environment' : 'New environment',
     wide: true,
     body: [
-      isGlobals ? h('p', { class: 'hint', style: 'margin-top:0' }, 'Globals apply everywhere, with the lowest priority: environment and collection values win.') : h('div', { class: 'field' }, h('label', null, 'Name'), nameIn),
+      isGlobals ? h('p', { class: 'hint field' }, 'Globals apply everywhere, with the lowest priority: environment and collection values win.') : h('div', { class: 'field' }, h('label', null, 'Name'), nameIn),
       box,
       h('p', { class: 'hint' }, 'Secret values are hidden on screen. Like everything in ApiMan they are stored only on this computer.'),
       isGlobals ? null : h('label', { class: 'check' }, activate, h('span', null, 'Use this environment')),
@@ -2298,14 +2317,14 @@ function peekVariables(anchor) {
   const pop = $('#popover');
   const peek = h('div', { class: 'peek' });
   for (const [label, values, name] of sections) {
-    peek.append(h('h4', null, name ? `${label}: ${name}` : label));
+    peek.append(h('div', { class: 'label' }, name ? `${label}: ${name}` : label));
     if (!values) { peek.append(h('div', { class: 'hint' }, label === 'Environment' ? 'No environment selected.' : 'Open a saved request to see its collection variables.')); continue; }
     const on = values.filter((v) => v.key && v.enabled !== false && !v.disabled);
     if (!on.length) { peek.append(h('div', { class: 'hint' }, 'No variables.')); continue; }
     peek.append(h('table', { class: 'grid' }, h('tbody', null, on.map((v) => h('tr', null, h('td', null, v.key),
       h('td', { class: 'v' }, v.type === 'secret' ? '••••••••' : String(v.value ?? '').slice(0, 120)))))));
   }
-  peek.append(h('div', { class: 'kv-foot' },
+  peek.append(h('div', { class: 'actions' },
     h('button', { class: 'btn small', onclick: () => { hideMenu(); if (state.activeEnv) editEnvironment(state.activeEnv); else editEnvironment(null); } }, state.activeEnv ? 'Edit environment' : 'New environment'),
     h('button', { class: 'btn small ghost', onclick: () => { hideMenu(); editEnvironment(GLOBALS_ID); } }, 'Edit Globals')));
   pop.replaceChildren(peek);
@@ -2325,15 +2344,15 @@ function openImport(start = 'file') {
   const pasteIn = h('textarea', { class: 'code', rows: 10, spellcheck: 'false', placeholder: 'Paste a Postman collection or environment JSON' });
   const defs = [
     { key: 'file', label: 'File', content: [drop, h('p', { class: 'hint' }, 'In Postman: ⋯ on a collection → Export → Collection v2.1. Environments: ⋯ → Export.')] },
-    { key: 'curl', label: 'cURL', content: [curlIn, h('div', { class: 'kv-foot' }, h('button', { type: 'button', class: 'btn primary', onclick: () => {
+    { key: 'curl', label: 'cURL', content: [curlIn, h('div', { class: 'dlg-inline-actions' }, h('button', { type: 'button', class: 'btn primary', onclick: () => {
       try { const ed = parseCurl(curlIn.value); closeDialog(); openTab(newTab({ ed, dirty: true })); toast('Imported from cURL'); } catch (e) { toast(e.message); }
     } }, 'Import cURL'))] },
-    { key: 'paste', label: 'Paste JSON', content: [pasteIn, h('div', { class: 'kv-foot' }, h('button', { type: 'button', class: 'btn primary', onclick: async () => {
+    { key: 'paste', label: 'Paste JSON', content: [pasteIn, h('div', { class: 'dlg-inline-actions' }, h('button', { type: 'button', class: 'btn primary', onclick: async () => {
       try { await importJson(JSON.parse(pasteIn.value), 'pasted JSON'); closeDialog(); } catch (e) { toast(e.message); }
     } }, 'Import'))] },
   ];
   openDialog({ title: 'Import', body: dlgTabs(defs) });
-  if (start !== 'file') $$('#dlgBody .dlg-tabs .tab')[start === 'curl' ? 1 : 2].click();
+  if (start !== 'file') $$('#dlgBody .dlg-tabs .seg-btn')[start === 'curl' ? 1 : 2].click();
   setTimeout(() => { if (start === 'curl') curlIn.focus(); }, 50);
 }
 
@@ -2579,10 +2598,10 @@ function openCode() {
   let lang = ls.get('apiman:codeLang', 'curl');
   const mask = h('input', { type: 'checkbox', checked: true });
   const pre = h('pre', { class: 'codegen' });
-  const tabsBar = h('div', { class: 'dlg-tabs', role: 'tablist' });
+  const tabsBar = h('div', { class: 'seg dlg-tabs', role: 'tablist' });
   const draw = () => {
     tabsBar.replaceChildren(...Object.entries(GENERATORS).map(([k, g]) => h('button', {
-      type: 'button', class: `tab ${k === lang ? 'on' : ''}`, onclick: () => { lang = k; ls.set('apiman:codeLang', k); draw(); },
+      type: 'button', class: `seg-btn ${k === lang ? 'on' : ''}`, onclick: () => { lang = k; ls.set('apiman:codeLang', k); draw(); },
     }, g.label)));
     const r = codeWire(mask.checked);
     pre.textContent = r.error ? `// ${r.error}` : GENERATORS[lang].gen(r.wire);
@@ -2593,7 +2612,7 @@ function openCode() {
     title: 'Generate code',
     wide: true,
     body: [tabsBar, pre,
-      h('label', { class: 'check', style: 'margin-top:12px' }, mask, h('span', null, 'Hide secrets', h('small', null, 'Masks tokens, API keys and cookies, so the code is safe to paste into chats and tickets.')))],
+      h('label', { class: 'check dlg-after' }, mask, h('span', null, 'Hide secrets', h('small', null, 'Masks tokens, API keys and cookies, so the code is safe to paste into chats and tickets.')))],
     buttons: [{ label: 'Copy', primary: true, onClick: async () => { await navigator.clipboard.writeText(pre.textContent); toast('Code copied'); return false; } }],
   });
 }
@@ -2629,8 +2648,8 @@ async function openRunner(cid, folderId) {
     title: 'Collection runner',
     wide: true,
     body: [
-      h('div', { class: 'row-2' }, h('div', { class: 'field' }, h('label', null, 'Collection'), colSel), h('div', { class: 'field' }, h('label', null, 'Folder'), folderSel)),
-      h('div', { class: 'row-2' }, h('div', { class: 'field' }, h('label', null, 'Iterations'), iterIn), h('div', { class: 'field' }, h('label', null, 'Delay between requests (ms)'), delayIn)),
+      h('div', { class: 'grid-2' }, h('div', { class: 'field' }, h('label', null, 'Collection'), colSel), h('div', { class: 'field' }, h('label', null, 'Folder'), folderSel)),
+      h('div', { class: 'grid-2' }, h('div', { class: 'field' }, h('label', null, 'Iterations'), iterIn), h('div', { class: 'field' }, h('label', null, 'Delay between requests (ms)'), delayIn)),
       h('label', { class: 'check' }, keepVars, h('span', null, 'Save variable changes', h('small', null, 'Values set by scripts (like a login token) are saved to the environment and collection.'))),
       h('label', { class: 'check' }, stopOnFail, h('span', null, 'Stop on first failure')),
       results,
@@ -2675,10 +2694,10 @@ async function openRunner(cid, folderId) {
           const sc = out.error ? 'err' : `s${String(out.res.status)[0]}`;
           tbody.append(h('tr', null,
             h('td', null, iterations > 1 ? `${it + 1}.${items.indexOf(item) + 1}` : String(n)),
-            h('td', null, h('span', { class: `mtag ${ed.method}`, style: 'width:auto;margin-right:8px' }, ed.method), ed.name,
-              ...out.tests.filter((x) => x.passed === false).map((x) => h('div', { class: 'test-row', style: 'border:0;padding:2px 0' }, h('span', { class: 'badge fail' }, 'FAIL'), h('span', { class: 'msg' }, `${x.name}: ${x.error}`))),
-              out.error ? h('div', { class: 'err-text', style: 'font-size:12.5px' }, out.error) : null),
-            h('td', null, h('span', { class: `code-big ${sc}`, style: 'font-size:14px' }, out.error ? 'Error' : String(out.res.status))),
+            h('td', null, h('span', { class: `mtag ${ed.method}` }, ed.method), ' ', ed.name,
+              ...out.tests.filter((x) => x.passed === false).map((x) => h('div', { class: 'runner-fail' }, h('span', { class: 'pill err' }, 'Fail'), `${x.name}: ${x.error}`)),
+              out.error ? h('div', { class: 'runner-fail' }, h('span', { class: 'pill err' }, 'Error'), out.error) : null),
+            h('td', null, h('span', { class: `status-code ${out.error ? 's-err' : sc}` }, out.error ? 'Error' : String(out.res.status))),
             h('td', null, out.res && !out.error ? fmtMs(out.res.timeMs) : ''),
             h('td', null, out.tests.length ? `${tp}/${out.tests.length}` : '')));
           bar.firstChild.style.width = `${(n / total) * 100}%`;
@@ -2710,7 +2729,7 @@ function openSettings() {
   openDialog({
     title: 'Settings',
     body: [
-      h('div', { class: 'row-2' }, h('div', { class: 'field' }, h('label', null, 'Theme'), theme), h('div', { class: 'field' }, h('label', null, 'Request timeout (seconds)'), timeout)),
+      h('div', { class: 'grid-2' }, h('div', { class: 'field' }, h('label', null, 'Theme'), theme), h('div', { class: 'field' }, h('label', null, 'Request timeout (seconds)'), timeout)),
       h('label', { class: 'check' }, follow, h('span', null, 'Follow redirects', h('small', null, 'Credentials are never forwarded to a different site, and HTTPS never downgrades to HTTP.'))),
       h('label', { class: 'check' }, hist, h('span', null, 'Keep request history', h('small', null, 'Stored only in this browser. It includes request details as you typed them.'))),
       backend.mode === 'local'
@@ -2794,7 +2813,7 @@ function bindEditor() {
     navigator.clipboard.writeText(text).then(() => toast('Response copied'), () => toast('Copy failed'));
   });
   $('#btnSaveBody').addEventListener('click', saveBody);
-  $$('.script-switch .chip').forEach((c) => c.addEventListener('click', () => { cur().scriptKind = c.dataset.script; renderScripts(); }));
+  $$('#editor [data-script]').forEach((c) => c.addEventListener('click', () => { cur().scriptKind = c.dataset.script; renderScripts(); }));
   $('#scriptText').addEventListener('input', (e) => { const t = cur(); t.ed[t.scriptKind === 'pre' ? 'pre' : 'test'] = e.target.value; renderCounts(); markDirty(); });
   $('#scriptText').addEventListener('keydown', tabIndent);
   $('#btnSnippets').addEventListener('click', (e) => {
@@ -2907,14 +2926,14 @@ async function start() {
   if (local) {
     backend = makeBackend('local');
     badge.textContent = 'Local';
-    badge.className = 'mode-badge local';
+    badge.className = 'pill ok';
     badge.title = 'Requests go out from this computer, through your VPN, with no CORS limits.';
     const info = await api('GET', '/api/info');
     $('#dataDir').textContent = `Data folder: ${info.dataDir}`;
   } else {
     backend = makeBackend('browser');
     badge.textContent = 'Browser';
-    badge.className = 'mode-badge';
+    badge.className = 'pill';
     badge.title = 'Requests are sent by this browser, so the API must allow CORS. Run ApiMan locally to call any API.';
     state.settings.insecure = false;
     $('#dataDir').textContent = 'Saved in this browser.';
