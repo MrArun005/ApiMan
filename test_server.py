@@ -1,6 +1,7 @@
 """Self-check for server.py. Run: python3 test_server.py  (stdlib only, no network beyond localhost)."""
 import base64
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -42,6 +43,11 @@ class Echo(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     do_GET = do_POST = do_PUT = do_DELETE = handle_any
+
+    def do_HEAD(self):  # promises a body length, sends no body (as HEAD must)
+        self.send_response(200)
+        self.send_header("Content-Length", "1234")
+        self.end_headers()
 
     def log_message(self, *a):
         pass
@@ -180,8 +186,33 @@ class ServerTest(unittest.TestCase):
         env = lambda name: self.call("POST", "/api/environments", {"document": {"name": name, "values": []}})[1]["id"]
         self.assertEqual(env("Globals"), "globals-env.json")                    # never overwrites the Globals doc
         path = server.Handler.stores["collections"].root / "Internal-API.json"
-        self.assertEqual(path.stat().st_mode & 0o777, 0o644)                     # not mkstemp's 0600
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)                     # new files: owner-only (may hold tokens)
+        os.chmod(path, 0o640)
+        self.call("PUT", "/api/collections/Internal-API.json", {"info": {"name": "_Internal API"}, "item": []})
+        self.assertEqual(path.stat().st_mode & 0o777, 0o640)                     # an existing file keeps its chosen mode
         self.assertEqual(list(path.parent.glob("*.tmp")), [])                   # no leftovers
+
+    def test_head_is_not_reported_as_broken(self):
+        res = self.send(method="HEAD", url=self.target + "/x")
+        self.assertEqual(res.get("status"), 200, res)
+
+    def test_save_from_a_stale_window_is_refused_not_silently_overwritten(self):
+        cid = self.call("POST", "/api/collections", {"collection": {"info": {"name": "Shared"}, "item": []}})[1]["id"]
+        req = urllib.request.Request(f"{self.base}/api/collections/{cid}")
+        with urllib.request.urlopen(req) as r:
+            version = r.headers["X-Version"]
+        put = lambda body, v: urllib.request.urlopen(urllib.request.Request(
+            f"{self.base}/api/collections/{cid}", data=json.dumps(body).encode(), method="PUT",
+            headers={"Content-Type": "application/json", "If-Match": v}))
+        import time as _t
+        _t.sleep(0.01)
+        with put({"info": {"name": "Shared"}, "item": [{"name": "from window A"}]}, version) as r:  # window A saves
+            self.assertEqual(r.status, 200)
+        with self.assertRaises(urllib.error.HTTPError) as ctx:                                      # window B, stale
+            put({"info": {"name": "Shared"}, "item": [{"name": "from window B"}]}, version)
+        self.assertEqual(ctx.exception.code, 409)
+        ctx.exception.close()
+        self.assertEqual(self.call("GET", f"/api/collections/{cid}")[1]["item"][0]["name"], "from window A")
 
     def test_path_traversal_is_rejected(self):
         for bad in ("..%2Fsecret.json", "%2Fetc%2Fpasswd", ".hidden.json", "x.txt"):

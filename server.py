@@ -17,6 +17,7 @@ import os
 import re
 import ssl
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -82,6 +83,9 @@ class Store:
     def get(self, doc_id):
         return json.loads(self.path(doc_id).read_text("utf-8"))
 
+    def version(self, doc_id):
+        return str(self.path(doc_id).stat().st_mtime_ns)
+
     def put(self, doc_id, data):
         self.validate(data)
         p = self.path(doc_id)
@@ -90,8 +94,10 @@ class Store:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            # mkstemp creates 0600; keep the existing file's mode (or a normal 0644 for new files)
-            os.chmod(tmp, p.stat().st_mode & 0o777 if p.exists() else 0o644)
+            # Collections and environments often hold tokens: new files stay owner-only (mkstemp's 0600).
+            # An existing file keeps the mode its owner chose (e.g. a shared team folder).
+            if p.exists():
+                os.chmod(tmp, p.stat().st_mode & 0o777)
             os.replace(tmp, p)
         except BaseException:
             try:
@@ -100,7 +106,13 @@ class Store:
                 pass
             raise
 
+    _create_lock = threading.Lock()  # two quick imports with the same name must not pick the same file
+
     def create(self, data):
+        with self._create_lock:
+            return self._create(data)
+
+    def _create(self, data):
         self.validate(data)
         base = re.sub(r"[^A-Za-z0-9._-]+", "-", self.name_of(data)).strip("-._")[:80] or "untitled"
         if base.lower() == "globals":
@@ -228,7 +240,8 @@ def send(spec):
     except Exception as e:  # read timeout, connection reset, IncompleteRead
         return {"error": f"The response broke off while downloading: {type(e).__name__}: {e}"}
     promised = resp.headers.get("Content-Length")
-    if promised and promised.isdigit() and len(raw) < min(int(promised), MAX_RESPONSE + 1):
+    no_body = method == "HEAD" or resp.status in (204, 304) or 100 <= resp.status < 200  # Content-Length describes a body that isn't sent
+    if not no_body and promised and promised.isdigit() and len(raw) < min(int(promised), MAX_RESPONSE + 1):
         return {"error": f"The response broke off while downloading: received {len(raw)} of {promised} bytes."}
     elapsed_ms = round((time.perf_counter() - start) * 1000)
     truncated = len(raw) > MAX_RESPONSE
@@ -290,10 +303,14 @@ class Handler(BaseHTTPRequestHandler):
                         "info": {"name": body.get("name") or "New collection", "schema": SCHEMA_V21}, "item": []}
                     return self.reply(201, {"id": store.create(data)})
                 if doc_id and method == "GET":
-                    return self.reply(200, store.get(doc_id))
+                    return self.reply(200, store.get(doc_id), {"X-Version": store.version(doc_id)})
                 if doc_id and method == "PUT":
-                    store.put(doc_id, self.read_json())
-                    return self.reply(200, {"ok": True})
+                    expected = self.headers.get("If-Match")
+                    with store._create_lock:  # check-then-write must not interleave with another save
+                        if expected and store.path(doc_id).exists() and store.version(doc_id) != expected:
+                            return self.reply(409, {"error": "This document was changed elsewhere since it was loaded."})
+                        store.put(doc_id, self.read_json())
+                        return self.reply(200, {"ok": True}, {"X-Version": store.version(doc_id)})
                 if doc_id and method == "DELETE":
                     store.delete(doc_id)
                     return self.reply(200, {"ok": True})
@@ -316,9 +333,11 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Request too large")
         return json.loads(self.rfile.read(length) or b"{}")
 
-    def reply(self, status, payload):
+    def reply(self, status, payload, extra_headers=None):
         data = json.dumps(payload).encode("utf-8")
         self.send_response(status)
+        for k, val in (extra_headers or {}).items():
+            self.send_header(k, val)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")

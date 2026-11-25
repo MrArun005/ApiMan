@@ -110,6 +110,8 @@ function b64ToBytes(b64) {
 const utf8b64 = (s) => bufToB64(new TextEncoder().encode(s));
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+const MOD = IS_MAC ? '⌘' : 'Ctrl';
 const SCHEMA_V21 = 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json';
 const isLocalHost = (host) => ['localhost', '127.0.0.1', '[::1]'].includes(host);
 
@@ -151,6 +153,14 @@ function applyAppearance(s = state.settings) {
   root.style.setProperty('--focus', accent);
   root.dataset.side = s.sidePosition === 'right' ? 'right' : 'left';
   root.dataset.sideHidden = String(!!s.sideHidden);
+  const tab = Number(s.tabSize) || 2;
+  document.querySelectorAll('.CodeMirror').forEach((el) => {
+    const cm = el.CodeMirror;
+    if (!cm) return;
+    cm.setOption('tabSize', tab);
+    cm.setOption('indentUnit', tab);
+    if (el.closest('.code-editor.fill')) cm.setOption('lineWrapping', s.wrap !== false);
+  });
   document.querySelectorAll('.CodeMirror').forEach((el) => el.CodeMirror && el.CodeMirror.refresh());
   root.dataset.layout = s.layout === 'stacked' ? 'stacked' : 'auto';
   root.dataset.wrap = s.wrap === false ? 'off' : 'on';
@@ -215,24 +225,28 @@ function newDocId(name, exists) {
   return id;
 }
 
-async function api(method, path, body, signal) {
+async function api(method, path, body, signal, headers = {}) {
   const r = await fetch(path, {
     method,
     signal,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
+    headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || r.statusText);
+  if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { status: r.status, conflict: r.status === 409 });
+  if (api.onVersion && r.headers.get('X-Version')) api.onVersion(path, r.headers.get('X-Version'));
   return data;
 }
 
+const versions = new Map(); // document path -> version the server last told us about
+api.onVersion = (path, v) => versions.set(path, v);
 function serverStore(kind) {
   const base = `/api/${kind}`;
   return {
     list: () => api('GET', base),
     get: (id) => api('GET', `${base}/${encodeURIComponent(id)}`),
-    put: (id, d) => api('PUT', `${base}/${encodeURIComponent(id)}`, d),
+    // If-Match: refuse to overwrite a file another window changed since we loaded it
+    put: (id, d) => { const p = `${base}/${encodeURIComponent(id)}`; return api('PUT', p, d, undefined, versions.has(p) ? { 'If-Match': versions.get(p) } : {}); },
     create: async (d) => (await api('POST', base, { document: d })).id,
     remove: (id) => api('DELETE', `${base}/${encodeURIComponent(id)}`),
   };
@@ -438,7 +452,7 @@ function bodyIn(b) {
     body.mode = 'formdata';
     body.formdata = (Array.isArray(b.formdata) ? b.formdata : []).filter((x) => x && typeof x === 'object').map((x) => ({
       key: String(x.key ?? ''), value: x.type === 'file' ? '' : String(x.value ?? ''), type: x.type === 'file' ? 'file' : 'text',
-      src: Array.isArray(x.src) ? x.src.join(', ') : (x.src || ''), disabled: !!x.disabled, file: null,
+      src: Array.isArray(x.src) ? x.src.join(', ') : (x.src || ''), srcRaw: x.src, disabled: !!x.disabled, file: null,
     }));
   } else if (b.mode === 'file') {
     body.mode = 'file';
@@ -460,7 +474,7 @@ function bodyOut(b) {
     case 'formdata': return {
       mode: 'formdata',
       formdata: b.formdata.filter((r) => r.key || r.value || r.src || r.file).map((r) => (r.type === 'file'
-        ? { key: r.key, type: 'file', src: r.file ? r.file.name : r.src, ...(r.disabled ? { disabled: true } : {}) }
+        ? { key: r.key, type: 'file', src: r.file ? r.file.name : (r.srcRaw !== undefined && r.src === (Array.isArray(r.srcRaw) ? r.srcRaw.join(', ') : r.srcRaw) ? r.srcRaw : r.src), ...(r.disabled ? { disabled: true } : {}) }
         : { key: r.key, value: r.value, type: 'text', ...(r.disabled ? { disabled: true } : {}) })),
     };
     case 'file': return { mode: 'file', file: { src: b.fileObj ? b.fileObj.name : b.fileSrc } };
@@ -489,7 +503,8 @@ function urlIn(u) {
   if (!u) return { raw: '', disabled: [], pathVars: [] };
   if (typeof u === 'string') return { raw: u, disabled: [], pathVars: [] };
   const disabled = kvIn(u.query).filter((q) => q.disabled);
-  const pathVars = kvIn(u.variable);
+  const pathVars = (Array.isArray(u.variable) ? u.variable : []).filter((v) => v && typeof v === 'object')
+    .map((v) => ({ ...v, key: String(v.key ?? ''), value: v.value == null ? '' : String(v.value) })); // keep type/disabled/description
   if (u.raw) return { raw: String(u.raw), disabled, pathVars };
   const host = Array.isArray(u.host) ? u.host.join('.') : (u.host || '');
   const path = Array.isArray(u.path) ? u.path.join('/') : (u.path || '');
@@ -511,7 +526,7 @@ function urlOut(raw, params, pathVars = []) {
   if (path) out.path = path.split('/');
   const query = kvOut(params);
   if (query.length) out.query = query;
-  const variable = pathVars.filter((v) => v.key).map(({ key, value, description }) => ({ key, value, ...(description ? { description } : {}) }));
+  const variable = pathVars.filter((v) => v.key).map((v) => ({ ...v }));
   if (variable.length) out.variable = variable;
   return out;
 }
@@ -558,12 +573,13 @@ function blankEd() {
 function fromItem(item) {
   const req = typeof item.request === 'string' ? { url: item.request, method: 'GET' } : (item.request || {});
   const ed = blankEd();
-  ed.name = item.name || 'Untitled request';
+  ed.name = String(item.name ?? '') || 'Untitled request';
   const method = String(req.method || 'GET').toUpperCase();
   ed.method = /^[A-Z]{1,16}$/.test(method) ? method : 'GET'; // imported files are untrusted: no "GET; rm -rf ~"
   const u = urlIn(req.url);
   ed.url = u.raw;
-  ed.params = [...parseQuery(u.raw), ...u.disabled];
+  const described = (typeof req.url === 'object' && req.url ? kvIn(req.url.query) : []).filter((q) => !q.disabled && q.description);
+  ed.params = [...parseQuery(u.raw).map((p) => { const d = described.find((q) => q.key === p.key); return d ? { ...p, description: d.description } : p; }), ...u.disabled];
   ed.pathVars = syncPathVars(u.raw, u.pathVars);
   ed.headers = kvIn(req.header);
   ed.auth = authIn(req.auth);
@@ -579,7 +595,8 @@ function toItem(ed, orig = {}) {
   const auth = authOut(ed.auth);
   if (auth) req.auth = auth; else delete req.auth;
   const body = bodyOut(ed.body);
-  if (body) req.body = body; else delete req.body;
+  // keep fields ApiMan doesn't edit (options, disabled, ...) when the body type is unchanged
+  if (body) req.body = origReq.body && origReq.body.mode === body.mode ? { ...origReq.body, ...body } : body; else delete req.body;
   if (ed.docs) req.description = ed.docs; else delete req.description;
   const item = { ...orig, id: orig.id || uid(), name: ed.name || 'Untitled request', request: req, response: orig.response || [] };
   const ev = scriptsOut(orig.event, ed.pre, ed.test);
@@ -593,17 +610,21 @@ function edForStorage(ed) {
 }
 
 // ---------- collection tree helpers ----------
-function ensureIds(items) {
+function ensureIds(items, nested = false) {
+  if (!nested) ensureIds.seen = new Set();
   let changed = false;
   for (let i = items.length - 1; i >= 0; i--) {   // drop null/garbage entries from hand-edited files
     if (!items[i] || typeof items[i] !== 'object') { items.splice(i, 1); changed = true; }
   }
   for (const it of items) {
-    if (!it.id) { it.id = uid(); changed = true; }
-    if (Array.isArray(it.item)) changed = ensureIds(it.item) || changed;
+    if (!it.id || typeof it.id !== 'string' || ensureIds.seen.has(it.id)) { it.id = uid(); changed = true; } // duplicates would open/save the wrong item
+    ensureIds.seen.add(it.id);
+    if (it.name != null && typeof it.name !== 'string') { it.name = String(it.name); changed = true; }
+    if (Array.isArray(it.item)) changed = ensureIds(it.item, true) || changed;
   }
   return changed;
 }
+ensureIds.seen = new Set();
 function locate(col, id) {
   const walk = (items, parents) => {
     for (let i = 0; i < items.length; i++) {
@@ -960,7 +981,9 @@ function buildWire(ed, req, vars, authInfo) {
   const r = (s) => resolve(s, vars);
   let url = r(applyPathVars(req.url, ed.pathVars, r)).trim();
   if (url && !/^[a-z][\w+.-]*:\/\//i.test(url)) url = 'http://' + url;
-  const headers = req.headers.map(([k, v]) => [r(k).trim(), r(v)]).filter(([k]) => k);
+  const headers = req.headers.map(([k, v]) => [r(k).trim(), r(v)]).filter(([k]) => k)
+    // only one Host header may exist (the last wins, as on the wire), so checks and sending agree
+    .filter(([k], i, all) => k.toLowerCase() !== 'host' || all.slice(i + 1).every(([k2]) => k2.trim().toLowerCase() !== 'host'));
   const has = (n) => headers.some(([k]) => k.toLowerCase() === n);
   const checks = [url, ...headers.flat()];
   const auth = authInfo.auth;
@@ -1028,7 +1051,7 @@ function requestSnapshot(ed) {
 }
 
 /** Write script-made variable changes back to the environment / collection / globals. */
-async function persistScopes(cid, before, after, logs) {
+async function persistScopes(cid, before, after, logs, envId = state.activeEnv) {
   const sync = (values, b, a, mk) => {
     let changed = false;
     for (const [k, v] of Object.entries(a)) {
@@ -1044,9 +1067,8 @@ async function persistScopes(cid, before, after, logs) {
   };
   const envMk = (key, value) => ({ key, value, type: 'default', enabled: true });
 
-  if (state.activeEnv && state.envs[state.activeEnv]) {
-    const doc = state.envs[state.activeEnv];
-    if (sync(doc.values, before.environment, after.environment, envMk)) await backend.environments.put(state.activeEnv, doc);
+  if (envId && state.envs[envId]) {
+    await mutateDoc('environments', envId, (doc) => sync(doc.values, before.environment, after.environment, envMk));
   } else if (JSON.stringify(before.environment) !== JSON.stringify(after.environment)) {
     logs.push({ level: 'warn', text: 'pm.environment changes were ignored because no environment is selected.', src: 'ApiMan' });
   }
@@ -1083,16 +1105,25 @@ const approvedOrigins = new Set(); // "itemKey -> origin" pairs the user allowed
 async function urlVariableNames(extraPairs = []) {
   let complete = true;
   const urls = []; // { label, url, colId }
+  const hostHeaders = []; // Host header values also decide where a request lands on shared servers
+  const hostIn = (headers) => (Array.isArray(headers) ? headers : []).filter((x) => x && String(x.key || '').trim().toLowerCase() === 'host').map((x) => String(x.value ?? ''));
   for (const c of state.colList) {
     try {
       const col = await withCol(c.id);
-      eachRequest(col.item, (it) => urls.push({ label: `${c.name} / ${it.name || 'Untitled'}`, url: urlIn(it.request && it.request.url).raw, colId: c.id }));
-    } catch { complete = false; }
+      eachRequest(col.item, (it) => {
+        const rq = it.request && typeof it.request === 'object' ? it.request : {};
+        urls.push({ label: `${c.name} / ${String(it.name ?? '') || 'Untitled'}`, url: urlIn(rq.url).raw, colId: c.id });
+        hostHeaders.push(...hostIn(rq.header));
+      });
+    } catch (e) {
+      if (!/Not a Postman v2 collection/.test(e.message)) complete = false; // a stray non-collection .json isn't a gap
+    }
   }
-  for (const t of state.tabs) urls.push({ label: `${t.ed.name} (open tab)`, url: t.ed.url, colId: t.cid });
+  for (const t of state.tabs) { urls.push({ label: `${t.ed.name} (open tab)`, url: t.ed.url, colId: t.cid }); hostHeaders.push(...hostIn(t.ed.headers)); }
   const names = new Set();
   const add = (s) => { for (const m of String(s ?? '').matchAll(VAR_RE)) names.add(m[1]); };
   urls.forEach((u) => add(u.url));
+  hostHeaders.forEach(add);
   const pairs = [
     ...Object.values(state.envs).flatMap((d) => (d && d.values) || []),
     ...Object.values(state.cols).flatMap((c) => (c && c.variable) || []),
@@ -1155,10 +1186,12 @@ async function guardVarChanges(cid, ed, before, after, ask, logs) {
  * Runs the whole pipeline for an editor model. Used by Send (ask = confirm dialog) and by the
  * collection runner (ask = null: anything that needs approval is blocked).
  */
-async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true, ask = null }) {
+async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true, ask = null, runScopes = null }) {
   const logs = [], tests = [], warnings = [];
-  const before = scopesFor(cid);
+  const envId = state.activeEnv; // variable changes go to the environment that was active when the request started
+  const before = runScopes ? JSON.parse(JSON.stringify(runScopes)) : scopesFor(cid);
   let scopes = JSON.parse(JSON.stringify(before));
+  scopes.local = {};
   let req = requestSnapshot(ed);
   const plannedOrigin = originOf(resolve(ed.url, merged(before)));
   const preScripts = scriptChain(cid, itemId, ed, 'prerequest');
@@ -1187,7 +1220,7 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
   // A pre-request script may not silently send this request (and its auth) to a different server.
   const finalOrigin = originOf(wire.url);
   const approvalKey = `${cid || 'scratch'}:${itemId || ed.name} -> ${finalOrigin}`;
-  const hostOf = (hs) => ((hs.find(([k]) => k.toLowerCase() === 'host') || [])[1] || '').trim().toLowerCase();
+  const hostOf = (hs) => ((hs.filter(([k]) => k.toLowerCase() === 'host').pop() || [])[1] || '').trim().toLowerCase(); // the server sends the last one
   const plannedHost = hostOf(requestSnapshot(ed).headers.map(([k, v]) => [k, resolve(v, merged(before))]));
   const finalHost = hostOf(wire.headers);
   const hostChanged = preScripts.length > 0 && finalHost !== plannedHost; // shared servers route by Host
@@ -1212,7 +1245,7 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
   try {
     res = await backend.send(wire, signal);
   } catch (e) {
-    res = { error: backend.mode === 'local' ? `ApiMan's local server isn't reachable. Is "python3 server.py" still running? (${e.message})` : e.message };
+    res = { error: backend.mode === 'local' && e.name === 'TypeError' ? `ApiMan's local server isn't reachable. Is "python3 server.py" still running? (${e.message})` : e.message };
   }
   if (signal && signal.aborted) return { error: 'Request cancelled.', logs, tests, warnings, wire };
   if (res.redirectStripped && res.redirectStripped.length) {
@@ -1237,10 +1270,10 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
   if (persist) {
     try {
       scopes = await guardVarChanges(cid, ed, before, scopes, ask, logs);
-      await persistScopes(cid, before, scopes, logs);
+      await persistScopes(cid, before, scopes, logs, envId);
     } catch (e) { logs.push({ level: 'error', text: `Couldn't save variable changes: ${e.message}`, src: 'ApiMan' }); }
   }
-  return { res, wire, tests, logs, warnings, error: res.error || '' };
+  return { res, wire, tests, logs, warnings, error: res.error || '', scopes };
 }
 
 // =====================================================================================================
@@ -1253,7 +1286,28 @@ async function loadCol(id) {
   state.cols[id] = doc;
   return doc;
 }
-async function saveCol(id) { await backend.collections.put(id, state.cols[id]); }
+async function saveCol(id) {
+  try {
+    await backend.collections.put(id, state.cols[id]);
+  } catch (e) {
+    if (!e.conflict) throw e;
+    await loadCol(id); // show the other window's version; the user's edit stays in its (still unsaved) tab
+    renderSidebar();
+    throw new Error('This collection was changed in another window, so ApiMan reloaded it. Save again to apply your change on top.');
+  }
+}
+/** Change a stored environment/collection and save it; if another window saved first, reload and re-apply once. */
+async function mutateDoc(kind, id, mutate) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const doc = kind === 'environments' ? state.envs[id] : state.cols[id];
+    if (!doc || !mutate(doc)) return;
+    try { await backend[kind].put(id, doc); return; } catch (e) {
+      if (!e.conflict || attempt) throw e;
+      const fresh = await backend[kind].get(id);
+      if (kind === 'environments') state.envs[id] = fresh; else { ensureIds(fresh.item); state.cols[id] = fresh; }
+    }
+  }
+}
 
 async function refreshCollections() {
   state.colList = await backend.collections.list();
@@ -1346,8 +1400,8 @@ function askSaveBeforeClose(t) {
         { label: 'Save', primary: true, onClick: () => { finish('save'); return true; } },
       ],
       onClose: () => finish('cancel'),
+      focus: '#dlgFoot .btn.primary',
     });
-    $('#dlgFoot .btn.primary').focus();
   });
 }
 
@@ -1394,7 +1448,8 @@ async function restoreTabs() {
         if (!loc) continue;
         state.tabs.push(newTab({ cid: s.cid, itemId: s.itemId, ed: s.ed ? { ...blankEd(), ...s.ed, body: { ...blankBody(), ...s.ed.body } } : fromItem(loc.item), dirty: !!s.ed }));
       } else if (s.ed) {
-        state.tabs.push(newTab({ ed: { ...blankEd(), ...s.ed, body: { ...blankBody(), ...s.ed.body } }, dirty: false }));
+        const ed = { ...blankEd(), ...s.ed, body: { ...blankBody(), ...s.ed.body } };
+        state.tabs.push(newTab({ ed, dirty: !!(ed.url || ed.headers.length || ed.body.mode !== 'none' || ed.pre || ed.test) }));
       }
     } catch { /* skip broken entries */ }
   }
@@ -1439,7 +1494,7 @@ function iconBtn(name, title, onclick) {
 const matches = (it) => {
   const f = state.filter;
   if (!f) return true;
-  if ((it.name || '').toLowerCase().includes(f)) return true;
+  if (String(it.name ?? '').toLowerCase().includes(f)) return true;
   return urlIn(it.request && it.request.url).raw.toLowerCase().includes(f);
 };
 
@@ -1819,7 +1874,7 @@ function renderTabs() {
       const cable = { GET: '--get', POST: '--post', PUT: '--put', PATCH: '--patch', DELETE: '--delete' }[t.ed.method] || '--other';
       return h('div', {
         class: `rtab ${i === state.active ? 'on' : ''}`, role: 'tab', tabindex: '0', 'aria-selected': String(i === state.active),
-        style: `--cable: var(${cable})`, title: t.ed.url || t.ed.name,
+        style: `--cable: var(${cable})`, title: `${t.ed.name}${t.ed.url ? `\n${t.ed.method} ${t.ed.url}` : ''}`,
         onclick: () => { state.active = i; persistTabs(); renderAll(); },
         onauxclick: (e) => { if (e.button === 1) closeTab(i); },
         onkeydown: (e) => { if (e.key === 'Enter') { state.active = i; renderAll(); } },
@@ -1861,7 +1916,7 @@ function renderWelcome() {
       h('button', { class: 'btn primary', 'data-act': 'new-request' }, 'New request'),
       h('button', { class: 'btn', 'data-act': 'import' }, 'Import collection'),
       h('button', { class: 'btn', 'data-act': 'import-curl' }, 'Paste cURL')),
-    h('p', { class: 'hint shortcuts empty-state' }, h('span', null, kbd('/'), ' filter requests, ', kbd('Ctrl'), ' / ', kbd('⌘'), ' + ', kbd('Enter'), ' send, ', kbd('Ctrl'), ' / ', kbd('⌘'), ' + ', kbd('S'), ' save')),
+    h('p', { class: 'hint shortcuts empty-state' }, h('span', null, kbd('/'), ' filter requests, ', kbd(MOD), ' + ', kbd('Enter'), ' send, ', kbd(MOD), ' + ', kbd('S'), ' save, ', kbd(MOD), ' + ', kbd('B'), ' sidebar')),
     cols.length ? h('div', { class: 'welcome-cols' }, ...cols) : null);
 }
 
@@ -1872,7 +1927,9 @@ function renderEditor() {
   if (!t) { renderWelcome(); return; }
   const ed = t.ed;
   $('#reqName').value = ed.name;
-  $('#method').value = METHODS.includes(ed.method) ? ed.method : 'GET';
+  const sel = $('#method');
+  if (![...sel.options].some((o) => o.value === ed.method)) sel.append(h('option', { value: ed.method }, ed.method));
+  sel.value = ed.method;
   $('#reqbar').dataset.method = ed.method;
   if ($('#url').value !== ed.url) $('#url').value = ed.url;
   $('#dirtyDot').hidden = !t.dirty;
@@ -2015,11 +2072,13 @@ function renderParams() {
   if (!t.ed.pathVars.length) pv.replaceChildren();
   else {
     pv.replaceChildren(h('div', { class: 'label section-label' }, 'Path variables'),
-      h('table', { class: 'kv' }, h('thead', null, h('tr', null, h('th', null, 'Variable'), h('th', null, 'Value'))),
+      h('table', { class: 'kv kv-path' }, h('thead', null, h('tr', null, h('th', { class: 'chk' }), h('th', null, 'Path variable'), h('th', null, 'Value'), h('th', { class: 'act' }))),
         h('tbody', null, t.ed.pathVars.map((v) => h('tr', null,
+          h('td', { class: 'chk' }),
           h('td', null, h('input', { type: 'text', value: `:${v.key}`, readonly: true, tabindex: '-1', 'aria-label': 'Path variable' })),
           h('td', null, h('input', { type: 'text', value: v.value, placeholder: 'Value', spellcheck: 'false', 'aria-label': `Value for :${v.key}`,
-            oninput: (e) => { v.value = e.target.value; markDirty(); } })))))));
+            oninput: (e) => { v.value = e.target.value; markDirty(); } })),
+          h('td', { class: 'act' }))))));
   }
   kvTable($('#paramsKv'), t.ed.params, {
     placeholders: ['Query parameter', 'Value'],
@@ -2040,7 +2099,7 @@ function renderHeaders() {
 
 /** Shared auth form, used for requests, folders and collections. */
 function authForm(model, { allowInherit, inheritText, onChange }) {
-  const wrap = h('div');
+  const wrap = h('div', { class: 'auth-form' });
   const draw = () => {
     const field = (label, key, { secret, placeholder } = {}) => {
       let reveal = false;
@@ -2175,6 +2234,13 @@ function codeEditor({ value = '', mode = 'text', readOnly = false, onChange, pla
     },
   });
   if (onChange) cm.on('change', (c, ch) => { if (ch.origin !== 'setValue') onChange(c.getValue()); });
+  cm.on('renderLine', (c, line, el) => { // wrapped continuation lines line up under their first character
+    if (!c.getOption('lineWrapping')) return;
+    const off = CodeMirror.countColumn(line.text, null, c.getOption('tabSize')) * c.defaultCharWidth();
+    if (!off) return;
+    el.style.textIndent = `-${off}px`;
+    el.style.paddingLeft = `${12 + off}px`;
+  });
   host.cm = cm;
   requestAnimationFrame(() => cm.refresh());
   return host;
@@ -2245,16 +2311,17 @@ function renderResponse() {
     $('#respBody').replaceChildren(h('div', { class: 'empty-state' }, t.sending
       ? h('p', { class: 'hint' }, `Waiting for the response to ${t.ed.method} ${t.ed.url || 'this request'}…`)
       : [h('p', { class: 'hint' }, 'Send the request to see its response here.'),
-        h('p', { class: 'hint' }, h('kbd', null, 'Ctrl'), ' / ', h('kbd', null, '⌘'), ' + ', h('kbd', null, 'Enter'), ' sends, ',
-          h('kbd', null, 'Ctrl'), ' / ', h('kbd', null, '⌘'), ' + ', h('kbd', null, 'S'), ' saves.')]));
+        h('p', { class: 'hint' }, h('kbd', null, MOD), ' + ', h('kbd', null, 'Enter'), ' sends, ',
+          h('kbd', null, MOD), ' + ', h('kbd', null, 'S'), ' saves, ', h('kbd', null, MOD), ' + ', h('kbd', null, 'F'), ' searches a response.')]));
     return;
   }
   const res = out.res;
   const hasRes = res && !out.error;
   status.replaceChildren(...(hasRes ? [
-    h('span', { title: 'Status' }, h('span', { class: `status-code s${String(res.status)[0]}` }, `${res.status} ${res.reason || REASONS[res.status] || ''}`.trim())),
-    h('span', { title: 'Time' }, h('b', null, fmtMs(res.timeMs))),
-    h('span', { title: 'Size' }, h('b', null, fmtSize(res.size)), res.truncated ? ' (truncated)' : ''),
+    h('span', { title: `Status ${res.status} ${res.reason || REASONS[res.status] || ''}` }, h('span', { class: `status-code s${String(res.status)[0]}` }, String(res.status),
+      h('span', { class: 'm-reason' }, ` ${res.reason || REASONS[res.status] || ''}`))),
+    h('span', { class: 'm-time', title: 'Time' }, h('b', null, fmtMs(res.timeMs))),
+    h('span', { class: 'm-size', title: 'Size' }, h('b', null, fmtSize(res.size)), res.truncated ? ' (truncated)' : ''),
     ...(out.wire && res.finalUrl && res.finalUrl !== out.wire.url ? [h('span', { class: 'pill', title: res.finalUrl }, 'Redirected')] : []),
   ] : [h('span', { class: 'status-code s-err' }, 'Error')]));
   const notes = [
@@ -2330,7 +2397,7 @@ function bodyView(res, view) {
   const langOf = () => (/json/.test(ct) ? 'json' : /html/.test(ct) ? 'html' : /xml|svg/.test(ct) ? 'xml' : /javascript/.test(ct) ? 'javascript' : 'text');
   if (view === 'pretty') {
     try {
-      const pretty = JSON.stringify(JSON.parse(text), null, 2);
+      const pretty = JSON.stringify(JSON.parse(text), null, Number(state.settings.tabSize) || 2);
       if (pretty.length > 2_000_000) return h('pre', { class: 'out' }, pretty); // keep very large bodies fast
       return codeEditor({ value: pretty, mode: 'json', readOnly: true, fold: true, wrap, label: 'Response body', cls: 'fill' });
     } catch { /* not JSON: show as-is below */ }
@@ -2469,7 +2536,14 @@ async function saveAs() {
 // =====================================================================================================
 // Dialogs
 // =====================================================================================================
-function openDialog({ title, body, buttons = [], wide = false, confirm = false, tall = false, cancel = 'Cancel', onClose }) {
+const dialogQueue = [];
+let dialogOnClose = null;
+/** Opens the dialog, or queues it if one is already open, so a background prompt never replaces your open dialog. */
+function openDialog(opts) {
+  if ($('#dlg').open) { dialogQueue.push(opts); return; }
+  renderDialog(opts);
+}
+function renderDialog({ title, body, buttons = [], wide = false, confirm = false, tall = false, cancel = 'Cancel', onClose, focus, onOpen }) {
   const dlg = $('#dlg');
   dlg.classList.toggle('wide', wide);
   dlg.classList.toggle('confirm', confirm);
@@ -2491,12 +2565,14 @@ function openDialog({ title, body, buttons = [], wide = false, confirm = false, 
       try { if (await b.onClick()) dlg.close(); } catch (err) { toast(err.message); } finally { btn.disabled = false; }
     },
   }, b.label)));
-  dlg.onclose = () => { if (onClose) onClose(); };
+  dialogOnClose = onClose || null;
   if (!dlg.open) dlg.showModal();
-  // Start on the first field, not on the close button.
+  // Start on the first field, not on the close button (or on what the dialog asks for).
   const first = $('#dlgBody').querySelector('input:not([type=checkbox]):not([type=file]):not([type=range]):not([disabled]):not([readonly]), select, textarea');
-  if (first) first.focus();
-  else ($('#dlgFoot .btn.primary') || $('#dlgFoot .btn:last-child') || $('#dlg')).focus();
+  if (focus) ($(focus) || dlg).focus();
+  else if (first) first.focus();
+  else ($('#dlgFoot .btn.primary') || $('#dlgFoot .btn:last-child') || dlg).focus();
+  if (onOpen) onOpen();
 }
 function closeDialog() { $('#dlg').close(); }
 
@@ -2524,9 +2600,10 @@ function ask({ title, message, input, ok = 'OK', danger = false, pre = false }) 
         { label: ok, primary: !danger, danger, solid: danger, onClick: submit },
       ],
       onClose: () => settle(field ? null : false),
+      // Enter never confirms something destructive: focus Cancel for danger prompts
+      focus: field ? null : (danger ? '#dlgFoot .btn:first-child' : '#dlgFoot .btn:last-child'),
+      onOpen: () => { if (field) field.select(); },
     });
-    if (field) field.select();
-    else $(danger ? '#dlgFoot .btn:first-child' : '#dlgFoot .btn:last-child').focus(); // Enter never confirms something destructive
   });
 }
 
@@ -2541,7 +2618,7 @@ function linkLabels(root) {
   }
 }
 
-function dlgTabs(defs) {
+function dlgTabs(defs, onChange) {
   const bar = h('div', { class: 'seg dlg-tabs', role: 'tablist' });
   const panes = defs.map((d) => h('div', { 'data-pane': d.key, hidden: d !== defs[0] }, d.content));
   defs.forEach((d, i) => bar.append(h('button', {
@@ -2549,6 +2626,7 @@ function dlgTabs(defs) {
     onclick: (e) => {
       $$('.seg-btn', bar).forEach((b) => { const on = b === e.currentTarget; b.classList.toggle('on', on); b.setAttribute('aria-selected', String(on)); });
       panes.forEach((p) => { p.hidden = p.dataset.pane !== d.key; if (!p.hidden) refreshEditors(p); });
+      if (onChange) onChange(d.key);
     },
   }, d.label)));
   return [bar, ...panes];
@@ -2589,6 +2667,7 @@ async function editContainer(cid, folderId) {
   openDialog({
     title: isCol ? 'Collection settings' : 'Folder settings',
     wide: true,
+    tall: true,
     body: [h('div', { class: 'field' }, h('label', null, 'Name'), nameIn), ...dlgTabs(defs)],
     buttons: [{ label: 'Save', primary: true, onClick: async () => {
       const auth = authOut(model.auth);
@@ -2732,9 +2811,19 @@ function openImport(start = 'file') {
       try { await importJson(JSON.parse(pasteIn.value), 'pasted JSON'); closeDialog(); } catch (e) { toast(e.message); }
     } }, 'Import'))] },
   ];
-  const tabsAndPanes = dlgTabs(defs);
+  let activeKey = 'file';
+  const updateImport = () => {
+    const btn = $('#dlgFoot .btn.primary');
+    if (!btn) return;
+    const ready = activeKey === 'curl' ? curlIn.value.trim() : activeKey === 'paste' ? pasteIn.value.trim() : '';
+    btn.disabled = !ready;
+    btn.title = activeKey === 'file' ? 'Choose or drop files above; they import right away.' : '';
+  };
+  curlIn.addEventListener('input', updateImport);
+  pasteIn.addEventListener('input', updateImport);
+  const tabsAndPanes = dlgTabs(defs, (k) => { activeKey = k; updateImport(); });
   openDialog({
-    title: 'Import', tall: true, body: tabsAndPanes,
+    title: 'Import', body: tabsAndPanes, onOpen: updateImport,
     buttons: [{ label: 'Import', primary: true, onClick: () => {
       const active = [...tabsAndPanes[0].children].findIndex((b) => b.classList.contains('on'));
       if (active === 0) fileIn.click();
@@ -2926,6 +3015,7 @@ function codeWire(mask) {
     if (a.type === 'bearer') addSecret(resolve(a.token, vars));
     if (a.type === 'basic') addSecret(resolve(a.password, vars));
     if (a.type === 'apikey') addSecret(resolve(a.value, vars));
+    for (const sec of [...secrets]) { secrets.add(encodeURIComponent(sec)); secrets.add(new URLSearchParams({ x: sec }).toString().slice(2)); }
     const hide = (str) => [...secrets].sort((x, y) => y.length - x.length).reduce((acc, sec) => acc.split(sec).join('••••••'), String(str));
     w.url = hide(w.url);
     w.headers = w.headers.map(([k, v]) => [k, hide(v)]);
@@ -3035,7 +3125,7 @@ async function openRunner(cid, folderId) {
   const iterIn = h('input', { type: 'number', min: '1', max: '1000', value: '1' });
   const delayIn = h('input', { type: 'number', min: '0', max: '60000', value: '0' });
   const stopOnFail = h('input', { type: 'checkbox' });
-  const keepVars = h('input', { type: 'checkbox', checked: true });
+  const keepVars = h('input', { type: 'checkbox' }); // opt-in: a run doesn't rewrite your files unless you ask
   for (const c of state.colList) colSel.append(h('option', { value: c.id, ...(c.id === (cid || (cur() && cur().cid)) ? { selected: true } : {}) }, c.name));
   const fillFolders = () => {
     const col = state.cols[colSel.value];
@@ -3055,6 +3145,7 @@ async function openRunner(cid, folderId) {
 
   openDialog({
     title: 'Collection runner',
+    cancel: 'Close',
     wide: true,
     body: [
       h('div', { class: 'grid-2' }, h('div', { class: 'field' }, h('label', null, 'Collection'), colSel), h('div', { class: 'field' }, h('label', null, 'Folder'), folderSel)),
@@ -3067,7 +3158,7 @@ async function openRunner(cid, folderId) {
     // Not awaited, so the button stays clickable as "Stop" while the run is in progress.
     buttons: [{ label: 'Run', primary: true, onClick: () => {
       if (ctrl) { ctrl.abort(); return false; }
-      run().catch((e) => { toast(e.message); ctrl = null; });
+      run().catch((e) => { toast(e.message); ctrl = null; const b = $('#dlgFoot .btn.primary'); if (b) b.textContent = 'Run again'; });
       return false;
     } }],
   });
@@ -3087,13 +3178,16 @@ async function openRunner(cid, folderId) {
       results.hidden = false;
       tbody.replaceChildren();
       let n = 0, pass = 0, fail = 0, errors = 0, totalMs = 0, ok = 0, c4 = 0, c5 = 0;
+      let runScopes = scopesFor(runCid);
       const total = items.length * iterations;
       const started = performance.now();
       outer: for (let it = 0; it < iterations; it++) {
         for (const item of items) {
           if (ctrl.signal.aborted) break outer;
           const ed = fromItem(item);
-          const out = await execute({ ed, cid: runCid, itemId: item.id, iteration: it, signal: ctrl.signal, persist: keepVars.checked });
+          // Values set by scripts carry through the whole run (like Postman), saved or not.
+          const out = await execute({ ed, cid: runCid, itemId: item.id, iteration: it, signal: ctrl.signal, persist: keepVars.checked, runScopes: keepVars.checked ? null : runScopes });
+          if (!keepVars.checked && out.scopes) runScopes = out.scopes;
           n++;
           const tp = out.tests.filter((x) => x.passed === true).length;
           const tf = out.tests.filter((x) => x.passed === false).length;
@@ -3121,7 +3215,7 @@ async function openRunner(cid, folderId) {
             h('span', null, 'Tests: ', h('span', { class: `big ${pass ? 'pass' : 'zero'}` }, `${pass} passed`), ' ', h('span', { class: `big ${fail ? 'fail' : 'zero'}` }, `${fail} failed`)),
             h('span', null, `Average ${n - errors ? fmtMs(Math.round(totalMs / Math.max(1, n - errors))) : '–'}`));
           if (stopOnFail.checked && (tf || out.error)) break outer;
-          if (delay) await new Promise((r) => setTimeout(r, delay));
+          if (delay) await new Promise((r) => { const tm = setTimeout(r, delay); ctrl.signal.addEventListener('abort', () => { clearTimeout(tm); r(); }, { once: true }); });
         }
       }
       summary.append(h('span', null, `${ctrl.signal.aborted ? 'Stopped' : 'Finished'} in ${fmtMs(Math.round(performance.now() - started))}`));
@@ -3133,9 +3227,9 @@ async function openRunner(cid, folderId) {
 }
 
 // ---------- settings ----------
-function openSettings() {
+function openSettings(initial = null) {
   const s = state.settings;
-  const draft = { ...s };
+  const draft = { ...s, ...(initial || {}) };
   let saved = false;
   const preview = () => { applyAppearance(draft); };
   const seg = (key, options, label) => {
@@ -3166,6 +3260,13 @@ function openSettings() {
     h('select', { onchange: (e) => { draft[key] = e.target.value; preview(); } },
       ...Object.entries(options).map(([v, [l]]) => h('option', { value: v, ...(draft[key] === v ? { selected: true } : {}) }, l))));
   if (draft.densityScale == null) draft.densityScale = DENSITY[draft.density] || 1;
+  if (initial) setTimeout(() => { if (initial.theme === 'light' || initial.theme === 'dark') document.documentElement.dataset.theme = initial.theme; else delete document.documentElement.dataset.theme; applyAppearance(draft); }, 0);
+  // exact panel sizes (applied immediately, like dragging)
+  const sz = initResizers.sizes();
+  const sideNum = h('input', { type: 'number', class: 'num-input', min: '180', max: '640', step: '1', value: String(sz.side), 'aria-label': 'Sidebar width in pixels',
+    onchange: (e) => { initResizers.setSide(Number(e.target.value)); e.target.value = String(initResizers.sizes().side); } });
+  const splitNum = h('input', { type: 'number', class: 'num-input', min: '15', max: '85', step: '0.5', value: String(sz.split), 'aria-label': 'Request pane share in percent',
+    onchange: (e) => { initResizers.setSplit(Number(e.target.value)); e.target.value = String(initResizers.sizes().split); } });
   const swatches = h('div', { class: 'swatches', role: 'radiogroup', 'aria-label': 'Accent colour' });
   const custom = h('input', { type: 'color', value: draft.accentCustom || '#2560cf', 'aria-label': 'Custom accent colour', title: 'Custom colour',
     oninput: (e) => { draft.accent = 'custom'; draft.accentCustom = e.target.value; drawSwatches(); preview(); } });
@@ -3197,8 +3298,11 @@ function openSettings() {
     h('div', { class: 'grid-2 desktop-only' },
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Request and response'), seg('layout', [['auto', 'Side by side'], ['stacked', 'Stacked']], 'Layout')),
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Sidebar'), seg('sidePosition', [['left', 'Left'], ['right', 'Right']], 'Sidebar position'))),
+    h('div', { class: 'grid-2 desktop-only' },
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Sidebar width'), h('div', { class: 'slider-row' }, sideNum, h('span', { class: 'unit' }, 'px'))),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Request pane share'), h('div', { class: 'slider-row' }, splitNum, h('span', { class: 'unit' }, '%')))),
     h('div', { class: 'field-row desktop-only' },
-      h('button', { type: 'button', class: 'btn small', onclick: () => { initResizers.reset(); toast('Panel sizes reset'); } }, 'Reset panel sizes'),
+      h('button', { type: 'button', class: 'btn small', onclick: () => { initResizers.reset(); const z = initResizers.sizes(); sideNum.value = String(z.side); splitNum.value = String(z.split); toast('Panel sizes reset'); } }, 'Reset panel sizes'),
       h('span', { class: 'hint' }, 'Drag the lines between panels to resize them (sizes show while dragging). Double-click a line to reset it. Cmd/Ctrl+B hides the sidebar.')),
   ];
   const requests = [
@@ -3217,11 +3321,11 @@ function openSettings() {
     onClose: () => { if (!saved) { applyTheme(); applyAppearance(); } }, // closing without saving undoes the preview
     buttons: [
       { label: 'Restore defaults', left: true, onClick: () => {
-        Object.assign(draft, { theme: DEFAULT_SETTINGS.theme, textScale: 1, codeSize: 13, density: 'comfortable', densityScale: 1, layout: 'auto', wrap: true,
-          lineHeight: 1.6, tabSize: 2, uiFont: 'geist', codeFont: 'geist-mono', accent: 'blue', sidePosition: 'left', sideHidden: false });
-        Object.assign(s, draft); saveSettings(); saved = true; applyTheme(); applyAppearance(); closeDialog(); openSettings();
-        toast('Appearance restored to defaults');
-        return false;
+        // Only the form is reset and previewed; nothing is stored until Save, and Cancel brings everything back.
+        const defaults = { ...draft, theme: DEFAULT_SETTINGS.theme, textScale: 1, codeSize: 13, density: 'comfortable', densityScale: 1, layout: 'auto', wrap: true,
+          lineHeight: 1.6, tabSize: 2, uiFont: 'geist', codeFont: 'geist-mono', accent: 'blue', sidePosition: 'left', sideHidden: false };
+        setTimeout(() => { openSettings(defaults); toast('Defaults loaded. Save to keep them, or Cancel to go back.'); }, 0);
+        return true;
       } },
       { label: 'Save', primary: true, onClick: () => {
         Object.assign(s, {
@@ -3268,7 +3372,10 @@ function bindEditor() {
       try {
         const parsed = parseCurl(text);
         const t = cur();
-        Object.assign(t.ed, { ...parsed, name: t.ed.name === 'Untitled request' ? parsed.name : t.ed.name });
+        Object.assign(t.ed, { method: parsed.method, url: parsed.url, params: parsed.params, headers: parsed.headers, body: parsed.body,
+          ...(parsed.auth.type !== 'inherit' ? { auth: parsed.auth } : {}),
+          name: t.ed.name === 'Untitled request' ? parsed.name : t.ed.name,
+          pathVars: syncPathVars(parsed.url, t.ed.pathVars || []) });
         markDirty();
         renderEditor();
         toast('Filled in from the pasted cURL command');
@@ -3305,6 +3412,10 @@ function bindEditor() {
     navigator.clipboard.writeText(text).then(() => toast('Response copied'), () => toast('Copy failed'));
   });
   $('#btnSaveBody').addEventListener('click', saveBody);
+  $('#btnFindBody').addEventListener('click', () => {
+    const el = $('#respBody .CodeMirror');
+    if (el && el.CodeMirror) { el.CodeMirror.focus(); el.CodeMirror.execCommand('findPersistent'); }
+  });
   $$('#editor [data-script]').forEach((c) => c.addEventListener('click', () => { cur().scriptKind = c.dataset.script; renderScripts(); }));
 
   $('#btnSnippets').addEventListener('click', (e) => {
@@ -3364,6 +3475,7 @@ function bindChrome() {
   document.addEventListener('keydown', (e) => {
     const mod = e.metaKey || e.ctrlKey;
     if (e.key === 'Escape' && !$('#popover').hidden) { hideMenu(); return; }
+    if ($('#dlg').open) return; // never send/save the request behind a dialog
     if (mod && e.key === 'Enter') { e.preventDefault(); if (cur()) send(); return; }
     if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); if (cur()) save().catch((err) => toast(err.message)); return; }
     if (mod && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSidebar(); return; }
@@ -3413,7 +3525,7 @@ function initResizers() {
   const root = document.documentElement;
   const layout = ls.get('apiman:layout', {});
   const save = (k, v) => { layout[k] = v; ls.set('apiman:layout', layout); };
-  const stacked = () => document.documentElement.dataset.layout === 'stacked' || matchMedia('(max-width: 1180px)').matches;
+  const stacked = () => document.documentElement.dataset.layout === 'stacked' || matchMedia('(max-width: 1180px)').matches || $('.work').clientWidth <= 760;
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const side = $('#sideResizer'), split = $('#splitResizer');
   const setSideW = (px, persist = true) => {
@@ -3474,18 +3586,21 @@ function initResizers() {
   side.addEventListener('keydown', (e) => {
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     e.preventDefault();
-    setSideW(Number(side.dataset.now) + (e.key === 'ArrowRight' ? 16 : -16));
+    setSideW(Number(side.dataset.now) + (e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 16 : 1));
   });
   split.addEventListener('keydown', (e) => {
     const [less, more] = stacked() ? ['ArrowUp', 'ArrowDown'] : ['ArrowLeft', 'ArrowRight'];
     if (e.key !== less && e.key !== more) return;
     e.preventDefault();
-    setSplit(Number(split.dataset.now) + (e.key === more ? 2 : -2));
+    setSplit(Number(split.dataset.now) + (e.key === more ? 1 : -1) * (e.shiftKey ? 5 : 0.5));
   });
   side.addEventListener('dblclick', () => setSideW(288));   // double-click resets
   split.addEventListener('dblclick', () => setSplit(50));
   side.title = split.title = 'Drag to resize, double-click to reset';
   initResizers.refresh = () => setSplit((stacked() ? layout.reqH : layout.req) || 50, false);
+  initResizers.setSide = (px) => setSideW(px);
+  initResizers.setSplit = (pct) => setSplit(pct);
+  initResizers.sizes = () => ({ side: Number(side.dataset.now), split: Number(split.dataset.now) });
   initResizers.reset = () => { setSideW(288); layout.req = 50; layout.reqH = 50; ls.set('apiman:layout', layout); root.style.setProperty('--req-w', '50%'); root.style.setProperty('--req-h', '50%'); setSplit(50); };
 }
 
@@ -3510,7 +3625,7 @@ async function start() {
     el.addEventListener('scroll', update, { passive: true });
     update();
   };
-  ['#reqTabs', '#respTabs', '.side .seg.block'].forEach((sel) => watchOverflow($(sel)));
+  ['#reqTabs > .seg', '#respTabs > .seg', '.side .seg.block'].forEach((sel) => watchOverflow($(sel)));
   // Sidebar tree keyboard: Up/Down move, Right/Left open/close, Space activates (Enter is handled per row).
   $('#sideBody').addEventListener('focusin', (e) => {
     const row = e.target.closest('.row');
@@ -3542,6 +3657,35 @@ async function start() {
       if (more) { e.preventDefault(); more.click(); }
     }
   });
+  document.addEventListener('keydown', (e) => {
+    const tab = e.target.closest && e.target.closest('[role="tab"]');
+    if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    const list = tab.closest('[role="tablist"]');
+    const tabs = $$('[role="tab"]', list).filter((t) => t.closest('[role="tablist"]') === list && !t.hidden);
+    const i = tabs.indexOf(tab);
+    const next = e.key === 'Home' ? tabs[0] : e.key === 'End' ? tabs[tabs.length - 1] : tabs[(i + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
+    if (!next) return;
+    e.preventDefault();
+    const listId = list.id;
+    next.click();
+    // some lists re-render on switch (the open-request strip): focus the newly selected tab in the fresh DOM
+    const live = next.isConnected ? next : (listId && $(`#${listId} [role="tab"][aria-selected="true"]`));
+    if (live) live.focus();
+  });
+  const rovingTabs = () => $$('[role="tablist"]').forEach((list) => {
+    const tabs = $$('[role="tab"]', list).filter((t) => t.closest('[role="tablist"]') === list);
+    const on = tabs.find((t) => t.getAttribute('aria-selected') === 'true') || tabs[0];
+    tabs.forEach((t) => { t.tabIndex = t === on ? 0 : -1; });
+  });
+  new MutationObserver(rovingTabs).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['aria-selected'], childList: true });
+  rovingTabs();
+  // Maximised pane: Escape restores both panes.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || $('#dlg').open || !$('.split').dataset.max) return;
+    if (e.target.closest && e.target.closest('.CodeMirror')) return; // Esc there leaves the editor first
+    const btn = $(`.pane-max[data-max="${$('.split').dataset.max}"]`);
+    if (btn) btn.click();
+  });
   // Menus: Up/Down between items, Escape closes and returns focus.
   $('#popover').addEventListener('keydown', (e) => {
     const items = $$('#popover .mi');
@@ -3551,6 +3695,12 @@ async function start() {
       const next = items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length];
       if (next) next.focus();
     } else if (e.key === 'Escape') { e.preventDefault(); hideMenu(true); }
+  });
+  $('#dlg').addEventListener('close', () => {
+    const cb = dialogOnClose;
+    dialogOnClose = null;
+    if (cb) cb();
+    if (dialogQueue.length) setTimeout(() => { if (!$('#dlg').open && dialogQueue.length) renderDialog(dialogQueue.shift()); }, 0);
   });
   // Enter inside a dialog field must not submit (and close) the dialog; only the ✕ button closes it.
   $('#dlg form').addEventListener('submit', (e) => { if (!e.submitter || e.submitter.value !== 'cancel') e.preventDefault(); });
@@ -3573,7 +3723,9 @@ async function start() {
     badge.className = 'pill';
     badge.title = 'Requests are sent by this browser, so the API must allow CORS. Run ApiMan locally to call any API.';
     state.settings.insecure = false;
-    $('#dataDir').textContent = 'Saved in this browser.';
+    $('#dataDir').textContent = /\.github\.io$/.test(location.hostname)
+      ? `Saved in this browser. Note: every site on ${location.hostname} can read this browser storage, so keep real secrets in local mode (python3 server.py) or a folder.`
+      : 'Saved in this browser.';
     if (window.showDirectoryPicker) {
       const btn = $('#btnFolder');
       btn.hidden = false;
