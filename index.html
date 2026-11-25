@@ -3,1020 +3,169 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>ApiMan</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%232f6fdf'/><path d='M4 8h8M9 5l3 3-3 3' stroke='white' stroke-width='1.6' fill='none'/></svg>">
-<style>
-  :root {
-    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f5; --line: #dde1e7; --text: #1b1f24; --muted: #667080;
-    --accent: #2f6fdf; --accent-text: #ffffff; --ok: #1a7f37; --warn: #9a6700; --err: #cf222e;
-    --get: #1a7f37; --post: #9a6700; --put: #2f6fdf; --patch: #8250df; --delete: #cf222e;
-    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0f1115; --panel: #161a20; --panel-2: #1d222a; --line: #2a313b; --text: #e6e9ee; --muted: #8b95a5;
-      --accent: #4c8dff; --ok: #3fb950; --warn: #d29922; --err: #f85149;
-      --get: #3fb950; --post: #d29922; --put: #4c8dff; --patch: #a371f7; --delete: #f85149;
-    }
-  }
-  * { box-sizing: border-box; }
-  [hidden] { display: none !important; }
-  html, body { height: 100%; margin: 0; }
-  body { background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  button, input, select, textarea { font: inherit; color: inherit; }
-  input, select, textarea {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; min-width: 0;
-  }
-  input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  button {
-    background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer;
-  }
-  button:hover { border-color: var(--muted); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
-  button.icon { padding: 2px 6px; background: transparent; border-color: transparent; color: var(--muted); }
-  button.icon:hover { color: var(--text); border-color: var(--line); }
-
-  .app { display: grid; grid-template-columns: 300px 1fr; grid-template-rows: auto 1fr; height: 100vh; }
-  header {
-    grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding: 8px 16px;
-    background: var(--panel); border-bottom: 1px solid var(--line);
-  }
-  header h1 { font-size: 15px; margin: 0 12px 0 0; }
-  header .spacer { flex: 1; }
-  header label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
-
-  aside { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
-  #tree { flex: 1; overflow: auto; padding: 6px 0; }
-  .row { display: flex; align-items: center; gap: 6px; padding: 4px 8px; cursor: pointer; white-space: nowrap; }
-  .row:hover { background: var(--panel-2); }
-  .row.active { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
-  .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-  .row .actions { display: none; }
-  .row:hover .actions, .row.active .actions { display: flex; }
-  .row.col { font-weight: 600; }
-  .caret { width: 12px; color: var(--muted); font-size: 10px; }
-  .m { font: 600 10px var(--mono); width: 44px; text-align: right; }
-  .m.GET { color: var(--get); } .m.POST { color: var(--post); } .m.PUT { color: var(--put); }
-  .m.PATCH { color: var(--patch); } .m.DELETE { color: var(--delete); }
-  .datadir { padding: 8px 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; word-break: break-all; }
-  .empty { padding: 16px; color: var(--muted); }
-
-  main { display: grid; grid-template-rows: auto auto minmax(140px, 40%) 1fr; min-height: 0; min-width: 0; }
-  .titlebar { display: flex; align-items: center; gap: 8px; padding: 10px 16px 0; }
-  .titlebar input { flex: 1; font-weight: 600; border-color: transparent; background: transparent; }
-  .titlebar input:hover { border-color: var(--line); }
-  .crumb { color: var(--muted); font-size: 13px; white-space: nowrap; }
-  .dirty { color: var(--warn); font-size: 12px; }
-  .reqbar { display: flex; gap: 8px; padding: 10px 16px; }
-  .reqbar select { font-weight: 600; font-family: var(--mono); }
-  .reqbar input { flex: 1; font-family: var(--mono); }
-
-  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); padding: 0 16px; }
-  .tab { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 12px; color: var(--muted); }
-  .tab.on { color: var(--text); border-bottom-color: var(--accent); }
-  .tab .count { color: var(--muted); font-size: 11px; margin-left: 4px; }
-  .pane { padding: 12px 16px; overflow: auto; min-height: 0; }
-  .section { display: flex; flex-direction: column; min-height: 0; border-bottom: 1px solid var(--line); }
-
-  table.kv { width: 100%; border-collapse: collapse; }
-  table.kv td { padding: 3px 4px 3px 0; }
-  table.kv td.chk { width: 28px; text-align: center; }
-  table.kv td.del { width: 32px; }
-  table.kv input[type=text] { width: 100%; font-family: var(--mono); font-size: 13px; }
-  textarea.code { width: 100%; min-height: 180px; height: 100%; font: 13px/1.5 var(--mono); resize: vertical; }
-  .hint { color: var(--muted); font-size: 13px; margin: 8px 0; }
-  .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
-  .field > span { color: var(--muted); font-size: 12px; }
-  .inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-
-  .resp-head { display: flex; gap: 16px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
-  .pill { font: 600 13px var(--mono); padding: 2px 8px; border-radius: 999px; background: var(--panel-2); }
-  .pill.s2 { color: var(--ok); } .pill.s3 { color: var(--warn); } .pill.s4, .pill.s5, .pill.e { color: var(--err); }
-  .meta { color: var(--muted); font-size: 13px; }
-  pre.body { margin: 0; font: 13px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word; }
-  .err { color: var(--err); }
-  table.hdrs { border-collapse: collapse; font: 13px var(--mono); }
-  table.hdrs td { padding: 3px 16px 3px 0; vertical-align: top; word-break: break-all; }
-  table.hdrs td:first-child { color: var(--muted); white-space: nowrap; }
-
-  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; width: min(720px, 92vw); padding: 20px; }
-  dialog::backdrop { background: rgb(0 0 0 / 0.4); }
-  dialog h2 { margin: 0 0 16px; font-size: 16px; }
-  dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
-
-  #toast { position: fixed; right: 16px; bottom: 16px; padding: 10px 14px; border-radius: 8px; background: var(--text); color: var(--bg);
-           opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 60vw; }
-  #toast.show { opacity: 1; }
-  kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--muted); }
-
-  @media (max-width: 760px) {
-    .app { grid-template-columns: 1fr; grid-template-rows: auto 220px 1fr; }
-    aside { border-right: 0; border-bottom: 1px solid var(--line); }
-  }
-</style>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23193a5c'/><path d='M7 20c4 0 4-8 9-8s5 8 9 8' stroke='%23f2b33d' stroke-width='3' fill='none' stroke-linecap='round'/><circle cx='7' cy='20' r='2.6' fill='%2347b881'/><circle cx='25' cy='20' r='2.6' fill='%235b8def'/></svg>">
+<script>
+  // Apply the saved theme before first paint, so there is no flash of the wrong theme.
+  try { const t = JSON.parse(localStorage.getItem('apiman:settings') || '{}').theme; if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch {}
+</script>
+<link rel="stylesheet" href="app.css">
 </head>
 <body>
 <div class="app">
-  <header>
-    <h1>ApiMan</h1>
-    <button id="btnNewCol">+ Collection</button>
-    <button id="btnImport">Import</button>
-    <input type="file" id="fileImport" accept=".json,application/json" multiple hidden>
-    <button id="btnNewReq">+ Scratch request</button>
-    <button id="btnFolder" hidden title="Save collections as .json files in a folder on this computer">Use a folder…</button>
-    <span class="spacer"></span>
-    <label title="Last resort for internal APIs with self-signed certificates. Prefer starting the server with --ca-file.">
-      <input type="checkbox" id="chkInsecure"> Skip TLS certificate check
-    </label>
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" class="logo-bg"/><path d="M7 20c4 0 4-8 9-8s5 8 9 8" stroke="#f2b33d" stroke-width="3" fill="none" stroke-linecap="round"/><circle cx="7" cy="20" r="2.6" fill="#47b881"/><circle cx="25" cy="20" r="2.6" fill="#5b8def"/></svg>
+      <span class="wordmark">ApiMan</span>
+      <span class="mode-badge" id="modeBadge"></span>
+    </div>
+    <div class="top-actions">
+      <button id="btnNew" class="btn">New</button>
+      <button id="btnImport" class="btn">Import</button>
+      <button id="btnRunner" class="btn">Runner</button>
+    </div>
+    <div class="spacer"></div>
+    <div class="env-picker">
+      <label for="envSelect" class="sr-only">Environment</label>
+      <span class="env-dot" id="envDot" aria-hidden="true"></span>
+      <select id="envSelect" title="Active environment"></select>
+      <button id="btnEnvPeek" class="btn icon" title="Quick look at variables" aria-label="Quick look at variables">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M1.5 10S4.8 4 10 4s8.5 6 8.5 6-3.3 6-8.5 6S1.5 10 1.5 10Z" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="10" cy="10" r="2.6" fill="currentColor"/></svg>
+      </button>
+    </div>
+    <button id="btnTheme" class="btn icon" title="Switch light / dark" aria-label="Switch light or dark theme">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5a7.5 7.5 0 1 0 0 15Z" fill="currentColor"/><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+    </button>
+    <button id="btnSettings" class="btn icon" title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 6.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4Zm7 4.4v-2.4l-2-.5a5.6 5.6 0 0 0-.6-1.4l1-1.8-1.7-1.7-1.8 1a5.6 5.6 0 0 0-1.4-.6L10 1.8H7.6l-.5 2a5.6 5.6 0 0 0-1.4.6l-1.8-1-1.7 1.7 1 1.8c-.3.4-.5.9-.6 1.4l-2 .5v2.4l2 .5c.1.5.3 1 .6 1.4l-1 1.8 1.7 1.7 1.8-1c.4.3.9.5 1.4.6l.5 2h2.4l.5-2c.5-.1 1-.3 1.4-.6l1.8 1 1.7-1.7-1-1.8c.3-.4.5-.9.6-1.4Z" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>
+    </button>
   </header>
 
-  <aside>
-    <div id="tree"></div>
-    <div class="datadir" id="dataDir"></div>
+  <aside class="side">
+    <div class="seg" role="tablist" aria-label="Sidebar">
+      <button role="tab" class="seg-btn on" data-view="collections" aria-selected="true">Collections</button>
+      <button role="tab" class="seg-btn" data-view="environments" aria-selected="false">Environments</button>
+      <button role="tab" class="seg-btn" data-view="history" aria-selected="false">History</button>
+    </div>
+    <div class="side-search">
+      <input id="search" type="search" placeholder="Filter requests  /" aria-label="Filter" spellcheck="false" autocomplete="off">
+    </div>
+    <div class="side-body" id="sideBody"></div>
+    <div class="side-foot">
+      <div id="dataDir" class="data-dir"></div>
+      <button id="btnFolder" class="btn small" hidden>Use a folder…</button>
+    </div>
   </aside>
 
-  <main>
-    <div class="titlebar">
-      <span class="crumb" id="crumb">Scratch</span>
-      <input id="reqName" aria-label="Request name" value="Untitled request">
-      <span class="dirty" id="dirty" hidden>unsaved</span>
-      <button id="btnSave" title="Ctrl/Cmd+S">Save</button>
-    </div>
-    <div class="reqbar">
-      <select id="method" aria-label="Method">
-        <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option>
-        <option>DELETE</option><option>HEAD</option><option>OPTIONS</option>
-      </select>
-      <input id="url" placeholder="https://api.example.com/items or {{baseUrl}}/items" aria-label="URL" spellcheck="false">
-      <button class="primary" id="btnSend" title="Ctrl/Cmd+Enter">Send</button>
-    </div>
+  <main class="work">
+    <div class="tabstrip" id="tabstrip" role="tablist" aria-label="Open requests"></div>
 
-    <div class="section">
-      <div class="tabs" id="reqTabs">
-        <button class="tab on" data-tab="auth">Auth</button>
-        <button class="tab" data-tab="headers">Headers<span class="count" id="hdrCount"></span></button>
-        <button class="tab" data-tab="body">Body</button>
-      </div>
-      <div class="pane" data-pane="auth">
-        <div class="field">
-          <span>Type</span>
-          <select id="authType" style="max-width: 320px">
-            <option value="inherit">Inherit from collection</option>
-            <option value="bearer">Bearer token</option>
-            <option value="none">No auth</option>
-          </select>
+    <div class="welcome" id="welcome" hidden>
+      <div class="welcome-inner">
+        <h1>Send your first request</h1>
+        <p>Paste a URL, import a Postman collection, or start from a cURL command. Everything stays on this computer.</p>
+        <div class="welcome-actions">
+          <button class="btn primary" data-act="new-request">New request</button>
+          <button class="btn" data-act="import">Import collection</button>
+          <button class="btn" data-act="import-curl">Paste cURL</button>
         </div>
-        <div class="field" id="tokenField">
-          <span>Token (variables like {{token}} work)</span>
-          <input id="token" spellcheck="false" style="font-family: var(--mono)">
-        </div>
-        <div class="hint" id="authHint"></div>
-      </div>
-      <div class="pane" data-pane="headers" hidden><div id="headersKv"></div></div>
-      <div class="pane" data-pane="body" hidden>
-        <div class="inline" style="margin-bottom: 8px">
-          <select id="bodyMode">
-            <option value="none">None</option>
-            <option value="json">JSON</option>
-            <option value="text">Text</option>
-            <option value="urlencoded">Form URL-encoded</option>
-          </select>
-          <button id="btnPretty" class="icon" title="Format JSON">Format</button>
-          <span class="hint" id="bodyNote"></span>
-        </div>
-        <textarea class="code" id="rawBody" spellcheck="false"></textarea>
-        <div id="formKv" hidden></div>
       </div>
     </div>
 
-    <div class="section" style="border-bottom: 0">
-      <div class="resp-head" id="respHead"><span class="meta">Response appears here. <kbd>Ctrl/Cmd</kbd>+<kbd>Enter</kbd> to send.</span></div>
-      <div class="tabs" id="respTabs" hidden>
-        <button class="tab on" data-tab="rbody">Body</button>
-        <button class="tab" data-tab="rheaders">Headers<span class="count" id="respHdrCount"></span></button>
-        <span class="spacer" style="flex:1"></span>
-        <button class="icon" id="btnCopy">Copy body</button>
+    <div class="editor" id="editor" hidden>
+      <div class="titlebar">
+        <nav class="crumb" id="crumb" aria-label="Location"></nav>
+        <input id="reqName" class="name-input" aria-label="Request name" spellcheck="false">
+        <span class="dirty-dot" id="dirtyDot" title="Unsaved changes" hidden></span>
+        <div class="spacer"></div>
+        <button id="btnCode" class="btn ghost" title="Generate code">&lt;/&gt; Code</button>
+        <button id="btnSave" class="btn" title="Save (Ctrl/Cmd+S)">Save</button>
       </div>
-      <div class="pane" data-pane="rbody"><pre class="body" id="respBody"></pre></div>
-      <div class="pane" data-pane="rheaders" hidden><table class="hdrs" id="respHeaders"></table></div>
+
+      <div class="reqbar" id="reqbar" data-method="GET">
+        <select id="method" aria-label="Method">
+          <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option>
+          <option>DELETE</option><option>HEAD</option><option>OPTIONS</option>
+        </select>
+        <input id="url" placeholder="Enter a URL, e.g. {{baseUrl}}/users" aria-label="URL" spellcheck="false" autocomplete="off">
+        <button class="send" id="btnSend" title="Send (Ctrl/Cmd+Enter)">Send</button>
+      </div>
+      <div class="resolved" id="resolved" hidden></div>
+
+      <div class="split">
+        <section class="pane-col req-col" aria-label="Request">
+          <div class="tabs" id="reqTabs" role="tablist">
+            <button class="tab on" data-tab="params">Params<span class="count" id="cntParams"></span></button>
+            <button class="tab" data-tab="auth">Auth<span class="count" id="cntAuth"></span></button>
+            <button class="tab" data-tab="headers">Headers<span class="count" id="cntHeaders"></span></button>
+            <button class="tab" data-tab="body">Body<span class="count" id="cntBody"></span></button>
+            <button class="tab" data-tab="scripts">Scripts<span class="count" id="cntScripts"></span></button>
+            <button class="tab" data-tab="docs">Docs</button>
+          </div>
+          <div class="pane" data-pane="params"><div id="paramsKv"></div></div>
+          <div class="pane" data-pane="auth" hidden><div id="authEditor"></div></div>
+          <div class="pane" data-pane="headers" hidden><div id="headersKv"></div></div>
+          <div class="pane" data-pane="body" hidden>
+            <div class="body-modes" id="bodyModes" role="radiogroup" aria-label="Body type"></div>
+            <div id="bodyEditor"></div>
+          </div>
+          <div class="pane" data-pane="scripts" hidden>
+            <div class="script-switch" role="tablist">
+              <button class="chip on" data-script="pre">Pre-request</button>
+              <button class="chip" data-script="test">Tests</button>
+              <span class="hint">Runs sandboxed: no network, no access to your other data. <button class="linkish" id="btnSnippets">Snippets</button></span>
+            </div>
+            <textarea class="code" id="scriptText" spellcheck="false" placeholder="pm.test(&quot;Status is 200&quot;, () => pm.response.to.have.status(200));"></textarea>
+          </div>
+          <div class="pane" data-pane="docs" hidden>
+            <textarea class="prose" id="docsText" placeholder="Describe what this request does, its parameters and gotchas."></textarea>
+          </div>
+        </section>
+
+        <section class="pane-col resp-col" aria-label="Response">
+          <div class="resp-status" id="respStatus"></div>
+          <div class="tabs" id="respTabs" role="tablist" hidden>
+            <button class="tab on" data-tab="rbody">Body</button>
+            <button class="tab" data-tab="rheaders">Headers<span class="count" id="cntRHeaders"></span></button>
+            <button class="tab" data-tab="rcookies">Cookies<span class="count" id="cntRCookies"></span></button>
+            <button class="tab" data-tab="rtests">Tests<span class="count" id="cntRTests"></span></button>
+            <button class="tab" data-tab="rconsole">Console<span class="count" id="cntRConsole"></span></button>
+          </div>
+          <div class="pane resp-pane" data-pane="rbody">
+            <div class="resp-tools" id="respTools" hidden>
+              <div class="seg mini" role="radiogroup" aria-label="Body view">
+                <button class="seg-btn on" data-view="pretty">Pretty</button>
+                <button class="seg-btn" data-view="raw">Raw</button>
+                <button class="seg-btn" data-view="preview">Preview</button>
+              </div>
+              <div class="spacer"></div>
+              <button class="btn small ghost" id="btnCopyBody">Copy</button>
+              <button class="btn small ghost" id="btnSaveBody">Save to file</button>
+            </div>
+            <div id="respBody" class="resp-body"></div>
+          </div>
+          <div class="pane" data-pane="rheaders" hidden><table class="grid" id="respHeaders"></table></div>
+          <div class="pane" data-pane="rcookies" hidden><div id="respCookies"></div></div>
+          <div class="pane" data-pane="rtests" hidden><div id="respTests"></div></div>
+          <div class="pane" data-pane="rconsole" hidden><div id="respConsole" class="console"></div></div>
+        </section>
+      </div>
     </div>
   </main>
 </div>
 
-<dialog id="dlgCol">
-  <h2>Collection settings</h2>
-  <div class="field"><span>Name</span><input id="colName"></div>
-  <div class="field">
-    <span>Auth for every request in this collection</span>
-    <div class="inline">
-      <select id="colAuthType"><option value="none">No auth</option><option value="bearer">Bearer token</option></select>
-      <input id="colToken" placeholder="token or {{token}}" style="flex:1; font-family: var(--mono)" spellcheck="false">
-    </div>
-  </div>
-  <div class="field"><span>Variables, used as {{name}} in URLs, headers, body and tokens</span><div id="colVarsKv"></div></div>
-  <div class="buttons"><button id="colCancel">Cancel</button><button class="primary" id="colSave">Save</button></div>
+<dialog id="dlg" aria-labelledby="dlgTitle">
+  <form method="dialog" class="dlg-shell">
+    <header class="dlg-head"><h2 id="dlgTitle"></h2><button class="btn icon" value="cancel" aria-label="Close">✕</button></header>
+    <div class="dlg-body" id="dlgBody"></div>
+    <footer class="dlg-foot" id="dlgFoot"></footer>
+  </form>
 </dialog>
 
-<dialog id="dlgSave">
-  <h2>Save request to…</h2>
-  <div class="field"><span>Collection</span><select id="saveTarget"></select></div>
-  <div class="buttons"><button id="saveCancel">Cancel</button><button class="primary" id="saveOk">Save</button></div>
-</dialog>
+<div id="popover" class="popover" hidden></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<div id="toast" role="status"></div>
-
-<script>
-'use strict';
-const $ = (s) => document.querySelector(s);
-const enc = encodeURIComponent;
-
-function h(tag, props = {}, ...kids) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(props)) {
-    if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
-    else if (k === 'class') el.className = v;
-    else if (v === true) el.setAttribute(k, '');
-    else if (v !== false && v != null) el.setAttribute(k, v);
-  }
-  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : String(kid));
-  return el;
-}
-
-function toast(msg) {
-  const t = $('#toast');
-  t.textContent = msg;
-  t.classList.add('show');
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => t.classList.remove('show'), 3500);
-}
-
-const store = {
-  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode: fine */ } },
-};
-
-async function api(method, path, body) {
-  const r = await fetch(path, {
-    method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || r.statusText);
-  return data;
-}
-
-// ---------------- state ----------------
-const state = {
-  list: [],                                   // [{id, name}]
-  cols: {},                                   // id -> Postman collection JSON
-  open: new Set(store.get('open', [])),       // expanded collections / folders ("id" or "id:0.2")
-  target: null,                               // {cid, path:[...]} of the request being edited, or null = scratch
-  dirty: false,
-};
-let ed = blankEditor();
-
-function blankEditor() {
-  return { name: 'Untitled request', method: 'GET', url: '', headers: [], bodyMode: 'none', raw: '', form: [],
-           authType: 'inherit', token: '', note: '' };
-}
-
-// ---------------- Postman v2.x <-> editor ----------------
-function urlToString(u) {
-  if (!u) return '';
-  if (typeof u === 'string') return u;
-  if (u.raw) return u.raw;
-  const host = Array.isArray(u.host) ? u.host.join('.') : (u.host || '');
-  const path = Array.isArray(u.path) ? u.path.join('/') : (u.path || '');
-  const q = (u.query || []).filter((x) => !x.disabled).map((x) => `${x.key}=${x.value ?? ''}`).join('&');
-  return `${u.protocol ? u.protocol + '://' : ''}${host}${u.port ? ':' + u.port : ''}${path ? '/' + path : ''}${q ? '?' + q : ''}`;
-}
-
-function bearerOf(auth) {
-  if (!auth || auth.type !== 'bearer') return '';
-  if (Array.isArray(auth.bearer)) return (auth.bearer.find((x) => x.key === 'token') || {}).value || '';
-  return (auth.bearer && auth.bearer.token) || '';  // v2.0 shape
-}
-
-function kvFrom(list) {
-  return (list || []).map((x) => ({ key: x.key ?? '', value: x.value ?? '', disabled: !!x.disabled }));
-}
-
-function fromItem(item) {
-  const req = typeof item.request === 'string' ? { url: item.request, method: 'GET' } : (item.request || {});
-  const e = blankEditor();
-  e.name = item.name || 'Untitled request';
-  e.method = (req.method || 'GET').toUpperCase();
-  e.url = urlToString(req.url);
-  e.headers = kvFrom(Array.isArray(req.header) ? req.header : []);
-  const b = req.body;
-  if (b && b.mode === 'raw') {
-    const lang = b.options && b.options.raw && b.options.raw.language;
-    const looksJson = /^\s*[\[{]/.test(b.raw || '');
-    e.bodyMode = lang === 'json' || (!lang && looksJson) ? 'json' : 'text';
-    e.raw = b.raw || '';
-  } else if (b && b.mode === 'urlencoded') {
-    e.bodyMode = 'urlencoded';
-    e.form = kvFrom(b.urlencoded);
-  } else if (b && b.mode === 'graphql' && b.graphql) {
-    // GraphQL over HTTP is just JSON, so convert it to an editable JSON body.
-    let vars = {};
-    try { vars = b.graphql.variables ? JSON.parse(b.graphql.variables) : {}; } catch { /* keep {} */ }
-    e.bodyMode = 'json';
-    e.raw = JSON.stringify({ query: b.graphql.query || '', variables: vars }, null, 2);
-  } else if (b && b.mode) {
-    e.note = `Body mode "${b.mode}" isn't supported here; it will be kept in the file but not sent.`;
-  }
-  if (!req.auth) e.authType = 'inherit';
-  else if (req.auth.type === 'noauth') e.authType = 'none';
-  else if (req.auth.type === 'bearer') { e.authType = 'bearer'; e.token = bearerOf(req.auth); }
-  else { e.authType = 'inherit'; e.note = (e.note ? e.note + ' ' : '') + `Auth type "${req.auth.type}" isn't supported; using inherit.`; }
-  return e;
-}
-
-/** Writes the editor back into a Postman item, keeping fields we don't edit (description, scripts, examples). */
-function toItem(e, orig = {}) {
-  const origReq = typeof orig.request === 'object' && orig.request ? orig.request : {};
-  const req = { ...origReq, method: e.method, header: e.headers.map(({ key, value, disabled }) =>
-    disabled ? { key, value, disabled: true } : { key, value }), url: e.url };
-  const unsupportedBody = origReq.body && !['raw', 'urlencoded', 'graphql'].includes(origReq.body.mode);
-  if (unsupportedBody && e.bodyMode === 'none') { /* keep original formdata/file body untouched */ }
-  else if (e.bodyMode === 'none') delete req.body;
-  else if (e.bodyMode === 'urlencoded') req.body = { mode: 'urlencoded', urlencoded: e.form.map(({ key, value, disabled }) =>
-    disabled ? { key, value, disabled: true } : { key, value }) };
-  else req.body = { mode: 'raw', raw: e.raw, options: { raw: { language: e.bodyMode === 'json' ? 'json' : 'text' } } };
-  if (e.authType === 'inherit') delete req.auth;
-  else if (e.authType === 'none') req.auth = { type: 'noauth' };
-  else req.auth = { type: 'bearer', bearer: [{ key: 'token', value: e.token, type: 'string' }] };
-  return { ...orig, name: e.name, request: req, response: orig.response || [] };
-}
-
-// ---------------- collection helpers ----------------
-function itemsAt(col, path) {       // the array that holds the node at `path`
-  let items = col.item;
-  for (const i of path.slice(0, -1)) items = items[i].item;
-  return items;
-}
-function nodeAt(col, path) { return itemsAt(col, path)[path[path.length - 1]]; }
-function ancestors(col, path) {     // folders above the node, outermost first
-  const out = [];
-  let items = col.item;
-  for (const i of path.slice(0, -1)) { out.push(items[i]); items = items[i].item; }
-  return out;
-}
-function varsOf(col) {
-  const v = {};
-  for (const x of (col && col.variable) || []) if (!x.disabled && x.key) v[x.key] = x.value ?? '';
-  return v;
-}
-function resolve(str, vars) {
-  return String(str ?? '').replace(/{{\s*([^{}]+?)\s*}}/g, (m, k) => (k in vars ? String(vars[k]) : m));
-}
-
-/** Postman inheritance: request -> nearest folder -> collection. Returns {token, from} or null. */
-function effectiveAuth() {
-  if (ed.authType === 'none') return null;
-  if (ed.authType === 'bearer') return { token: ed.token, from: 'this request' };
-  if (!state.target) return null;
-  const col = state.cols[state.target.cid];
-  const chain = [...ancestors(col, state.target.path).reverse().map((f) => [f.auth, `folder "${f.name}"`]),
-                 [col.auth, 'the collection']];
-  for (const [auth, from] of chain) {
-    if (!auth) continue;
-    if (auth.type === 'bearer') return { token: bearerOf(auth), from };
-    return null; // noauth or an unsupported type stops inheritance, like Postman
-  }
-  return null;
-}
-
-// ---------------- tree ----------------
-async function loadCol(id) { state.cols[id] = await backend.get(id); }
-async function saveCol(id) { await backend.put(id, state.cols[id]); }
-
-async function refresh() {
-  state.list = await backend.list();
-  const ids = new Set(state.list.map((c) => c.id));
-  for (const id of Object.keys(state.cols)) if (!ids.has(id)) delete state.cols[id];
-  await Promise.all(state.list.filter((c) => state.open.has(c.id) && !state.cols[c.id]).map((c) => loadCol(c.id).catch(() => {})));
-  renderTree();
-}
-
-function toggleOpen(key) {
-  state.open.has(key) ? state.open.delete(key) : state.open.add(key);
-  store.set('open', [...state.open]);
-}
-
-function samePath(a, b) { return a.length === b.length && a.every((x, i) => x === b[i]); }
-
-function renderTree() {
-  const tree = $('#tree');
-  if (!state.list.length) {
-    tree.replaceChildren(h('div', { class: 'empty' }, 'No collections yet. Create one or import a Postman collection (v2.1 JSON).'));
-    return;
-  }
-  tree.replaceChildren(...state.list.map((c) => {
-    const open = state.open.has(c.id);
-    const col = state.cols[c.id];
-    const row = h('div', { class: 'row col', title: c.id,
-      onclick: async () => { toggleOpen(c.id); if (!state.cols[c.id]) await loadCol(c.id); renderTree(); } },
-      h('span', { class: 'caret' }, open ? '▾' : '▸'),
-      h('span', { class: 'name' }, c.name),
-      h('span', { class: 'actions' },
-        h('button', { class: 'icon', title: 'New request', onclick: (ev) => { ev.stopPropagation(); addRequest(c.id, []); } }, '+'),
-        h('button', { class: 'icon', title: 'New folder', onclick: (ev) => { ev.stopPropagation(); addFolder(c.id, []); } }, '📁'),
-        h('button', { class: 'icon', title: 'Settings: token & variables', onclick: (ev) => { ev.stopPropagation(); openColSettings(c.id); } }, '⚙'),
-        h('button', { class: 'icon', title: 'Delete collection', onclick: (ev) => { ev.stopPropagation(); deleteCol(c.id, c.name); } }, '🗑')));
-    return h('div', {}, row, open && col ? itemsNode(c.id, col.item, [], 1) : null);
-  }));
-}
-
-function itemsNode(cid, items, base, depth) {
-  return items.map((it, i) => {
-    const path = [...base, i];
-    const pad = { style: `padding-left: ${8 + depth * 14}px` };
-    if (Array.isArray(it.item)) {
-      const key = `${cid}:${path.join('.')}`;
-      const open = state.open.has(key);
-      return h('div', {},
-        h('div', { class: 'row', ...pad, onclick: () => { toggleOpen(key); renderTree(); },
-                   ondblclick: () => renameFolder(cid, path) , title: 'Double-click to rename' },
-          h('span', { class: 'caret' }, open ? '▾' : '▸'),
-          h('span', { class: 'name' }, '📁 ' + (it.name || 'Folder')),
-          h('span', { class: 'actions' },
-            h('button', { class: 'icon', title: 'New request', onclick: (ev) => { ev.stopPropagation(); addRequest(cid, path); } }, '+'),
-            h('button', { class: 'icon', title: 'Delete folder', onclick: (ev) => { ev.stopPropagation(); deleteNode(cid, path); } }, '🗑'))),
-        open ? itemsNode(cid, it.item, path, depth + 1) : null);
-    }
-    const method = (typeof it.request === 'object' && it.request && it.request.method || 'GET').toUpperCase();
-    const active = state.target && state.target.cid === cid && samePath(state.target.path, path);
-    return h('div', { class: 'row' + (active ? ' active' : ''), ...pad, onclick: () => openRequest(cid, path) },
-      h('span', { class: 'm ' + method }, method),
-      h('span', { class: 'name' }, it.name || 'Untitled'),
-      h('span', { class: 'actions' },
-        h('button', { class: 'icon', title: 'Duplicate', onclick: (ev) => { ev.stopPropagation(); duplicate(cid, path); } }, '⧉'),
-        h('button', { class: 'icon', title: 'Delete request', onclick: (ev) => { ev.stopPropagation(); deleteNode(cid, path); } }, '🗑')));
-  });
-}
-
-// ---------------- tree actions ----------------
-function confirmDiscard() { return !state.dirty || confirm('Discard unsaved changes to this request?'); }
-
-function openRequest(cid, path) {
-  if (!confirmDiscard()) return;
-  state.target = { cid, path };
-  ed = fromItem(nodeAt(state.cols[cid], path));
-  setDirty(false);
-  renderEditor();
-  renderTree();
-}
-
-async function addRequest(cid, folderPath) {
-  if (!confirmDiscard()) return;
-  if (!state.cols[cid]) await loadCol(cid);
-  const items = folderPath.length ? nodeAt(state.cols[cid], folderPath).item : state.cols[cid].item;
-  items.push({ name: 'New request', request: { method: 'GET', header: [], url: '' }, response: [] });
-  await saveCol(cid);
-  state.open.add(cid);
-  if (folderPath.length) state.open.add(`${cid}:${folderPath.join('.')}`);
-  store.set('open', [...state.open]);
-  setDirty(false);
-  openRequest(cid, [...folderPath, items.length - 1]);
-  $('#reqName').select();
-}
-
-async function addFolder(cid, base) {
-  const name = prompt('Folder name');
-  if (!name) return;
-  if (!state.cols[cid]) await loadCol(cid);
-  const items = base.length ? nodeAt(state.cols[cid], base).item : state.cols[cid].item;
-  items.push({ name, item: [] });
-  await saveCol(cid);
-  state.open.add(cid);
-  renderTree();
-}
-
-async function renameFolder(cid, path) {
-  const node = nodeAt(state.cols[cid], path);
-  const name = prompt('Rename folder', node.name || '');
-  if (!name) return;
-  node.name = name;
-  await saveCol(cid);
-  renderTree();
-}
-
-async function duplicate(cid, path) {
-  const items = itemsAt(state.cols[cid], path);
-  const copy = structuredClone(items[path[path.length - 1]]);
-  copy.name = (copy.name || 'Request') + ' copy';
-  items.splice(path[path.length - 1] + 1, 0, copy);
-  shiftTarget(cid, path, +1);
-  await saveCol(cid);
-  renderTree();
-}
-
-/** Keeps the editor pointed at the right item after inserting/removing a sibling. */
-function shiftTarget(cid, path, delta) {
-  const t = state.target;
-  if (!t || t.cid !== cid || t.path.length < path.length) return;
-  const d = path.length - 1;
-  if (!samePath(t.path.slice(0, d), path.slice(0, d))) return;
-  if (delta < 0 && t.path[d] === path[d]) { state.target = null; renderCrumb(); return; } // the edited item (or its folder) was deleted
-  if (t.path[d] > path[d]) t.path[d] += delta;
-}
-
-async function deleteNode(cid, path) {
-  const node = nodeAt(state.cols[cid], path);
-  if (!confirm(`Delete "${node.name}"${node.item ? ' and everything in it' : ''}?`)) return;
-  itemsAt(state.cols[cid], path).splice(path[path.length - 1], 1);
-  shiftTarget(cid, path, -1);
-  await saveCol(cid);
-  renderTree();
-}
-
-async function deleteCol(id, name) {
-  if (!confirm(`Delete collection "${name}"? This deletes the file ${id}.`)) return;
-  await backend.remove(id);
-  if (state.target && state.target.cid === id) { state.target = null; renderCrumb(); }
-  await refresh();
-}
-
-async function newCollection() {
-  const name = prompt('Collection name');
-  if (!name) return;
-  const id = await backend.create({ info: { name, schema: SCHEMA_V21 }, item: [] });
-  state.open.add(id);
-  await refresh();
-  openColSettings(id);
-}
-
-async function importFiles(files) {
-  for (const f of files) {
-    try {
-      const data = JSON.parse(await f.text());
-      const id = await backend.create(data);
-      state.open.add(id);
-      toast(`Imported ${data.info.name}`);
-    } catch (e) {
-      toast(`${f.name}: ${e.message}`);
-    }
-  }
-  store.set('open', [...state.open]);
-  await refresh();
-}
-
-// ---------------- key/value editor ----------------
-function kvEditor(container, rows, onChange, placeholders = ['Key', 'Value']) {
-  const render = () => {
-    const body = rows.map((r, i) => h('tr', {},
-      h('td', { class: 'chk' }, h('input', { type: 'checkbox', checked: !r.disabled, title: 'Enabled',
-        onchange: (ev) => { r.disabled = !ev.target.checked; onChange(); } })),
-      h('td', {}, h('input', { type: 'text', value: r.key, placeholder: placeholders[0], spellcheck: 'false',
-        oninput: (ev) => { r.key = ev.target.value; onChange(); } })),
-      h('td', {}, h('input', { type: 'text', value: r.value, placeholder: placeholders[1], spellcheck: 'false',
-        oninput: (ev) => { r.value = ev.target.value; onChange(); } })),
-      h('td', { class: 'del' }, h('button', { class: 'icon', title: 'Remove',
-        onclick: () => { rows.splice(i, 1); onChange(); render(); } }, '×'))));
-    container.replaceChildren(
-      h('table', { class: 'kv' }, h('tbody', {}, body)),
-      h('button', { onclick: () => { rows.push({ key: '', value: '', disabled: false }); onChange(); render();
-        container.querySelector('tr:last-child input[type=text]').focus(); } }, '+ Add'));
-  };
-  render();
-}
-
-// ---------------- editor ----------------
-function setDirty(d) { state.dirty = d; $('#dirty').hidden = !d; }
-function changed() { setDirty(true); renderAuthHint(); $('#hdrCount').textContent = ed.headers.filter((x) => !x.disabled && x.key).length || ''; }
-
-function renderCrumb() {
-  if (!state.target) { $('#crumb').textContent = 'Scratch ·'; return; }
-  const col = state.cols[state.target.cid];
-  const names = [col.info.name, ...ancestors(col, state.target.path).map((f) => f.name)];
-  $('#crumb').textContent = names.join(' / ') + ' /';
-}
-
-function renderAuthHint() {
-  $('#tokenField').hidden = ed.authType !== 'bearer';
-  const a = effectiveAuth();
-  let msg;
-  if (ed.authType === 'none') msg = 'No Authorization header will be sent.';
-  else if (!a) msg = state.target ? 'Nothing to inherit: set a token in the collection settings (⚙), or choose Bearer token here.'
-                                  : 'Scratch requests have nothing to inherit. Choose Bearer token, or save into a collection.';
-  else if (!a.token) msg = `Bearer token from ${a.from} is empty.`;
-  else msg = `Sends "Authorization: Bearer ${mask(a.token)}" from ${a.from}.`;
-  $('#authHint').textContent = msg;
-}
-
-function mask(t) { return /^{{.*}}$/.test(t) ? t : t.length <= 10 ? '•'.repeat(t.length) : t.slice(0, 6) + '…' + t.slice(-4); }
-
-function renderBody() {
-  const isForm = ed.bodyMode === 'urlencoded';
-  $('#rawBody').hidden = isForm || ed.bodyMode === 'none';
-  $('#btnPretty').hidden = ed.bodyMode !== 'json';
-  $('#formKv').hidden = !isForm;
-  $('#bodyNote').textContent = ed.note;
-  if (isForm) kvEditor($('#formKv'), ed.form, changed);
-}
-
-function renderEditor() {
-  $('#reqName').value = ed.name;
-  $('#method').value = ed.method;
-  $('#url').value = ed.url;
-  $('#authType').value = ed.authType;
-  $('#token').value = ed.token;
-  $('#bodyMode').value = ed.bodyMode;
-  $('#rawBody').value = ed.raw;
-  kvEditor($('#headersKv'), ed.headers, changed);
-  $('#hdrCount').textContent = ed.headers.filter((x) => !x.disabled && x.key).length || '';
-  renderBody();
-  renderAuthHint();
-  renderCrumb();
-}
-
-function bindTabs(tabsSel, scope) {
-  $(tabsSel).addEventListener('click', (ev) => {
-    const btn = ev.target.closest('.tab');
-    if (!btn) return;
-    $(tabsSel).querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t === btn));
-    scope.querySelectorAll(':scope > .pane').forEach((p) => { p.hidden = p.dataset.pane !== btn.dataset.tab; });
-  });
-}
-
-// ---------------- send ----------------
-async function send() {
-  const col = state.target ? state.cols[state.target.cid] : null;
-  const vars = varsOf(col);
-  const r = (s) => resolve(s, vars);
-
-  const headers = ed.headers.filter((x) => !x.disabled && x.key).map((x) => [r(x.key), r(x.value)]);
-  const has = (name) => headers.some(([k]) => k.toLowerCase() === name);
-  const auth = effectiveAuth();
-  if (auth && auth.token && !has('authorization')) headers.push(['Authorization', 'Bearer ' + r(auth.token)]);
-
-  let body = null;
-  if (ed.bodyMode === 'json' || ed.bodyMode === 'text') {
-    body = r(ed.raw);
-    if (!has('content-type')) headers.push(['Content-Type', ed.bodyMode === 'json' ? 'application/json' : 'text/plain']);
-  } else if (ed.bodyMode === 'urlencoded') {
-    body = new URLSearchParams(ed.form.filter((x) => !x.disabled && x.key).map((x) => [r(x.key), r(x.value)])).toString();
-    if (!has('content-type')) headers.push(['Content-Type', 'application/x-www-form-urlencoded']);
-  }
-
-  let url = r(ed.url).trim();
-  if (url && !/^https?:\/\//i.test(url)) url = 'http://' + url;
-  const unresolved = [url, body || '', ...headers.flat()].join('\n').match(/{{\s*[^{}]+?\s*}}/);
-  if (!url) return showError('Enter a URL.');
-  if (unresolved) return showError(`Unknown variable ${unresolved[0]}. Add it in the collection settings (⚙).`);
-
-  $('#btnSend').disabled = true;
-  $('#respHead').replaceChildren(h('span', { class: 'meta' }, `Sending ${ed.method} ${url} …`));
-  try {
-    const res = await backend.send({
-      method: ed.method, url, headers, body, insecure: $('#chkInsecure').checked });
-    res.error ? showError(res.error) : showResponse(res);
-  } catch (e) {
-    showError(backend.mode === 'server'
-      ? 'Local server not reachable. Is "python3 server.py" still running? ' + e.message
-      : e.message);
-  } finally {
-    $('#btnSend').disabled = false;
-  }
-}
-
-let lastBody = '';
-function showError(msg) {
-  $('#respTabs').hidden = true;
-  $('#respHead').replaceChildren(h('span', { class: 'pill e' }, 'Error'), h('span', { class: 'err' }, msg));
-  $('#respBody').textContent = '';
-  $('#respHeaders').replaceChildren();
-  lastBody = '';
-}
-
-function fmtSize(n) { return n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`; }
-
-function showResponse(res) {
-  $('#respTabs').hidden = false;
-  $('#respHead').replaceChildren(
-    h('span', { class: `pill s${String(res.status)[0]}` }, `${res.status} ${res.reason || ''}`),
-    h('span', { class: 'meta' }, `${res.timeMs} ms`),
-    h('span', { class: 'meta' }, fmtSize(res.size) + (res.truncated ? ' (truncated)' : '')),
-    res.finalUrl ? h('span', { class: 'meta', title: 'Final URL after redirects' }, res.finalUrl) : null);
-  let text = res.binary ? `[binary response, ${fmtSize(res.size)}]` : res.body;
-  if (!res.binary) {
-    try {
-      const json = JSON.parse(res.body);
-      text = JSON.stringify(json, null, 2);
-      const key = ['accessToken', 'access_token', 'token', 'jwt', 'id_token'].find((k) => typeof json?.[k] === 'string');
-      if (key && state.target) {
-        $('#respHead').append(h('button', { class: 'primary', title: 'Saves it as the {{token}} variable of this collection',
-          onclick: () => useToken(json[key]).catch((e) => toast(e.message)) }, `Use ${key} as {{token}}`));
-      }
-    } catch { /* not JSON: show as-is */ }
-  }
-  lastBody = text;
-  $('#respBody').textContent = text || '(empty body)';
-  $('#respHdrCount').textContent = res.headers.length;
-  $('#respHeaders').replaceChildren(...res.headers.map(([k, v]) => h('tr', {}, h('td', {}, k), h('td', {}, v))));
-}
-
-/** One click from a login response to every request in the collection being authenticated. */
-async function useToken(token) {
-  const cid = state.target.cid;
-  const col = state.cols[cid];
-  col.variable = col.variable || [];
-  const v = col.variable.find((x) => x.key === 'token');
-  if (v) { v.value = token; delete v.disabled; } else col.variable.push({ key: 'token', value: token });
-  if (!col.auth) col.auth = { type: 'bearer', bearer: [{ key: 'token', value: '{{token}}', type: 'string' }] };
-  await saveCol(cid);
-  renderAuthHint();
-  toast('Token saved to collection variable {{token}}');
-}
-
-// ---------------- save ----------------
-async function save() {
-  if (!state.target) {
-    if (!state.list.length) { toast('Create a collection first (+ Collection).'); return; }
-    $('#saveTarget').replaceChildren(...state.list.map((c) => h('option', { value: c.id }, c.name)));
-    $('#dlgSave').showModal();
-    return;
-  }
-  const { cid, path } = state.target;
-  const items = itemsAt(state.cols[cid], path);
-  items[path[path.length - 1]] = toItem(ed, items[path[path.length - 1]]);
-  await saveCol(cid);
-  setDirty(false);
-  renderTree();
-  toast('Saved');
-}
-
-async function saveScratchTo(cid) {
-  if (!state.cols[cid]) await loadCol(cid);
-  const items = state.cols[cid].item;
-  items.push(toItem(ed));
-  await saveCol(cid);
-  state.target = { cid, path: [items.length - 1] };
-  state.open.add(cid);
-  store.set('open', [...state.open]);
-  setDirty(false);
-  renderCrumb();
-  renderAuthHint();
-  renderTree();
-  toast('Saved');
-}
-
-// ---------------- collection settings ----------------
-let colEdit = null;
-async function openColSettings(cid) {
-  if (!state.cols[cid]) await loadCol(cid);
-  const col = state.cols[cid];
-  colEdit = { cid, vars: kvFrom(col.variable) };
-  $('#colName').value = col.info.name;
-  $('#colAuthType').value = col.auth && col.auth.type === 'bearer' ? 'bearer' : 'none';
-  $('#colToken').value = bearerOf(col.auth);
-  $('#colToken').disabled = $('#colAuthType').value !== 'bearer';
-  kvEditor($('#colVarsKv'), colEdit.vars, () => {}, ['Variable (e.g. baseUrl)', 'Value']);
-  $('#dlgCol').showModal();
-}
-
-async function saveColSettings() {
-  const col = state.cols[colEdit.cid];
-  col.info.name = $('#colName').value.trim() || col.info.name;
-  if ($('#colAuthType').value === 'bearer') {
-    col.auth = { type: 'bearer', bearer: [{ key: 'token', value: $('#colToken').value.trim(), type: 'string' }] };
-  } else if (col.auth && col.auth.type === 'bearer') {
-    delete col.auth;
-  }
-  col.variable = colEdit.vars.filter((v) => v.key).map(({ key, value, disabled }) =>
-    disabled ? { key, value, disabled: true } : { key, value });
-  await saveCol(colEdit.cid);
-  $('#dlgCol').close();
-  await refresh();
-  renderCrumb();
-  renderAuthHint();
-  toast('Collection saved');
-}
-
-// ---------------- wiring ----------------
-$('#reqName').addEventListener('input', (e) => { ed.name = e.target.value; changed(); });
-$('#method').addEventListener('change', (e) => { ed.method = e.target.value; changed(); });
-$('#url').addEventListener('input', (e) => { ed.url = e.target.value; changed(); });
-$('#url').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
-$('#authType').addEventListener('change', (e) => { ed.authType = e.target.value; changed(); });
-$('#token').addEventListener('input', (e) => { ed.token = e.target.value.trim(); changed(); });
-$('#bodyMode').addEventListener('change', (e) => { ed.bodyMode = e.target.value; changed(); renderBody(); });
-$('#rawBody').addEventListener('input', (e) => { ed.raw = e.target.value; changed(); });
-$('#btnPretty').addEventListener('click', () => {
-  try { ed.raw = JSON.stringify(JSON.parse(ed.raw), null, 2); $('#rawBody').value = ed.raw; changed(); }
-  catch (e) { toast('Not valid JSON: ' + e.message); }
-});
-$('#btnSend').addEventListener('click', send);
-$('#btnSave').addEventListener('click', () => save().catch((e) => toast(e.message)));
-$('#btnNewCol').addEventListener('click', () => newCollection().catch((e) => toast(e.message)));
-$('#btnImport').addEventListener('click', () => $('#fileImport').click());
-$('#fileImport').addEventListener('change', (e) => { importFiles([...e.target.files]); e.target.value = ''; });
-$('#btnNewReq').addEventListener('click', () => {
-  if (!confirmDiscard()) return;
-  state.target = null; ed = blankEditor(); setDirty(false); renderEditor(); renderTree();
-});
-$('#btnCopy').addEventListener('click', () => navigator.clipboard.writeText(lastBody).then(() => toast('Copied'), () => toast('Copy failed')));
-$('#chkInsecure').checked = store.get('insecure', false);
-$('#chkInsecure').addEventListener('change', (e) => store.set('insecure', e.target.checked));
-$('#colAuthType').addEventListener('change', (e) => { $('#colToken').disabled = e.target.value !== 'bearer'; });
-$('#colCancel').addEventListener('click', () => $('#dlgCol').close());
-$('#colSave').addEventListener('click', () => saveColSettings().catch((e) => toast(e.message)));
-$('#saveCancel').addEventListener('click', () => $('#dlgSave').close());
-$('#saveOk').addEventListener('click', () => { $('#dlgSave').close(); saveScratchTo($('#saveTarget').value).catch((e) => toast(e.message)); });
-bindTabs('#reqTabs', $('#reqTabs').parentElement);
-bindTabs('#respTabs', $('#respTabs').parentElement);
-
-document.addEventListener('keydown', (e) => {
-  if (!(e.metaKey || e.ctrlKey)) return;
-  if (e.key === 'Enter') { e.preventDefault(); send(); }
-  if (e.key.toLowerCase() === 's') { e.preventDefault(); save().catch((err) => toast(err.message)); }
-});
-window.addEventListener('beforeunload', (e) => { if (state.dirty) e.preventDefault(); });
-
-// Drag a Postman export anywhere onto the page to import it.
-document.addEventListener('dragover', (e) => e.preventDefault());
-document.addEventListener('drop', (e) => {
-  e.preventDefault();
-  const files = [...e.dataTransfer.files].filter((f) => f.name.endsWith('.json'));
-  if (files.length) importFiles(files);
-});
-
-// ---------------- backends ----------------
-// "server": started with python3 server.py. Requests go through the local server (no CORS limits,
-//           works with any VPN host), collections are files in the server's folder.
-// "browser": opened as a website (GitHub Pages). Requests are sent by the browser itself, so the API
-//           must allow cross-site requests (CORS). Collections live in this browser, or in a folder
-//           you pick (Chrome/Edge).
-const SCHEMA_V21 = 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json';
-
-function validateCollection(data) {
-  if (!(data && typeof data === 'object' && data.info && typeof data.info.name === 'string' && Array.isArray(data.item))) {
-    throw new Error('Not a Postman v2 collection (needs info.name and item[]). In Postman: Export, then Collection v2.1.');
-  }
-}
-
-function newId(name, exists) {
-  const base = name.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 80) || 'collection';
-  let id = `${base}.json`;
-  for (let n = 2; exists(id); n++) id = `${base}-${n}.json`;
-  return id;
-}
-
-const serverBackend = {
-  mode: 'server',
-  list: () => api('GET', '/api/collections'),
-  get: (id) => api('GET', '/api/collections/' + enc(id)),
-  put: (id, data) => api('PUT', '/api/collections/' + enc(id), data),
-  create: async (data) => (await api('POST', '/api/collections', { collection: data })).id,
-  remove: (id) => api('DELETE', '/api/collections/' + enc(id)),
-  send: (spec) => api('POST', '/api/send', spec),
-};
-
-/** Collections kept in localStorage: { id: collection }. */
-const browserStore = {
-  read() { return store.get('apiman:collections', {}); },
-  write(all) { localStorage.setItem('apiman:collections', JSON.stringify(all)); }, // throws when full: surfaced as a toast
-  async list() { return Object.entries(this.read()).map(([id, c]) => ({ id, name: c.info.name })).sort((a, b) => a.name.localeCompare(b.name)); },
-  async get(id) { const c = this.read()[id]; if (!c) throw new Error('Collection not found'); return structuredClone(c); },
-  async put(id, data) { validateCollection(data); const all = this.read(); all[id] = data; this.write(all); },
-  async create(data) { validateCollection(data); const all = this.read(); const id = newId(data.info.name, (x) => x in all); all[id] = data; this.write(all); return id; },
-  async remove(id) { const all = this.read(); delete all[id]; this.write(all); },
-};
-
-/** Collections as .json files in a real folder, via the File System Access API (Chrome/Edge). */
-function folderStore(dir) {
-  const files = async () => {
-    const out = [];
-    for await (const [name, handle] of dir.entries()) if (handle.kind === 'file' && name.endsWith('.json')) out.push(name);
-    return out;
-  };
-  const read = async (id) => JSON.parse(await (await (await dir.getFileHandle(id)).getFile()).text());
-  const write = async (id, data) => {
-    const w = await (await dir.getFileHandle(id, { create: true })).createWritable();
-    await w.write(JSON.stringify(data, null, 2));
-    await w.close();
-  };
-  return {
-    async list() {
-      const out = [];
-      for (const id of await files()) {
-        try { out.push({ id, name: (await read(id)).info.name }); } catch { out.push({ id, name: id + ' (unreadable)' }); }
-      }
-      return out.sort((a, b) => a.name.localeCompare(b.name));
-    },
-    get: read,
-    async put(id, data) { validateCollection(data); await write(id, data); },
-    async create(data) { validateCollection(data); const names = new Set(await files()); const id = newId(data.info.name, (x) => names.has(x)); await write(id, data); return id; },
-    remove: (id) => dir.removeEntry(id),
-  };
-}
-
-// The chosen folder handle survives reloads in IndexedDB (localStorage can't hold it).
-function idb(op, value) {
-  return new Promise((resolve, reject) => {
-    const open = indexedDB.open('apiman', 1);
-    open.onupgradeneeded = () => open.result.createObjectStore('kv');
-    open.onerror = () => reject(open.error);
-    open.onsuccess = () => {
-      const tx = open.result.transaction('kv', op === 'get' ? 'readonly' : 'readwrite');
-      const req = op === 'get' ? tx.objectStore('kv').get('dir') : tx.objectStore('kv').put(value, 'dir');
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    };
-  });
-}
-
-async function directSend(spec) {
-  const target = new URL(spec.url);
-  const local = ['localhost', '127.0.0.1', '[::1]'].includes(target.hostname);
-  if (location.protocol === 'https:' && target.protocol === 'http:' && !local) {
-    return { error: 'Browsers block plain http:// APIs from a secure page. Use https://, or run ApiMan locally (python3 server.py).' };
-  }
-  const start = performance.now();
-  let r;
-  try {
-    r = await fetch(spec.url, {
-      method: spec.method,
-      headers: spec.headers,
-      body: ['GET', 'HEAD'].includes(spec.method) ? undefined : (spec.body ?? undefined),
-      credentials: 'omit',
-      redirect: 'follow',
-    });
-  } catch {
-    return { error: `The browser couldn't complete this request. Either ${target.host} doesn't allow cross-site requests (CORS), `
-      + 'or it isn\'t reachable from here. Run ApiMan locally (python3 server.py) to call any API without CORS limits.' };
-  }
-  const buf = await r.arrayBuffer();
-  let text = null;
-  try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { /* binary */ }
-  return { status: r.status, reason: r.statusText, headers: [...r.headers], body: text, binary: text === null,
-           size: buf.byteLength, truncated: false, timeMs: Math.round(performance.now() - start), finalUrl: r.url };
-}
-
-function bindAll(o) { return Object.fromEntries(['list', 'get', 'put', 'create', 'remove'].map((k) => [k, o[k].bind(o)])); }
-const browserBackend = { mode: 'browser', ...bindAll(browserStore), send: directSend };
-
-let backend = serverBackend;
-
-async function useFolder(dir) {
-  backend = { mode: 'browser', ...folderStore(dir), send: directSend };
-  state.cols = {};
-  state.target = null;
-  renderCrumb();
-  $('#dataDir').textContent = `Collections folder: ${dir.name} (on this computer)`;
-  $('#btnFolder').textContent = 'Change folder';
-  $('#btnFolder').onclick = () => pickFolder().catch((e) => e.name !== 'AbortError' && toast(e.message));
-  await refresh();
-}
-
-async function pickFolder() {
-  if (!confirmDiscard()) return;
-  const dir = await window.showDirectoryPicker({ id: 'apiman', mode: 'readwrite' });
-  await idb('set', dir);
-  setDirty(false);
-  await useFolder(dir);
-  toast(`Saving collections to the "${dir.name}" folder`);
-}
-
-async function startBrowserMode() {
-  backend = browserBackend;
-  $('#chkInsecure').checked = false;
-  $('#chkInsecure').parentElement.hidden = true; // browsers can't skip certificate checks
-  $('#dataDir').textContent = 'Collections are saved in this browser. Run ApiMan locally to call any API without CORS limits.';
-  if (!window.showDirectoryPicker) return refresh();
-  const btn = $('#btnFolder');
-  btn.hidden = false;
-  btn.onclick = () => pickFolder().catch((e) => e.name !== 'AbortError' && toast(e.message));
-  const dir = await idb('get').catch(() => null);
-  if (dir && (await dir.queryPermission({ mode: 'readwrite' })) === 'granted') return useFolder(dir);
-  if (dir) {
-    // After a browser restart, permission must be granted again, and only from a click.
-    btn.textContent = `Reconnect folder "${dir.name}"`;
-    btn.onclick = async () => {
-      if ((await dir.requestPermission({ mode: 'readwrite' })) === 'granted') await useFolder(dir);
-    };
-  }
-  return refresh();
-}
-
-(async () => {
-  renderEditor();
-  try {
-    let info = null;
-    try { info = await api('GET', '/api/info'); } catch { /* no local server: website mode */ }
-    if (info && info.dataDir) {
-      $('#dataDir').textContent = 'Collections folder: ' + info.dataDir;
-      await refresh();
-    } else {
-      await startBrowserMode();
-    }
-  } catch (e) {
-    toast('Could not load collections: ' + e.message);
-  }
-})();
-</script>
+<script src="app.js"></script>
 </body>
 </html>

@@ -1,4 +1,5 @@
 """Self-check for server.py. Run: python3 test_server.py  (stdlib only, no network beyond localhost)."""
+import base64
 import json
 import tempfile
 import threading
@@ -12,7 +13,7 @@ import server
 
 
 class Echo(BaseHTTPRequestHandler):
-    """Fake target API: echoes method, auth header and body."""
+    """Fake target API: echoes what it received; /redirect?to=URL answers 302."""
 
     def handle_any(self):
         if self.path.startswith("/redirect?to="):
@@ -21,9 +22,11 @@ class Echo(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         status = 404 if self.path == "/missing" else 200
-        data = json.dumps({"method": self.command, "auth": self.headers.get("Authorization"), "body": body}).encode()
+        data = json.dumps({"method": self.command, "auth": self.headers.get("Authorization"),
+                           "apikey": self.headers.get("X-Api-Key"), "ctype": self.headers.get("Content-Type"),
+                           "body_b64": base64.b64encode(raw).decode()}).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -46,7 +49,7 @@ class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
-        server.Handler.store = server.Store(cls.tmp.name)
+        server.Handler.stores = server.make_stores(cls.tmp.name)
         cls.app = start(server.Handler)
         cls.echo = start(Echo)
         cls.base = f"http://127.0.0.1:{cls.app.server_address[1]}"
@@ -64,44 +67,64 @@ class ServerTest(unittest.TestCase):
                                      data=json.dumps(body).encode() if body is not None else None)
         try:
             with urllib.request.urlopen(req) as r:
-                return r.status, json.loads(r.read())
+                raw = r.read()
+                return r.status, json.loads(raw) if r.headers.get_content_type() == "application/json" else raw
         except urllib.error.HTTPError as e:
-            return e.code, json.loads(e.read())
+            with e:
+                return e.code, json.loads(e.read())
+
+    def send(self, **spec):
+        return self.call("POST", "/api/send", spec)[1]
+
+    # ---------- sending ----------
 
     def test_send_forwards_method_headers_body_and_reports_errors(self):
-        status, res = self.call("POST", "/api/send", {
-            "method": "POST", "url": self.target + "/x", "headers": [["Authorization", "Bearer abc"]], "body": '{"a":1}'})
-        self.assertEqual(status, 200)
+        res = self.send(method="POST", url=self.target + "/x", headers=[["Authorization", "Bearer abc"]], body='{"a":1}')
         self.assertEqual(res["status"], 200)
         echoed = json.loads(res["body"])
-        self.assertEqual(echoed, {"method": "POST", "auth": "Bearer abc", "body": '{"a":1}'})
+        self.assertEqual((echoed["method"], echoed["auth"]), ("POST", "Bearer abc"))
+        self.assertEqual(base64.b64decode(echoed["body_b64"]), b'{"a":1}')
 
-        _, res = self.call("POST", "/api/send", {"method": "GET", "url": self.target + "/missing"})
-        self.assertEqual(res["status"], 404)  # 4xx is a response, not an error
+        self.assertEqual(self.send(method="GET", url=self.target + "/missing")["status"], 404)  # 4xx is a response
+        self.assertIn("Could not connect", self.send(method="GET", url="http://127.0.0.1:1/")["error"])
+        self.assertIn("must start with http", self.send(method="GET", url="file:///etc/passwd")["error"])
 
-        _, res = self.call("POST", "/api/send", {"method": "GET", "url": "http://127.0.0.1:1/"})
-        self.assertIn("Could not connect", res["error"])
+    def test_binary_body_is_sent_byte_for_byte(self):
+        payload = bytes(range(256))
+        res = self.send(method="PUT", url=self.target + "/upload", headers=[["Content-Type", "application/octet-stream"]],
+                        bodyBase64=base64.b64encode(payload).decode())
+        self.assertEqual(base64.b64decode(json.loads(res["body"])["body_b64"]), payload)
 
-        _, res = self.call("POST", "/api/send", {"method": "GET", "url": "file:///etc/passwd"})
-        self.assertIn("must start with http", res["error"])
+    # ---------- redirects ----------
 
-    def test_redirects_keep_token_on_same_origin_but_drop_it_cross_origin(self):
+    def redirect_to(self, url):
+        return f"{self.target}/redirect?to=" + urllib.parse.quote(url, safe="")
+
+    def test_redirects_keep_credentials_on_same_origin_but_drop_them_cross_origin(self):
         port = self.echo.server_address[1]
-        same = f"{self.target}/redirect?to=" + urllib.parse.quote(f"http://127.0.0.1:{port}/x", safe="")
-        cross = f"{self.target}/redirect?to=" + urllib.parse.quote(f"http://localhost:{port}/x", safe="")
-        auth = [["Authorization", "Bearer secret"]]
+        creds = [["Authorization", "Bearer secret"], ["X-Api-Key", "k-123"], ["Accept", "application/json"]]
 
-        _, res = self.call("POST", "/api/send", {"method": "GET", "url": same, "headers": auth})
-        self.assertEqual(json.loads(res["body"])["auth"], "Bearer secret")
+        same = self.send(method="GET", url=self.redirect_to(f"http://127.0.0.1:{port}/x"), headers=creds)
+        self.assertEqual(json.loads(same["body"])["auth"], "Bearer secret")
+        self.assertEqual(same["redirectStripped"], [])
 
-        _, res = self.call("POST", "/api/send", {"method": "GET", "url": cross, "headers": auth})
-        self.assertEqual(res["finalUrl"], f"http://localhost:{port}/x")
-        self.assertIsNone(json.loads(res["body"])["auth"])  # token not leaked to the other host
+        cross = self.send(method="GET", url=self.redirect_to(f"http://localhost:{port}/x"), headers=creds)
+        echoed = json.loads(cross["body"])
+        self.assertEqual(cross["finalUrl"], f"http://localhost:{port}/x")
+        self.assertIsNone(echoed["auth"])     # bearer token not leaked to the other host
+        self.assertIsNone(echoed["apikey"])   # nor a custom credential header (allowlist, not denylist)
+        self.assertEqual(sorted(h.lower() for h in cross["redirectStripped"]), ["authorization", "x-api-key"])
 
     def test_https_to_http_redirect_is_refused(self):
         req = urllib.request.Request("https://api.example/a")
         with self.assertRaises(server.RedirectRefused):
             server.SafeRedirect().redirect_request(req, None, 302, "Found", {}, "http://api.example/b")
+
+    def test_follow_redirects_can_be_turned_off(self):
+        res = self.send(method="GET", url=self.redirect_to(self.target + "/x"), followRedirects=False)
+        self.assertEqual(res["status"], 302)
+
+    # ---------- storage ----------
 
     def test_collections_crud_and_import_validation(self):
         coll = {"info": {"name": "My API"}, "item": [{"name": "r", "request": {"method": "GET", "url": "x"}}]}
@@ -116,13 +139,23 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(len(self.call("GET", f"/api/collections/{cid}")[1]["item"]), 2)
         self.assertIn({"id": cid, "name": "My API"}, self.call("GET", "/api/collections")[1])
 
-        self.assertEqual(self.call("POST", "/api/collections", {"collection": {"values": []}})[0], 400)  # not a collection
+        self.assertEqual(self.call("POST", "/api/collections", {"collection": {"values": []}})[0], 400)
         self.assertEqual(self.call("DELETE", f"/api/collections/{cid}")[0], 200)
         self.assertEqual(self.call("GET", f"/api/collections/{cid}")[0], 404)
+
+    def test_environments_are_stored_separately(self):
+        env = {"name": "Staging", "values": [{"key": "baseUrl", "value": "https://staging", "enabled": True}]}
+        eid = self.call("POST", "/api/environments", {"document": env})[1]["id"]
+        self.assertEqual(eid, "Staging.json")
+        self.assertEqual(self.call("GET", f"/api/environments/{eid}")[1]["values"][0]["key"], "baseUrl")
+        self.assertNotIn(eid, [c["id"] for c in self.call("GET", "/api/collections")[1]])
+        self.assertEqual(self.call("POST", "/api/environments", {"document": {"info": {}}})[0], 400)
 
     def test_path_traversal_is_rejected(self):
         for bad in ("..%2Fsecret.json", "%2Fetc%2Fpasswd", ".hidden.json", "x.txt"):
             self.assertEqual(self.call("GET", f"/api/collections/{bad}")[0], 400, bad)
+
+    # ---------- who may talk to the server ----------
 
     def test_other_websites_cannot_use_the_proxy(self):
         status, _ = self.call("POST", "/api/send", {"method": "GET", "url": self.target},
@@ -130,6 +163,10 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 403)
         status, _ = self.call("GET", "/api/collections", headers={"Host": "attacker.example:5577"})
         self.assertEqual(status, 403)
+
+    def test_only_whitelisted_static_files_are_served(self):
+        self.assertEqual(self.call("GET", "/server.py")[0], 404)
+        self.assertEqual(self.call("GET", "/../server.py")[0], 404)
 
 
 if __name__ == "__main__":
