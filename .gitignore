@@ -1,0 +1,4 @@
+# Your own collections stay local: they usually contain tokens.
+collections/
+__pycache__/
+.DS_Store
