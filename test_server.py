@@ -101,7 +101,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(base64.b64decode(echoed["body_b64"]), b'{"a":1}')
 
         self.assertEqual(self.send(method="GET", url=self.target + "/missing")["status"], 404)  # 4xx is a response
-        self.assertIn("Could not connect", self.send(method="GET", url="http://127.0.0.1:1/")["error"])
+        self.assertIn("Connection refused by 127.0.0.1:1: nothing is listening", self.send(method="GET", url="http://127.0.0.1:1/")["error"])
         self.assertIn("must start with http", self.send(method="GET", url="file:///etc/passwd")["error"])
 
     def test_binary_body_is_sent_byte_for_byte(self):

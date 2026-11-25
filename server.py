@@ -224,6 +224,18 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def connect_error(url, reason):
+    """A plain-language connection error instead of '[Errno 61] Connection refused'."""
+    host = urllib.parse.urlsplit(url).netloc
+    if isinstance(reason, ConnectionRefusedError):
+        return f"Connection refused by {host}: nothing is listening there. Is the server running, or the VPN connected?"
+    if isinstance(reason, socket.gaierror):
+        return f"Couldn't find {host}: the name doesn't resolve. Check the URL, or connect to the VPN."
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return f"{host} didn't answer in time."
+    return f"Could not connect to {host}: {getattr(reason, 'strerror', None) or reason}"
+
+
 def send(spec):
     """Execute one HTTP request exactly as described by the UI (variables, auth and scripts already applied)."""
     if not isinstance(spec, dict):
@@ -281,7 +293,7 @@ def send(spec):
     except RedirectRefused as e:
         return {"error": str(e)}
     except urllib.error.URLError as e:
-        return {"error": f"Could not connect: {e.reason}"}
+        return {"error": connect_error(url, e.reason)}
     except Exception as e:  # timeouts, bad TLS, etc.
         return {"error": f"{type(e).__name__}: {e}"}
 

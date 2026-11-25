@@ -205,10 +205,12 @@ input[type="number"] { font-variant-numeric: tabular-nums; }
 }
 /* Brand column ends exactly where the work area's gutter begins, so New/Import/Runner line up with the content below. */
 .brand { display: flex; align-items: center; gap: var(--s2); width: calc(var(--side-eff) + var(--gutter) - var(--side-gutter) - var(--h) - 3 * var(--s2)); flex: none; }
+@media (min-width: 821px) { /* sidebar on the right: desktop only, phones always stack it */
 :root[data-side="right"] .brand { width: auto; order: 2; margin-left: var(--s3); }
 :root[data-side="right"] .top-actions { order: 1; padding-left: calc(var(--gutter) - var(--side-gutter)); }
 :root[data-side="right"] #btnSide { order: 3; }
 :root[data-side="right"] .top > .spacer { order: 4; } :root[data-side="right"] .env-picker { order: 5; } :root[data-side="right"] #btnTheme { order: 6; } :root[data-side="right"] #btnSettings { order: 7; }
+}
 .brand svg { width: 24px; height: 24px; }
 .brand .logo-bg { fill: var(--logo); }
 .wordmark { font-weight: 700; font-size: var(--fs-lg); letter-spacing: -0.01em; }
@@ -261,10 +263,10 @@ input[type="number"] { font-variant-numeric: tabular-nums; }
 /* ===================================================================================== tabs strip */
 .work { display: flex; flex-direction: column; min-width: 0; min-height: 0; container: work / inline-size; }
 /* auto-stack (set by JS when side-by-side panes would be narrower than their content needs) */
-:root[data-auto-stack="true"] .split:not([data-max]) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(160px, var(--req-h, 50%)) 1px minmax(160px, 1fr); }
+:root[data-auto-stack="true"] .split:not([data-max]) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(260px, var(--req-h, 50%)) 1px minmax(260px, 1fr); }
 :root[data-auto-stack="true"] .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
 :root[data-auto-stack="true"] .split > .resizer::after { inset: -1px 0; }
-.tabstrip { scroll-padding-inline-end: var(--h-bar); display: flex; align-items: stretch; height: var(--h-bar); background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: thin; flex: none; }
+.tabstrip { scroll-padding-inline-end: var(--h-bar); display: flex; align-items: stretch; height: var(--h-bar); background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; flex: none; } /* scrolls by wheel/trackpad; the active tab is kept in view */
 .rtab {
   display: flex; align-items: center; gap: var(--s2); padding: 0 var(--s1) 0 var(--s3); min-width: 132px; max-width: 220px;
   border-right: 1px solid var(--line); cursor: pointer; position: relative; color: var(--muted); font-size: var(--fs-sm);
@@ -372,6 +374,7 @@ body.resizing iframe { pointer-events: none; }
 .auth-form .narrow { max-width: 360px; }
 .kv-path .chk-pad { width: 36px; }
 .resp-meta + .pane-max { margin-left: var(--s2); }
+#respTabs.meta-out .pane-max { margin-left: auto; } /* status moved out: stay flush right like the request side */
 
 
 .count { font-size: var(--fs-xs); font-weight: 600; color: var(--ink-2); font-variant-numeric: tabular-nums; }
@@ -599,19 +602,21 @@ table.grid .tight { width: 1%; white-space: nowrap; }
 .runner-fail { display: flex; gap: var(--s2); align-items: baseline; margin-top: var(--s1); font-size: var(--fs-xs); color: var(--muted); font-weight: 400; white-space: normal; }
 
 /* ===================================================================================== responsive */
-:root[data-layout="stacked"] .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(160px, var(--req-h, 50%)) 1px minmax(160px, 1fr); }
+:root[data-layout="stacked"] .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(260px, var(--req-h, 50%)) 1px minmax(260px, 1fr); }
 :root[data-layout="stacked"] .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
 :root[data-layout="stacked"] .split > .resizer::after { inset: -1px 0; }
 @media (max-width: 1180px) {
-  .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(200px, var(--req-h, 50%)) 1px minmax(200px, 1fr); }
+  .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(260px, var(--req-h, 50%)) 1px minmax(260px, 1fr); }
   .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
   .split > .resizer::after { inset: -1px 0; }
 }
 /* #btnSide: on phones it opens the sidebar panel; on desktop it hides/shows the sidebar (Cmd/Ctrl+B) */
+@media (min-width: 821px) { /* sidebar on the right: desktop only, phones always stack it */
 :root[data-side="right"] .app { grid-template-columns: minmax(0, 1fr) var(--side-eff); }
 :root[data-side="right"] .side { grid-column: 2; grid-row: 2; border-right: 0; border-left: 1px solid var(--line); }
 :root[data-side="right"] .work { grid-column: 1; grid-row: 2; }
 :root[data-side="right"] .side > .resizer { right: auto; left: -3px; }
+}
 :root[data-side-hidden="true"] .app { grid-template-columns: minmax(0, 1fr); }
 :root[data-side-hidden="true"] .side { display: none; }
 :root[data-side-hidden="true"] .brand { width: auto; }
@@ -698,7 +703,6 @@ mark { background: color-mix(in srgb, var(--post) 30%, transparent); color: inhe
 #respTabs.meta-out .resp-meta { display: none; }
 .slider-row .unit-select { width: auto; flex: none; }
 #respTools > .seg, .pane-tools > .seg { flex: none; flex-wrap: nowrap; } /* a toggle never breaks across lines */
-@media (max-width: 820px) { #respTools { flex-wrap: wrap; row-gap: var(--s2); } }
 #respTools > .btn { flex: none; }
 /* 11 13: body toolbar stays on one line; the segmented control scrolls with a fade instead of wrapping */
 #pane-body .pane-tools { flex-wrap: nowrap; }
@@ -730,3 +734,6 @@ table.kv input[type="text"], table.kv input[type="password"] { text-overflow: el
 #respTools.icons .tool-group .btn svg { display: block; }
 #respTools.icons .tool-group .btn .lbl { display: none; }
 #respTools.icons .tool-group .btn { width: var(--h-sm); padding: 0; justify-content: center; }
+@media (max-width: 820px) { .resp-body { max-height: 70vh; overflow: auto; } } /* phones: the response scrolls in its own panel too */
+.tabs .tab, .seg-btn { min-height: max(24px, calc(var(--h-sm) * 0.85)); } /* compact extremes stay clickable */
+@media (max-width: 820px) { .tabs .tab { padding: 0 var(--s2); } } /* phones: all six tabs fit at 390px */

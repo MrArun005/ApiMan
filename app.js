@@ -169,7 +169,7 @@ function applyAppearance(s = state.settings) {
   root.dataset.wrap = s.wrap === false ? 'off' : 'on';
   if (initResizers.autoStack) initResizers.autoStack();
   if (initResizers.refresh) initResizers.refresh();
-  if (!isPhone()) $('#btnSide')?.setAttribute('aria-expanded', String(!s.sideHidden)); // #15
+  if (!isPhone()) { $('#btnSide')?.setAttribute('aria-expanded', String(!s.sideHidden)); $('#btnSide')?.setAttribute('aria-label', s.sideHidden ? 'Show sidebar' : 'Hide sidebar'); }
 }
 
 const state = {
@@ -1931,7 +1931,7 @@ function renderTabs() {
         h('span', { class: `mtag ${t.ed.method}` }, t.ed.method),
         h('span', { class: 'tname' }, t.ed.name),
         h('span', { class: `dot ${t.dirty ? '' : 'off'}`, role: t.dirty ? 'img' : null, 'aria-label': t.dirty ? 'Unsaved changes' : null, title: t.dirty ? 'Unsaved changes' : null }),
-        h('button', { class: 'x', title: 'Close tab', 'aria-label': `Close ${t.ed.name}`, onclick: (e) => { e.stopPropagation(); closeTab(i); } }, icon('x')));
+        h('button', { class: 'x', title: 'Close tab', 'aria-label': `Close ${t.ed.name}`, tabindex: i === state.active ? '0' : '-1', onclick: (e) => { e.stopPropagation(); closeTab(i); } }, icon('x')));
     }),
     h('button', { class: 'newtab', title: 'New request tab', 'aria-label': 'New request tab', onclick: () => { openTab(newTab()); $('#url').focus(); } }, icon('plus')));
   const on = strip.querySelector('.rtab.on');
@@ -2741,7 +2741,7 @@ function renderDialog({ title, body, buttons = [], wide = false, confirm = false
   dialogCloses.set(dialogSeq, onClose || null);
   if (!dlg.open) dlg.showModal();
   // Start on the first field, not on the close button (or on what the dialog asks for).
-  const first = $('#dlgBody').querySelector('input:not([type=checkbox]):not([type=file]):not([type=range]):not([disabled]):not([readonly]), select, textarea');
+  const first = [...$('#dlgBody').querySelectorAll('input:not([type=checkbox]):not([type=file]):not([type=range]):not([type=color]):not([disabled]):not([readonly]), select, textarea')].find((el) => el.getClientRects().length); // first visible field
   if (focus) ($(focus) || dlg).focus();
   else if (first) first.focus();
   else ($('#dlgFoot .btn.primary') || $('#dlgFoot .btn:last-child') || dlg).focus();
@@ -3780,7 +3780,7 @@ function initResizers() {
   const splitBounds = () => {
     const r = $('.split').getBoundingClientRect();
     const total = stacked() ? r.height : r.width;
-    const minPx = stacked() ? 160 : 320 * cssScale();
+    const minPx = stacked() ? 260 : 320 * cssScale();
     const lo = total > 0 ? Math.max(15, (minPx / total) * 100) : 15;
     return [Math.min(lo, 50), Math.max(100 - lo, 50) > 85 ? 85 : Math.max(100 - lo, 50)];
   };
@@ -3908,9 +3908,10 @@ async function start() {
     respRow.classList.remove(...steps);
     tools.classList.remove('wrap', 'icons');
     alt.replaceChildren();
-    if (!meta.textContent.trim() || matchMedia('(max-width: 820px)').matches) return; // phones give the status its own line
+    if (!meta.textContent.trim()) return;
+    const phone = matchMedia('(max-width: 820px)').matches; // phones give the status its own line
     const fits = () => seg.scrollWidth <= seg.clientWidth + 1 && respRow.scrollWidth <= respRow.clientWidth + 1; // real clipping, measured
-    for (const step of steps) { if (fits()) break; respRow.classList.add(step); }
+    if (!phone) for (const step of steps) { if (fits()) break; respRow.classList.add(step); }
     const has = (c) => respRow.classList.contains(c);
     const moved = has('meta-out') ? [...meta.children] : [has('hide-time') && meta.querySelector('.m-time'), has('hide-size') && meta.querySelector('.m-size')].filter(Boolean);
     alt.replaceChildren(...moved.map((el) => { const c = el.cloneNode(true); c.querySelector('.m-reason')?.remove(); return c; })); // the code's colour + tooltip carry the reason
