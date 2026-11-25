@@ -32,7 +32,9 @@ You only need Python 3. There's nothing to install.
 
 ## Safety
 
-- **Scripts are sandboxed.** Imported collections can contain scripts you didn't write. In ApiMan, every script runs in a Web Worker inside a sandboxed iframe whose Content-Security-Policy is `default-src 'none'`. A script can't make network requests (so it can't leak tokens), can't read ApiMan's storage or the page, and is stopped after 5 seconds, so an endless loop can't freeze the app. `pm.sendRequest` is disabled for the same reason.
+- **Scripts are sandboxed.** Imported collections can contain scripts you didn't write. In ApiMan, every script runs in a Web Worker inside a sandboxed iframe whose Content-Security-Policy is `default-src 'none'`. A script can't make network requests of its own (`pm.sendRequest` is disabled too), can't read ApiMan's storage or the page, and is stopped after 5 seconds, so an endless loop can't freeze the app.
+- **Scripts can't quietly send your request elsewhere.** If a pre-request script changes which server a request goes to, ApiMan asks before sending it there with your auth. In the runner, where there's no one to ask, it blocks the request. Script changes to URL-like variables (`baseUrl`, `host`, …) also need your OK before they're saved, and every variable a script changes is listed in the Console.
+- **Imported methods are validated.** HTTP methods from imported files are checked, and generated shell code quotes every value.
 - **Credentials never follow a redirect to another site.** When a redirect changes the scheme, host or port, only harmless headers (Accept, Accept-Language, User-Agent, Content-Type) are kept, and the response tells you which ones were removed. HTTPS is never downgraded to HTTP.
 - **Only ApiMan can use the local server.** It listens on `127.0.0.1` only, and it rejects requests from other websites (Origin check) and DNS-rebinding attempts (Host check). It serves only its own three files.
 - **Secrets stay hidden on screen.** Mark environment or collection variables as Secret to mask them. Generated code hides tokens by default.

@@ -493,7 +493,8 @@ function fromItem(item) {
   const req = typeof item.request === 'string' ? { url: item.request, method: 'GET' } : (item.request || {});
   const ed = blankEd();
   ed.name = item.name || 'Untitled request';
-  ed.method = String(req.method || 'GET').toUpperCase();
+  const method = String(req.method || 'GET').toUpperCase();
+  ed.method = /^[A-Z]{1,16}$/.test(method) ? method : 'GET'; // imported files are untrusted: no "GET; rm -rf ~"
   const u = urlIn(req.url);
   ed.url = u.raw;
   ed.params = [...parseQuery(u.raw), ...u.disabled];
@@ -767,7 +768,7 @@ self.onmessage = async (e) => {
         else done(true);
       } catch (err) { done(false, err); }
     },
-    sendRequest: () => { throw new Error('pm.sendRequest is disabled: scripts run without network access in ApiMan, so they cannot leak your data.'); },
+    sendRequest: () => { throw new Error('pm.sendRequest is disabled: scripts in ApiMan cannot make network requests of their own.'); },
   };
   pm.test.skip = (name) => tests.push({ name: String(name), passed: null, error: 'skipped' });
 
@@ -933,6 +934,7 @@ function buildWire(ed, req, vars, authInfo) {
   }
 
   if (!url) return { error: 'Enter a URL.' };
+  if (!/^[A-Z]{1,16}$/.test(req.method)) return { error: `"${req.method}" isn't a valid HTTP method.` };
   const missingVars = unresolved(checks.map(r));
   if (missingVars.length) {
     return { error: `Unknown variable${missingVars.length > 1 ? 's' : ''} ${missingVars.map((v) => `{{${v}}}`).join(', ')}. Define ${missingVars.length > 1 ? 'them' : 'it'} in the environment, the collection, or Globals.` };
@@ -990,15 +992,54 @@ async function persistScopes(cid, before, after, logs) {
  * Runs the whole pipeline for an editor model. Used by Send and by the collection runner.
  * Returns { res, wire, tests, logs, warnings, error }.
  */
-async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true }) {
+function originOf(url) {
+  const u = String(url || '').trim();
+  try { return new URL(/^[a-z][\w+.-]*:\/\//i.test(u) ? u : `http://${u}`).origin; } catch { return null; }
+}
+const approvedOrigins = new Set(); // "itemKey -> origin" pairs the user allowed this session
+
+/**
+ * Scripts can't make network calls, but they can change variables. A changed URL-like variable
+ * (baseUrl, host, ...) could quietly send your token somewhere else on the NEXT request, so those
+ * changes need your OK; in the runner (no one to ask) they are not saved. Every change is logged.
+ */
+async function guardVarChanges(before, after, ask, logs) {
+  const risky = [];
+  for (const scope of ['environment', 'collection', 'globals']) {
+    const b = before[scope], a = after[scope];
+    for (const k of new Set([...Object.keys(b), ...Object.keys(a)])) {
+      if (b[k] === a[k]) continue;
+      const removed = !(k in a);
+      logs.push({ level: 'info', text: `Script ${removed ? 'removed' : 'set'} ${scope} variable "${k}"`, src: 'ApiMan' });
+      if (!removed && (/:\/\//.test(a[k]) || /url|host|domain|endpoint|server|origin/i.test(k))) risky.push({ scope, k, value: a[k] });
+    }
+  }
+  if (!risky.length) return after;
+  const list = risky.map((r) => `  ${r.scope}.${r.k} = ${r.value.length > 80 ? `${r.value.slice(0, 77)}...` : r.value}`).join('\n');
+  const ok = ask ? await ask(`A script wants to change where future requests go:\n\n${list}\n\nSave these changes? Only allow this if you trust the scripts in this collection.`) : false;
+  if (ok) return after;
+  for (const r of risky) {
+    if (r.k in before[r.scope]) after[r.scope][r.k] = before[r.scope][r.k]; else delete after[r.scope][r.k];
+    logs.push({ level: 'warn', text: `Not saved: ${r.scope} variable "${r.k}" (a script tried to change a URL-like value${ask ? '' : '; run the request on its own to approve it'}).`, src: 'ApiMan' });
+  }
+  return after;
+}
+
+/**
+ * Runs the whole pipeline for an editor model. Used by Send (ask = confirm dialog) and by the
+ * collection runner (ask = null: anything that needs approval is blocked).
+ */
+async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true, ask = null }) {
   const logs = [], tests = [], warnings = [];
   const before = scopesFor(cid);
   let scopes = JSON.parse(JSON.stringify(before));
   let req = requestSnapshot(ed);
+  const plannedOrigin = originOf(resolve(ed.url, merged(before)));
+  const preScripts = scriptChain(cid, itemId, ed, 'prerequest');
   const info = { requestName: ed.name, requestId: itemId || '', iteration, eventName: 'prerequest' };
   const envName = state.activeEnv && state.envs[state.activeEnv] ? state.envs[state.activeEnv].name : '';
 
-  for (const s of scriptChain(cid, itemId, ed, 'prerequest')) {
+  for (const s of preScripts) {
     const out = await runScript(s.code, { vars: scopes, request: req, response: null, info, envName });
     scopes = out.vars;
     req = out.request;
@@ -1016,6 +1057,18 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true 
   const built = buildWire(ed, req, vars, authInfo);
   if (built.error) return { error: built.error, logs, tests, warnings };
   const wire = built.wire;
+
+  // A pre-request script may not silently send this request (and its auth) to a different server.
+  const finalOrigin = originOf(wire.url);
+  const approvalKey = `${cid || 'scratch'}:${itemId || ed.name} -> ${finalOrigin}`;
+  if (preScripts.length && finalOrigin !== plannedOrigin && !approvedOrigins.has(approvalKey)) {
+    const msg = `A pre-request script changed where this request goes:\n\n  from ${plannedOrigin || '(unresolved URL)'}\n  to   ${finalOrigin}\n\nSend it there, including your auth headers? Only allow this if you trust the scripts in this collection.`;
+    if (!(ask && await ask(msg))) {
+      logs.push({ level: 'warn', text: `Blocked: a script redirected the request to ${finalOrigin}.`, src: 'ApiMan' });
+      return { error: `Not sent: a pre-request script changed the destination to ${finalOrigin}${ask ? '' : '. Send this request on its own to approve it'}.`, logs, tests, warnings };
+    }
+    approvedOrigins.add(approvalKey);
+  }
 
   const target = new URL(wire.url);
   const sendsSecret = wire.headers.some(([k]) => /^(authorization|cookie|x-api-key)$/i.test(k)) || authInfo.auth.type === 'apikey';
@@ -1050,7 +1103,10 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true 
     }
   }
   if (persist) {
-    try { await persistScopes(cid, before, scopes, logs); } catch (e) { logs.push({ level: 'error', text: `Couldn't save variable changes: ${e.message}`, src: 'ApiMan' }); }
+    try {
+      scopes = await guardVarChanges(before, scopes, ask, logs);
+      await persistScopes(cid, before, scopes, logs);
+    } catch (e) { logs.push({ level: 'error', text: `Couldn't save variable changes: ${e.message}`, src: 'ApiMan' }); }
   }
   return { res, wire, tests, logs, warnings, error: res.error || '' };
 }
@@ -2005,7 +2061,7 @@ async function send() {
   t.sending = ctrl;
   t.out = null;
   renderResponse();
-  const out = await execute({ ed: t.ed, cid: t.cid, itemId: t.itemId, signal: ctrl.signal });
+  const out = await execute({ ed: t.ed, cid: t.cid, itemId: t.itemId, signal: ctrl.signal, ask: async (m) => confirm(m) });
   if (t.sending !== ctrl) return; // superseded
   t.sending = null;
   t.out = out;
@@ -2113,7 +2169,7 @@ function scriptsPair(model) {
   return [
     mk('pre', 'Pre-request: runs before every request inside', '// e.g. refresh a timestamp\npm.collectionVariables.set("now", Date.now());'),
     mk('test', 'Tests: run after every request inside', 'pm.test("No server errors", () => pm.expect(pm.response.code).to.be.below(500));'),
-    h('p', { class: 'hint' }, 'Scripts run sandboxed: no network access and no access to your other data.'),
+    h('p', { class: 'hint' }, 'Scripts run sandboxed: they can\'t make network calls of their own or read your stored data, and ApiMan asks before a script changes which server a request goes to.'),
   ];
 }
 
@@ -2385,7 +2441,7 @@ function parseCurl(cmd) {
     const long = tk.match(/^(--[\w-]+)=(.*)$/);
     const flag = long ? long[1] : tk;
     const val = () => (long ? long[2] : next());
-    if (flag === '-X' || flag === '--request') method = val().toUpperCase();
+    if (flag === '-X' || flag === '--request') { method = val().toUpperCase(); if (!/^[A-Z]{1,16}$/.test(method)) throw new Error(`"${method}" isn't a valid HTTP method.`); }
     else if (/^-X[A-Z]+$/.test(tk)) method = tk.slice(2);
     else if (flag === '-H' || flag === '--header') {
       const hv = val();
@@ -2459,7 +2515,7 @@ const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 const dq = (s) => JSON.stringify(String(s));
 const GENERATORS = {
   curl: { label: 'cURL', gen(w) {
-    const lines = [`curl -X ${w.method} ${sq(w.url)}`];
+    const lines = [`curl -X ${sq(w.method)} ${sq(w.url)}`];
     for (const [k, v] of w.headers) lines.push(`  -H ${sq(`${k}: ${v}`)}`);
     if (w.body.kind === 'text') lines.push(`  --data-raw ${sq(w.body.text)}`);
     if (w.body.kind === 'formdata') for (const f of w.body.fields) lines.push(`  -F ${sq(f.file ? `${f.key}=@${f.file.name}` : `${f.key}=${f.value}`)}`);
