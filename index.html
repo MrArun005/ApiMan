@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<meta name="apiman-token" content="__APIMAN_TOKEN__">
 <title>ApiMan</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23193a5c'/><path d='M7 20c4 0 4-8 9-8s5 8 9 8' stroke='%23f2b33d' stroke-width='3' fill='none' stroke-linecap='round'/><circle cx='7' cy='20' r='2.6' fill='%2347b881'/><circle cx='25' cy='20' r='2.6' fill='%235b8def'/></svg>">
 <script>
@@ -107,7 +108,7 @@
             <button class="tab" role="tab" id="tab-headers" aria-controls="pane-headers" aria-selected="false" data-tab="headers">Headers<span class="count" id="cntHeaders"></span></button>
             <button class="tab" role="tab" id="tab-body" aria-controls="pane-body" aria-selected="false" data-tab="body">Body<span class="count" id="cntBody"></span></button>
             <button class="tab" role="tab" id="tab-scripts" aria-controls="pane-scripts" aria-selected="false" data-tab="scripts">Scripts<span class="count" id="cntScripts"></span></button>
-            <button class="tab" role="tab" id="tab-docs" aria-controls="pane-docs" aria-selected="false" data-tab="docs">Docs</button>
+            <button class="tab" role="tab" id="tab-docs" aria-controls="pane-docs" aria-selected="false" data-tab="docs">Docs<span class="count" id="cntDocs"></span></button>
             </div>
             <button class="btn icon small pane-max" data-max="req" aria-pressed="false" title="Maximise the request pane" aria-label="Maximise the request pane"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 8V4h4M16 12v4h-4M4 4l5 5M16 16l-5-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
           </div>
@@ -167,6 +168,7 @@
                 <button class="seg-btn" role="radio" aria-checked="false" data-view="preview">Preview</button>
               </div>
               <div class="spacer"></div>
+              <span class="resp-meta-alt" id="respMetaAlt" aria-hidden="true"></span>
               <button class="btn small ghost" id="btnFindBody" title="Search the response (Cmd/Ctrl+F in the body). Enter: next, Shift+Enter: previous, Esc: close.">Find</button>
               <button class="btn small ghost" id="btnCopyBody">Copy</button>
               <button class="btn small ghost" id="btnSaveBody">Save to file</button>

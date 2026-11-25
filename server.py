@@ -13,7 +13,11 @@ Collections are Postman v2.1 JSON files; environments are Postman environment JS
 import argparse
 import base64
 import hashlib
+import hmac
+import ipaddress
 import json
+import secrets
+import socket
 import os
 import re
 import ssl
@@ -34,6 +38,32 @@ MAX_REQUEST = 50 * 1024 * 1024    # what the browser may send us
 MAX_RESPONSE = 20 * 1024 * 1024   # what we read back from the target API
 SCHEMA_V21 = "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 CA_FILE = None  # extra trusted CA bundle (PEM), set by --ca-file
+# A fresh secret per launch. It's written only into ApiMan's own page and required on every /api call,
+# so nothing else (other local programs, or requests ApiMan itself proxies) can use the API.
+SESSION_TOKEN = secrets.token_urlsafe(32)
+SERVER_PORT = None  # set in main(); the proxy refuses to call ApiMan itself
+TOKEN_HEADER = "X-ApiMan-Token"
+
+
+def targets_self(url):
+    """True when a URL points at this ApiMan server (any loopback/unspecified address on our port)."""
+    if SERVER_PORT is None:
+        return False
+    u = urllib.parse.urlsplit(url)
+    port = u.port or (443 if u.scheme == "https" else 80)
+    if port != SERVER_PORT or not u.hostname:
+        return False
+    host = u.hostname.strip("[]")
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        addrs = {ipaddress.ip_address(host)}
+    except ValueError:
+        try:
+            addrs = {ipaddress.ip_address(i[4][0]) for i in socket.getaddrinfo(host, port)}
+        except OSError:
+            return False
+    return any(a.is_loopback or a.is_unspecified for a in addrs)
 STATIC = {"/": ("index.html", "text/html"), "/index.html": ("index.html", "text/html"),
           "/app.js": ("app.js", "text/javascript"), "/app.css": ("app.css", "text/css"),
           "/fonts/Geist-Variable.woff2": ("fonts/Geist-Variable.woff2", "font/woff2"),
@@ -167,6 +197,8 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
         return u.scheme, u.hostname, u.port or (443 if u.scheme == "https" else 80)
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if targets_self(newurl):
+            raise RedirectRefused("Refused a redirect to ApiMan's own local server.")
         if urllib.parse.urlsplit(newurl).scheme.lower() not in ("http", "https"):
             raise RedirectRefused(f"Refused redirect to a non-HTTP URL: {newurl}")
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
@@ -203,6 +235,8 @@ def send(spec):
         return {"error": f"Invalid method: {method}"}
     if not re.match(r"^https?://", url, re.I):
         return {"error": "URL must start with http:// or https://"}
+    if targets_self(url):
+        return {"error": "ApiMan can't send requests to its own local server."}
 
     if spec.get("bodyBase64") is not None:
         try:
@@ -217,6 +251,8 @@ def send(spec):
 
     req = urllib.request.Request(url, data=data, method=method)
     for key, value in headers_in:
+        if str(key).strip().lower() == TOKEN_HEADER.lower():
+            continue  # never forward ApiMan's own token
         req.add_header(str(key), str(value))
     if not req.has_header("User-agent"):
         req.add_header("User-Agent", "ApiMan/1.0")
@@ -297,6 +333,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return self.reply(403, {"error": "Forbidden"})
         path = urllib.parse.urlparse(self.path).path
+        if path.startswith("/api/") and not hmac.compare_digest(self.headers.get(TOKEN_HEADER, ""), SESSION_TOKEN):
+            return self.reply(403, {"error": "Forbidden"})
         try:
             if method == "GET" and path in STATIC:
                 name, ctype = STATIC[path]
@@ -368,6 +406,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def reply_file(self, path, ctype):
         data = path.read_bytes()
+        if path.name == "index.html":  # hand ApiMan's own page the token for this launch
+            data = data.replace(b"__APIMAN_TOKEN__", SESSION_TOKEN.encode())
         self.send_response(200)
         self.send_header("Content-Type", ctype if ctype.startswith("font/") else f"{ctype}; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
@@ -395,6 +435,8 @@ def main():
         CA_FILE = str(Path(args.ca_file).expanduser().resolve())
         ssl.create_default_context().load_verify_locations(cafile=CA_FILE)  # fail fast on a bad file
 
+    global SERVER_PORT
+    SERVER_PORT = args.port
     Handler.stores = make_stores(args.data)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)  # localhost only, never the LAN
     url = f"http://127.0.0.1:{args.port}"

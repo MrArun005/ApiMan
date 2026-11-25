@@ -227,16 +227,21 @@ function newDocId(name, exists) {
   return id;
 }
 
+const API_TOKEN = (() => { const m = document.querySelector('meta[name="apiman-token"]'); const v = m && m.content; return v && v !== '__APIMAN_TOKEN__' ? v : ''; })();
+const lastPutAt = new Map(); // path -> time the last successful write finished
 async function api(method, path, body, signal, headers = {}) {
+  const started = performance.now();
   const r = await fetch(path, {
     method,
     signal,
-    headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers },
+    headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(API_TOKEN ? { 'X-ApiMan-Token': API_TOKEN } : {}), ...headers },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { status: r.status, conflict: r.status === 409 });
-  if (api.onVersion && r.headers.get('X-Version')) api.onVersion(path, r.headers.get('X-Version'));
+  if (method === 'PUT') lastPutAt.set(path, performance.now());
+  const stale = method === 'GET' && (lastPutAt.get(path) || 0) > started;
+  if (api.onVersion && r.headers.get('X-Version') && !stale) api.onVersion(path, r.headers.get('X-Version'));
   return data;
 }
 
@@ -256,6 +261,7 @@ function serverStore(kind) {
 
 function browserStore(kind) {
   const key = `apiman:${kind}`;
+  const seen = new Map(); // id -> JSON we last read or wrote (another tab's save changes it)
   const { validate, nameOf } = KINDS[kind];
   const read = () => ls.get(key, {});
   const write = (all) => {
@@ -263,8 +269,15 @@ function browserStore(kind) {
   };
   return {
     async list() { return Object.entries(read()).map(([id, d]) => ({ id, name: nameOf(d) })).sort((a, b) => a.name.localeCompare(b.name)); },
-    async get(id) { const d = read()[id]; if (!d) throw new Error('Not found'); return d; },
-    async put(id, d) { validate(d); const all = read(); all[id] = d; write(all); },
+    async get(id) { const d = read()[id]; if (!d) throw new Error('Not found'); seen.set(id, JSON.stringify(d)); return d; },
+    async put(id, d) {
+      validate(d);
+      const all = read();
+      if (all[id] && seen.has(id) && JSON.stringify(all[id]) !== seen.get(id)) {
+        throw Object.assign(new Error('This document was changed in another tab.'), { status: 409, conflict: true });
+      }
+      all[id] = d; write(all); seen.set(id, JSON.stringify(d));
+    },
     async create(d) { validate(d); const all = read(); const id = newDocId(nameOf(d), (x) => Object.keys(all).some((k) => k.toLowerCase() === x)); all[id] = d; write(all); return id; },
     async remove(id) { const all = read(); delete all[id]; write(all); },
   };
@@ -1115,6 +1128,7 @@ async function urlVariableNames(extraPairs = []) {
       eachRequest(col.item, (it) => {
         const rq = it.request && typeof it.request === 'object' ? it.request : {};
         urls.push({ label: `${c.name} / ${String(it.name ?? '') || 'Untitled'}`, url: urlIn(rq.url).raw, colId: c.id });
+        hostHeaders.push(...urlIn(rq.url).pathVars.map((v) => v.value)); // path-variable values can rewrite the URL too
         hostHeaders.push(...headerParts(rq.header), ...authParts(rq.auth));
       }, [], (parents) => parents.forEach((f) => hostHeaders.push(...authParts(f.auth))));
       hostHeaders.push(...authParts(col.auth));
@@ -1124,12 +1138,16 @@ async function urlVariableNames(extraPairs = []) {
   }
   for (const t of state.tabs) {
     urls.push({ label: `${t.ed.name} (open tab)`, url: t.ed.url, colId: t.cid });
+    hostHeaders.push(...(t.ed.pathVars || []).map((v) => v.value));
     hostHeaders.push(...t.ed.headers.flatMap((x) => [x.key, x.value]), ...authParts(authOut(t.ed.auth)));
   }
   const names = new Set();
   const add = (s) => { for (const m of String(s ?? '').matchAll(VAR_RE)) names.add(m[1]); };
   urls.forEach((u) => add(u.url));
   hostHeaders.forEach(add);
+  // A computed name like {{base_{{stage}}}} can't be resolved statically: then every change counts as risky.
+  const nested = /{{[^{}]*{{/;
+  if ([...urls.map((u) => u.url), ...hostHeaders].some((x) => nested.test(String(x)))) complete = false;
   const pairs = [
     ...Object.values(state.envs).flatMap((d) => (d && d.values) || []),
     ...Object.values(state.cols).flatMap((c) => (c && c.variable) || []),
@@ -1339,6 +1357,9 @@ async function refreshEnvironments() {
 
 async function ensureGlobals() {
   if (!state.envs[GLOBALS_ID]) {
+    if ((await backend.environments.list()).some((e) => e.id === GLOBALS_ID)) {
+      throw new Error('globals.json exists but could not be read (is it valid JSON?). Fix or remove it; ApiMan will not overwrite it.');
+    }
     const doc = { name: 'Globals', values: [], _postman_variable_scope: 'globals' };
     await backend.environments.put(GLOBALS_ID, doc);
     state.envs[GLOBALS_ID] = doc;
@@ -1367,6 +1388,8 @@ function newTab(init) {
 }
 
 const isPhone = () => matchMedia('(max-width: 820px)').matches;
+/** The text scale currently applied (a Settings preview included). */
+const cssScale = () => Number(getComputedStyle(document.documentElement).getPropertyValue('--text-scale')) || 1;
 function toggleSidebar() {
   state.settings.sideHidden = !state.settings.sideHidden;
   saveSettings();
@@ -1787,7 +1810,9 @@ async function renameItem(cid, id) {
   const loc = locate(state.cols[cid], id);
   const name = await ask({ title: `Rename ${isFolder(loc.item) ? 'folder' : 'request'}`, input: { label: 'Name', value: loc.item.name || '' }, ok: 'Rename' });
   if (!name) return;
-  loc.item.name = name;
+  const fresh = locate(state.cols[cid], id); // look it up again: the collection may have been reloaded meanwhile
+  if (!fresh) { toast('That item no longer exists.'); return; }
+  fresh.item.name = name;
   await saveCol(cid);
   for (const t of state.tabs) if (t.cid === cid && t.itemId === id) t.ed.name = name;
   renderAll();
@@ -1825,7 +1850,9 @@ async function deleteItem(cid, id) {
     message: `"${loc.item.name}"${n ? ` and the ${n} request${n > 1 ? 's' : ''} in it` : ''} will be removed from the collection.`,
     ok: `Delete ${isFolder(loc.item) ? 'folder' : 'request'}`, danger: true,
   }))) return;
-  loc.list.splice(loc.index, 1);
+  const fresh = locate(state.cols[cid], id);
+  if (!fresh) return;
+  fresh.list.splice(fresh.index, 1);
   await saveCol(cid);
   const gone = new Set();
   const collect = (it) => { gone.add(it.id); if (Array.isArray(it.item)) it.item.forEach(collect); };
@@ -1913,7 +1940,9 @@ function renderWelcome() {
   const kbd = (k) => h('kbd', null, k);
   const cols = [];
   if (state.history.length) {
-    cols.push(h('section', null, h('span', { class: 'label' }, 'Recent requests'), ...state.history.slice(0, 8).map(historyRow)));
+    const seen = new Set();
+    const recent = state.history.filter((e) => { const k = `${e.method} ${e.url}`; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 8);
+    cols.push(h('section', null, h('span', { class: 'label' }, 'Recent requests'), ...recent.map(historyRow)));
   }
   if (state.colList.length) {
     cols.push(h('section', null, h('span', { class: 'label' }, 'Collections'), ...state.colList.map((c) => h('div', {
@@ -1978,17 +2007,18 @@ function renderResolved() {
   const t = cur();
   const el = $('#resolved');
   // The line always keeps its height, so the panes below never jump while you type.
-  if (!t || !t.ed.url.includes('{{')) { el.replaceChildren(); return; }
+  if (!t || !(t.ed.url.includes('{{') || (t.ed.pathVars || []).some((v) => v.value))) { el.replaceChildren(); return; }
   const vars = merged(scopesFor(t.cid));
   const parts = [];
   let last = 0;
-  for (const m of t.ed.url.matchAll(VAR_RE)) {
-    parts.push(t.ed.url.slice(last, m.index));
+  const shown = applyPathVars(t.ed.url, t.ed.pathVars, (x) => x); // fill :id path variables for display
+  for (const m of shown.matchAll(VAR_RE)) {
+    parts.push(shown.slice(last, m.index));
     const v = Object.hasOwn(vars, m[1]) ? vars[m[1]] : dynamicVar(m[1]);
     parts.push(v === undefined ? h('span', { class: 'bad', title: 'Not defined in the environment, collection or Globals' }, m[0]) : (m[1].startsWith('$') ? `‹${m[1]}›` : v));
     last = m.index + m[0].length;
   }
-  parts.push(t.ed.url.slice(last));
+  parts.push(shown.slice(last));
   el.replaceChildren(h('span', null, 'Resolves to ', ...parts));
 }
 
@@ -2000,17 +2030,25 @@ function renderCounts() {
   $('#cntParams').textContent = n(ed.params.filter((p) => !p.disabled && p.key).length);
   $('#cntHeaders').textContent = n(ed.headers.filter((p) => !p.disabled && p.key).length);
   // Numbers count things; a dot means "configured".
-  $('#cntAuth').classList.toggle('dot', ['bearer', 'basic', 'apikey'].includes(ed.auth.type));
-  $('#cntAuth').textContent = $('#cntAuth').classList.contains('dot') ? 'set' : '';
+  const a = ed.auth;
+  const authSet = (a.type === 'bearer' && a.token) || (a.type === 'basic' && (a.username || a.password)) || (a.type === 'apikey' && a.key);
+  setDot('#cntAuth', !!authSet);
+  setDot('#cntDocs', !!(ed.docs || '').trim());
   const b = ed.body;
   const hasBody = (b.mode === 'raw' && b.raw.trim()) || (b.mode === 'urlencoded' && b.urlencoded.some((r) => r.key))
     || (b.mode === 'formdata' && b.formdata.some((r) => r.key)) || (b.mode === 'file' && (b.fileObj || b.fileSrc))
     || (b.mode === 'graphql' && b.gqlQuery.trim()) || b.mode === 'unsupported';
-  $('#cntBody').classList.toggle('dot', !!hasBody);
-  $('#cntBody').textContent = hasBody ? 'set' : '';
+  setDot('#cntBody', !!hasBody);
   const hasScript = !!(ed.pre.trim() || ed.test.trim());
-  $('#cntScripts').classList.toggle('dot', hasScript);
-  $('#cntScripts').textContent = hasScript ? 'set' : '';
+  setDot('#cntScripts', hasScript);
+}
+
+/** A "configured" dot that always takes the same space, so tabs never shift when it appears. */
+function setDot(sel, on) {
+  const el = $(sel);
+  el.classList.add('dot');
+  el.classList.toggle('off', !on);
+  el.textContent = on ? 'set' : 'not set';
 }
 
 function switchPane(tabsSel, name) {
@@ -2194,6 +2232,9 @@ function renderBody() {
       ...[['json', 'JSON'], ['text', 'Text'], ['xml', 'XML'], ['html', 'HTML'], ['javascript', 'JavaScript']]
         .map(([v, l]) => h('option', { value: v, ...(b.lang === v ? { selected: true } : {}) }, l))));
   }
+  if (b.mode === 'raw' && b.lang === 'json') extras.push(h('button', { class: 'btn small ghost', onclick: () => {
+    try { b.raw = JSON.stringify(JSON.parse(b.raw), null, Number(state.settings.tabSize) || 2); renderBody(); markDirty(); } catch (e) { toast(`Not valid JSON: ${e.message}`); }
+  } }, 'Beautify'));
   $('#bodyExtras').replaceChildren(...extras);
 
   const box = $('#bodyEditor');
@@ -2205,10 +2246,7 @@ function renderBody() {
   if (b.mode === 'none') box.replaceChildren(h('p', { class: 'hint' }, 'This request has no body.'));
   else if (b.mode === 'raw') {
     box.replaceChildren(codeEditor({ value: b.raw, mode: b.lang, label: 'Request body', placeholder: b.lang === 'json' ? '{ "name": "{{$randomFirstName}}" }' : 'Request body',
-      onChange: (v) => { b.raw = v; renderCounts(); markDirty(); } }),
-      b.lang === 'json' ? h('button', { class: 'btn small editor-corner', onclick: () => {
-        try { b.raw = JSON.stringify(JSON.parse(b.raw), null, 2); renderBody(); markDirty(); } catch (e) { toast(`Not valid JSON: ${e.message}`); }
-      } }, 'Beautify') : null);
+      onChange: (v) => { b.raw = v; renderCounts(); markDirty(); } }));
   }
   else if (b.mode === 'urlencoded') { box.replaceChildren(); kvTable(box, b.urlencoded, { onChange: markDirty }); }
   else if (b.mode === 'formdata') { box.replaceChildren(); kvTable(box, b.formdata, { file: true, onChange: markDirty }); }
@@ -2363,6 +2401,7 @@ function renderResponse() {
   $('#respTools').hidden = !hasRes;
   $$('#respTools .seg-btn').forEach((b) => b.classList.toggle('on', b.dataset.view === t.bodyView));
   clearFind();
+  if (!$('#findBar').hidden) setTimeout(() => runFind(0), 0); // keep the open Find bar in sync with the new response
   $('#respBody').replaceChildren(...notes, ...(notes.length && hasRes ? [h('div', { class: 'gap' })] : []), ...(hasRes ? [bodyView(res, t.bodyView)] : []));
   // headers
   $('#respHeaders').replaceChildren(...(hasRes ? [h('thead', null, h('tr', null, h('th', null, 'Name'), h('th', null, 'Value'))),
@@ -2441,7 +2480,12 @@ function inertHtml(html) {
   doc.querySelectorAll('meta[http-equiv], base, script, iframe, frame, frameset, object, embed, link').forEach((el) => el.remove());
   doc.querySelectorAll('[href]').forEach((el) => el.removeAttribute('href'));
   doc.querySelectorAll('form').forEach((el) => { el.removeAttribute('action'); el.setAttribute('onsubmit', 'return false'); });
-  doc.querySelectorAll('*').forEach((el) => [...el.attributes].forEach((a) => { if (/^on/i.test(a.name) && el.tagName !== 'FORM') el.removeAttribute(a.name); }));
+  doc.querySelectorAll('*').forEach((el) => [...el.attributes].forEach((a) => {
+    if (/^on/i.test(a.localName) || ['href', 'formaction', 'action', 'src', 'srcset', 'ping', 'background'].includes(a.localName.toLowerCase())) {
+      if (a.localName.toLowerCase() === 'src' && /^data:image\//i.test(a.value)) return; // inline images may stay (CSP allows data: images)
+      el.removeAttributeNode(a);
+    }
+  }));
   return doc.documentElement.outerHTML;
 }
 
@@ -2456,7 +2500,7 @@ function openFind() {
   $('#findInput').select();
   if ($('#findInput').value) runFind(0);
 }
-function clearFind() { find.marks.forEach((m) => m.clear()); find.marks = []; find.hits = []; find.i = -1; }
+function clearFind() { find.marks.forEach((m) => m.clear()); if (find.current) find.current.clear(); find.current = null; find.marks = []; find.hits = []; find.i = -1; }
 function closeFind() { clearFind(); $('#findBar').hidden = true; $('#findCount').textContent = ''; const cm = findCm(); if (cm) { refreshEditors($('#pane-rbody')); cm.focus(); } }
 function runFind(start) {
   clearFind();
@@ -2685,7 +2729,8 @@ function renderDialog({ title, body, buttons = [], wide = false, confirm = false
     onclick: async (e) => {
       const btn = e.currentTarget;
       btn.disabled = true;
-      try { if (await b.onClick()) dlg.close(); } catch (err) { toast(err.message); } finally { btn.disabled = false; }
+      const mine = dialogSeq;
+      try { if (await b.onClick() && dialogSeq === mine && dlg.open) dlg.close(); } catch (err) { toast(err.message); } finally { btn.disabled = false; }
     },
   }, b.label)));
   dialogSeq += 1;
@@ -2794,6 +2839,10 @@ async function editContainer(cid, folderId) {
     tall: true,
     body: [h('div', { class: 'field' }, h('label', null, 'Name'), nameIn), ...dlgTabs(defs)],
     buttons: [{ label: 'Save', primary: true, onClick: async () => {
+      // apply to the CURRENT document (a conflict may have reloaded it since this dialog opened)
+      const col = state.cols[cid] || await withCol(cid);
+      const target = folderId ? (locate(col, folderId) || {}).item : col;
+      if (!target) throw new Error('That folder no longer exists.');
       const auth = authOut(model.auth);
       if (auth && !(isCol && auth.type === 'noauth')) target.auth = auth; else delete target.auth;
       const ev = scriptsOut(target.event, model.pre, model.test);
@@ -2838,11 +2887,10 @@ async function editEnvironment(id) {
       { label: 'Save', primary: true, onClick: async () => {
         const name = isGlobals ? 'Globals' : nameIn.value.trim();
         if (!name) { toast('Give the environment a name.'); return false; }
-        doc.name = name;
-        doc.values = rows.filter((r) => r.key).map((r) => ({ key: r.key, value: r.value, type: r.type === 'secret' ? 'secret' : 'default', enabled: !r.disabled }));
+        const values = rows.filter((r) => r.key).map((r) => ({ key: r.key, value: r.value, type: r.type === 'secret' ? 'secret' : 'default', enabled: !r.disabled }));
         let envId = id;
-        if (id) await backend.environments.put(id, doc);
-        else envId = await backend.environments.create(doc);
+        if (id) await mutateDoc('environments', id, (d) => { d.name = name; d.values = values; return true; });
+        else { doc.name = name; doc.values = values; envId = await backend.environments.create(doc); }
         await refreshEnvironments();
         if (!isGlobals) setActiveEnv(activate.checked ? envId : (state.activeEnv === envId ? '' : state.activeEnv));
         renderSidebar();
@@ -3157,7 +3205,8 @@ const GENERATORS = {
     const lines = [`curl -X ${sq(w.method)} ${sq(w.url)}`];
     for (const [k, v] of w.headers) lines.push(`  -H ${sq(`${k}: ${v}`)}`);
     if (w.body.kind === 'text') lines.push(`  --data-raw ${sq(w.body.text)}`);
-    if (w.body.kind === 'formdata') for (const f of w.body.fields) lines.push(`  -F ${sq(f.file ? `${f.key}=@${f.file.name}` : `${f.key}=${f.value}`)}`);
+    // text fields use --form-string: with -F a value starting with @ or < would upload a local file
+    if (w.body.kind === 'formdata') for (const f of w.body.fields) lines.push(f.file ? `  -F ${sq(`${f.key}=@${f.file.name}`)}` : `  --form-string ${sq(`${f.key}=${f.value}`)}`);
     if (w.body.kind === 'file') lines.push(`  --data-binary ${sq('@' + w.body.file.name)}`);
     return lines.join(' \\\n');
   } },
@@ -3368,7 +3417,8 @@ function openSettings(initial = null, layoutSnap = null) {
   const snap = layoutSnap || initResizers.snapshot(); // panel sizes when Settings opened: Cancel goes back to these
   const draft = { ...s, ...(initial || {}) };
   let saved = false, reopening = false;
-  const preview = () => { applyAppearance(draft); };
+  let syncSizesRef = null;
+  const preview = () => { applyAppearance(draft); requestAnimationFrame(() => requestAnimationFrame(() => syncSizesRef && syncSizesRef())); };
   const seg = (key, options, label) => {
     const bar = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': label });
     const draw = () => bar.replaceChildren(...options.map(([v, l]) => h('button', {
@@ -3410,10 +3460,15 @@ function openSettings(initial = null, layoutSnap = null) {
   const unitTxt = () => $$('.size-unit', unitSel.closest('.dlg-body') || document).forEach((el) => { el.textContent = unit; });
   const syncSizes = () => {
     const z = initResizers.sizes();
-    sideNum.value = show(z.side);
+    sideNum.value = show($('.side').getBoundingClientRect().width || z.side);
     reqNum.value = show(initResizers.paneSize());
     splitNum.value = String(z.split);
+    const lbl = $('#reqSizeLabel');
+    if (lbl) lbl.textContent = initResizers.isStacked() ? 'Request pane height' : 'Request pane width';
+    const auto = $('#autoStackNote');
+    if (auto) auto.hidden = document.documentElement.dataset.autoStack !== 'true';
   };
+  syncSizesRef = syncSizes;
   sideNum.addEventListener('change', () => { initResizers.setSide(Number(sideNum.value) * PER[unit]); syncSizes(); });
   reqNum.addEventListener('change', () => { initResizers.setSplit(((Number(reqNum.value) * PER[unit]) / initResizers.splitTotal()) * 100); syncSizes(); });
   splitNum.addEventListener('change', () => { initResizers.setSplit(Number(splitNum.value)); syncSizes(); });
@@ -3448,11 +3503,12 @@ function openSettings(initial = null, layoutSnap = null) {
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Tab width in editors'), seg('tabSize', [[2, '2 spaces'], [4, '4 spaces'], [8, '8 spaces']], 'Tab width')),
       h('label', { class: 'check align-end' }, wrap, h('span', null, 'Wrap long lines in responses'))),
     h('div', { class: 'grid-2 desktop-only' },
-      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Request and response'), seg('layout', [['auto', 'Side by side'], ['stacked', 'Stacked']], 'Layout')),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Request and response'), seg('layout', [['auto', 'Side by side'], ['stacked', 'Stacked']], 'Layout'),
+        h('span', { class: 'hint', id: 'autoStackNote', hidden: document.documentElement.dataset.autoStack !== 'true' }, 'Stacked automatically right now: side by side, each pane would be too narrow.')),
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Sidebar'), seg('sidePosition', [['left', 'Left'], ['right', 'Right']], 'Sidebar position'))),
     h('div', { class: 'grid-3 desktop-only' },
-      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Sidebar width'), h('div', { class: 'slider-row' }, sideNum, h('span', { class: 'unit size-unit' }, unit), unitSel)),
-      h('div', { class: 'field' }, h('span', { class: 'label' }, initResizers.isStacked() ? 'Request pane height' : 'Request pane width'), h('div', { class: 'slider-row' }, reqNum, h('span', { class: 'unit size-unit' }, unit))),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Sidebar width'), h('div', { class: 'slider-row' }, sideNum, unitSel)),
+      h('div', { class: 'field' }, h('span', { class: 'label', id: 'reqSizeLabel' }, initResizers.isStacked() ? 'Request pane height' : 'Request pane width'), h('div', { class: 'slider-row' }, reqNum, h('span', { class: 'unit size-unit' }, unit))),
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Request pane share'), h('div', { class: 'slider-row' }, splitNum, h('span', { class: 'unit' }, '%')))),
     h('div', { class: 'field-row desktop-only' },
       h('button', { type: 'button', class: 'btn small', onclick: () => { initResizers.reset(); syncSizes(); toast('Panel sizes reset'); } }, 'Reset panel sizes'),
@@ -3478,6 +3534,7 @@ function openSettings(initial = null, layoutSnap = null) {
         const defaults = { ...draft, theme: DEFAULT_SETTINGS.theme, textScale: 1, codeSize: 13, density: 'comfortable', densityScale: 1, layout: 'auto', wrap: true,
           lineHeight: 1.6, tabSize: 2, uiFont: 'geist', codeFont: 'geist-mono', accent: 'blue', sidePosition: 'left', sideHidden: false };
         reopening = true;
+        applyAppearance(defaults);                             // defaults first, so minimums use the default text size
         initResizers.setSide(288); initResizers.setSplit(50); // previewed like everything else; Cancel restores
         setTimeout(() => { openSettings(defaults, snap); toast('Defaults loaded. Save to keep them, or Cancel to go back.'); }, 0);
         return true;
@@ -3486,7 +3543,7 @@ function openSettings(initial = null, layoutSnap = null) {
         Object.assign(s, {
           theme: draft.theme, textScale: draft.textScale, codeSize: draft.codeSize, density: draft.density, layout: draft.layout, wrap: draft.wrap,
           densityScale: draft.densityScale, lineHeight: draft.lineHeight, tabSize: Number(draft.tabSize) || 2, uiFont: draft.uiFont, codeFont: draft.codeFont,
-          accent: draft.accent, accentCustom: draft.accentCustom, sidePosition: draft.sidePosition,
+          accent: draft.accent, accentCustom: draft.accentCustom, sidePosition: draft.sidePosition, sideHidden: !!draft.sideHidden,
           timeout: Math.max(1, Math.min(600, Number(timeout.value) || 60)),
           followRedirects: follow.checked, history: hist.checked, insecure: backend.mode === 'local' && insecure.checked,
         });
@@ -3620,7 +3677,7 @@ function bindChrome() {
   ]));
   $('#btnImport').addEventListener('click', () => openImport());
   $('#btnRunner').addEventListener('click', () => openRunner(cur() && cur().cid, null));
-  $('#btnSettings').addEventListener('click', openSettings);
+  $('#btnSettings').addEventListener('click', () => openSettings());
   $('#btnTheme').addEventListener('click', () => {
     state.settings.theme = effectiveTheme() === 'dark' ? 'light' : 'dark';
     saveSettings();
@@ -3696,7 +3753,7 @@ function initResizers() {
   const stacked = () => document.documentElement.dataset.layout === 'stacked' || document.documentElement.dataset.autoStack === 'true' || matchMedia('(max-width: 1180px)').matches;
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const side = $('#sideResizer'), split = $('#splitResizer');
-  const sideMin = () => Math.ceil(262 * (Number(state.settings.textScale) || 1)); // matches --side-eff in app.css
+  const sideMin = () => Math.ceil(262 * cssScale()); // matches --side-eff in app.css
   const setSideW = (px, persist = true) => {
     px = clamp(Math.round(px), sideMin(), 640);
     root.style.setProperty('--side-w', `${px}px`);
@@ -3709,7 +3766,7 @@ function initResizers() {
   const splitBounds = () => {
     const r = $('.split').getBoundingClientRect();
     const total = stacked() ? r.height : r.width;
-    const minPx = stacked() ? 160 : 320 * (Number(state.settings.textScale) || 1);
+    const minPx = stacked() ? 160 : 320 * cssScale();
     const lo = total > 0 ? Math.max(15, (minPx / total) * 100) : 15;
     return [Math.min(lo, 50), Math.max(100 - lo, 50) > 85 ? 85 : Math.max(100 - lo, 50)];
   };
@@ -3792,7 +3849,7 @@ function initResizers() {
   initResizers.isStacked = stacked;
   // #6: auto-stack whenever side-by-side panes would be narrower than their content needs (text-size aware)
   const autoStack = () => {
-    const need = 560 * (Number(state.settings.textScale) || 1);
+    const need = 340 * cssScale(); // the drag handle's own pane minimum (320 × text size) plus breathing room
     const on = document.documentElement.dataset.layout !== 'stacked' && ($('.work').clientWidth - 1) / 2 < need && !matchMedia('(max-width: 820px)').matches;
     if ((document.documentElement.dataset.autoStack === 'true') !== on) {
       if (on) document.documentElement.dataset.autoStack = 'true'; else delete document.documentElement.dataset.autoStack;
@@ -3828,15 +3885,24 @@ async function start() {
   const fitResp = () => {
     // Degrade in a fixed order so both tab rows keep one height: hide size, then time (both stay in the
     // status tooltip), and only as a last resort give the status its own line.
-    const steps = ['hide-size', 'hide-time', 'meta-below'];
+    const steps = ['hide-reason', 'tight-tabs', 'hide-size', 'hide-time', 'meta-below'];
     respRow.classList.remove(...steps);
     const seg = respRow.querySelector('.seg'), meta = $('#respStatus'), max = respRow.querySelector('.pane-max');
     if (!meta.textContent.trim()) return;
     const fits = () => seg.scrollWidth + meta.scrollWidth + max.offsetWidth + 2 * 8 + 2 * 20 <= respRow.clientWidth;
     for (const step of steps) {
-      if (fits()) return;
-      if (step === 'meta-below') respRow.classList.remove('hide-size', 'hide-time');
+      if (fits()) break;
+      if (step === 'meta-below') respRow.classList.remove('hide-size', 'hide-time', 'hide-reason');
       respRow.classList.add(step);
+    }
+    // Whatever the tab row couldn't fit (time, size) is shown in the toolbar below instead, never lost.
+    const moved = [respRow.classList.contains('hide-time') && meta.querySelector('.m-time'), respRow.classList.contains('hide-size') && meta.querySelector('.m-size')].filter(Boolean);
+    const alt = $('#respMetaAlt'), tools = $('#respTools');
+    alt.replaceChildren(...moved.map((el) => { const c = el.cloneNode(true); c.style.display = 'inline'; return c; }));
+    if (moved.length && tools.scrollWidth > tools.clientWidth) { // no room there either: wrap the status under the tabs
+      alt.replaceChildren();
+      respRow.classList.remove('hide-size', 'hide-time', 'hide-reason');
+      respRow.classList.add('meta-below');
     }
   };
   new ResizeObserver(fitResp).observe(respRow);
@@ -3853,6 +3919,7 @@ async function start() {
     update();
   };
   ['#reqTabs > .seg', '#respTabs > .seg', '.side .seg.block'].forEach((sel) => watchOverflow($(sel)));
+  $$('.pane-tools .seg').forEach(watchOverflow);
   // Sidebar tree keyboard: Up/Down move, Right/Left open/close, Space activates (Enter is handled per row).
   $('#sideBody').addEventListener('focusin', (e) => {
     const row = e.target.closest('.row');
@@ -3885,26 +3952,28 @@ async function start() {
     }
   });
   document.addEventListener('keydown', (e) => {
-    const tab = e.target.closest && e.target.closest('[role="tab"]');
-    if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
-    const list = tab.closest('[role="tablist"]');
-    const tabs = $$('[role="tab"]', list).filter((t) => t.closest('[role="tablist"]') === list && !t.hidden);
+    const tab = e.target.closest && e.target.closest('[role="tab"], [role="radio"]');
+    if (!tab || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) return;
+    const list = tab.closest('[role="tablist"], [role="radiogroup"]');
+    if (!list) return;
+    const tabs = $$('[role="tab"], [role="radio"]', list).filter((t) => t.closest('[role="tablist"], [role="radiogroup"]') === list && !t.hidden);
     const i = tabs.indexOf(tab);
-    const next = e.key === 'Home' ? tabs[0] : e.key === 'End' ? tabs[tabs.length - 1] : tabs[(i + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
+    const fwd = e.key === 'ArrowRight' || e.key === 'ArrowDown';
+    const next = e.key === 'Home' ? tabs[0] : e.key === 'End' ? tabs[tabs.length - 1] : tabs[(i + (fwd ? 1 : -1) + tabs.length) % tabs.length];
     if (!next) return;
     e.preventDefault();
     const listId = list.id;
     next.click();
     // some lists re-render on switch (the open-request strip): focus the newly selected tab in the fresh DOM
-    const live = next.isConnected ? next : (listId && $(`#${listId} [role="tab"][aria-selected="true"]`));
+    const live = next.isConnected ? next : (listId && $(`#${listId} [aria-selected="true"], #${listId} [aria-checked="true"]`));
     if (live) live.focus();
   });
-  const rovingTabs = () => $$('[role="tablist"]').forEach((list) => {
-    const tabs = $$('[role="tab"]', list).filter((t) => t.closest('[role="tablist"]') === list);
-    const on = tabs.find((t) => t.getAttribute('aria-selected') === 'true') || tabs[0];
+  const rovingTabs = () => $$('[role="tablist"], [role="radiogroup"]').forEach((list) => {
+    const tabs = $$('[role="tab"], [role="radio"]', list).filter((t) => t.closest('[role="tablist"], [role="radiogroup"]') === list);
+    const on = tabs.find((t) => t.getAttribute('aria-selected') === 'true' || t.getAttribute('aria-checked') === 'true') || tabs[0];
     tabs.forEach((t) => { t.tabIndex = t === on ? 0 : -1; });
   });
-  new MutationObserver(rovingTabs).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['aria-selected'], childList: true });
+  new MutationObserver(rovingTabs).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['aria-selected', 'aria-checked'], childList: true });
   rovingTabs();
   // Maximised pane: Escape restores both panes.
   document.addEventListener('keydown', (e) => {

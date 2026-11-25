@@ -65,6 +65,7 @@ class ServerTest(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         server.Handler.stores = server.make_stores(cls.tmp.name)
         cls.app = start(server.Handler)
+        server.SERVER_PORT = cls.app.server_address[1]
         cls.echo = start(Echo)
         cls.base = f"http://127.0.0.1:{cls.app.server_address[1]}"
         cls.target = f"http://127.0.0.1:{cls.echo.server_address[1]}"
@@ -77,7 +78,7 @@ class ServerTest(unittest.TestCase):
         cls.tmp.cleanup()
 
     def call(self, method, path, body=None, headers=None):
-        req = urllib.request.Request(self.base + path, method=method, headers=headers or {},
+        req = urllib.request.Request(self.base + path, method=method, headers={server.TOKEN_HEADER: server.SESSION_TOKEN, **(headers or {})},
                                      data=json.dumps(body).encode() if body is not None else None)
         try:
             with urllib.request.urlopen(req) as r:
@@ -198,12 +199,12 @@ class ServerTest(unittest.TestCase):
 
     def test_save_from_a_stale_window_is_refused_not_silently_overwritten(self):
         cid = self.call("POST", "/api/collections", {"collection": {"info": {"name": "Shared"}, "item": []}})[1]["id"]
-        req = urllib.request.Request(f"{self.base}/api/collections/{cid}")
+        req = urllib.request.Request(f"{self.base}/api/collections/{cid}", headers={server.TOKEN_HEADER: server.SESSION_TOKEN})
         with urllib.request.urlopen(req) as r:
             version = r.headers["X-Version"]
         put = lambda body, v: urllib.request.urlopen(urllib.request.Request(
             f"{self.base}/api/collections/{cid}", data=json.dumps(body).encode(), method="PUT",
-            headers={"Content-Type": "application/json", "If-Match": v}))
+            headers={"Content-Type": "application/json", "If-Match": v, server.TOKEN_HEADER: server.SESSION_TOKEN}))
         import time as _t
         _t.sleep(0.01)
         with put({"info": {"name": "Shared"}, "item": [{"name": "from window A"}]}, version) as r:  # window A saves
@@ -213,6 +214,21 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 409)
         ctx.exception.close()
         self.assertEqual(self.call("GET", f"/api/collections/{cid}")[1]["item"][0]["name"], "from window A")
+
+    def test_api_needs_the_session_token(self):
+        req = urllib.request.Request(self.base + "/api/collections")  # no token, like any other local program
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req)
+        self.assertEqual(ctx.exception.code, 403)
+        ctx.exception.close()
+
+    def test_proxy_cannot_call_apiman_itself(self):
+        self.assertIn("own local server", self.send(method="GET", url=f"{self.base}/api/collections")["error"])
+        self.assertIn("own local server", self.send(method="GET", url=f"http://localhost:{self.app.server_address[1]}/api/info")["error"])
+        res = self.send(method="GET", url=self.redirect_to(f"{self.base}/api/collections"))  # via a redirect
+        self.assertIn("own local server", res["error"])
+        echoed = json.loads(self.send(method="GET", url=self.target, headers=[[server.TOKEN_HEADER, "x"], ["X-Api-Key", "k"]])["body"])
+        self.assertEqual(echoed["apikey"], "k")  # normal headers pass; the token header is never forwarded
 
     def test_path_traversal_is_rejected(self):
         for bad in ("..%2Fsecret.json", "%2Fetc%2Fpasswd", ".hidden.json", "x.txt"):
