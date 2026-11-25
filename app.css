@@ -33,8 +33,8 @@
   --h-bar: calc(40px * var(--d));  /* tab rows */
   --h-req: calc(44px * var(--d));  /* the request bar */
   --row-h: calc(30px * var(--d));  /* sidebar rows, table headers */
-  --icon: 16px;
-  --icon-sm: 12px;
+  --icon: calc(16px * var(--text-scale));
+  --icon-sm: calc(12px * var(--text-scale));
   --r: 6px;       /* controls */
   --r-lg: 10px;   /* containers: tables, request bar, cards */
   --r-xl: 14px;   /* dialogs */
@@ -205,7 +205,10 @@ input[type="number"] { font-variant-numeric: tabular-nums; }
 }
 /* Brand column ends exactly where the work area's gutter begins, so New/Import/Runner line up with the content below. */
 .brand { display: flex; align-items: center; gap: var(--s2); width: calc(var(--side-eff) + var(--gutter) - var(--side-gutter) - var(--h) - 3 * var(--s2)); flex: none; }
-:root[data-side="right"] .brand { width: auto; }
+:root[data-side="right"] .brand { width: auto; order: 2; margin-left: var(--s3); }
+:root[data-side="right"] .top-actions { order: 1; padding-left: calc(var(--gutter) - var(--side-gutter)); }
+:root[data-side="right"] #btnSide { order: 3; }
+:root[data-side="right"] .top > .spacer { order: 4; } :root[data-side="right"] .env-picker { order: 5; } :root[data-side="right"] #btnTheme { order: 6; } :root[data-side="right"] #btnSettings { order: 7; }
 .brand svg { width: 24px; height: 24px; }
 .brand .logo-bg { fill: var(--logo); }
 .wordmark { font-weight: 700; font-size: var(--fs-lg); letter-spacing: -0.01em; }
@@ -257,11 +260,10 @@ input[type="number"] { font-variant-numeric: tabular-nums; }
 
 /* ===================================================================================== tabs strip */
 .work { display: flex; flex-direction: column; min-width: 0; min-height: 0; container: work / inline-size; }
-@container work (max-width: 760px) {
-  .split:not([data-max]) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(160px, var(--req-h, 50%)) 1px minmax(160px, 1fr); }
-  .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
-  .split > .resizer::after { inset: -1px 0; }
-}
+/* auto-stack (set by JS when side-by-side panes would be narrower than their content needs) */
+:root[data-auto-stack="true"] .split:not([data-max]) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(160px, var(--req-h, 50%)) 1px minmax(160px, 1fr); }
+:root[data-auto-stack="true"] .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
+:root[data-auto-stack="true"] .split > .resizer::after { inset: -1px 0; }
 .tabstrip { display: flex; align-items: stretch; height: var(--h-bar); background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: thin; flex: none; }
 .rtab {
   display: flex; align-items: center; gap: var(--s2); padding: 0 var(--s1) 0 var(--s3); min-width: 132px; max-width: 220px;
@@ -277,7 +279,8 @@ input[type="number"] { font-variant-numeric: tabular-nums; }
 .rtab .x:hover { background: var(--sunken); color: var(--ink); }
 .rtab .dot, .dirty-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--post); flex: none; }
 .rtab .dot.off { visibility: hidden; } /* always present, so a tab never changes width when it becomes dirty */
-.newtab { width: var(--h-bar); border: 0; background: transparent; color: var(--muted); cursor: pointer; display: grid; place-items: center; flex: none; }
+.newtab { width: var(--h-bar); border: 0; background: var(--panel); color: var(--muted); cursor: pointer; display: grid; place-items: center; flex: none;
+  position: sticky; right: 0; box-shadow: -10px 0 10px -10px rgb(0 0 0 / 0.25); }
 .newtab:hover { color: var(--ink); background: var(--hover); }
 
 /* ===================================================================================== editor */
@@ -362,10 +365,11 @@ body.resizing iframe { pointer-events: none; }
 /* tab rows: identical in both columns, text aligns to the gutter */
 .tabs { display: flex; align-items: center; gap: var(--s2); height: var(--h-bar); padding: 0 var(--gutter); border-bottom: 1px solid var(--line); flex: none; overflow: hidden; }
 .tabs > .seg { flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
-.tabs > .seg.overflowing, .seg.block.overflowing { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent); }
+.fade-right { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent); }
+.fade-left { -webkit-mask-image: linear-gradient(90deg, transparent, #000 32px); mask-image: linear-gradient(90deg, transparent, #000 32px); }
+.fade-left.fade-right { -webkit-mask-image: linear-gradient(90deg, transparent, #000 32px, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(90deg, transparent, #000 32px, #000 calc(100% - 32px), transparent); }
 .pane-max { margin-left: auto; flex: none; }
-.auth-form .field { max-width: 640px; }
-.auth-form .grid-2 { max-width: 640px; }
+.auth-form .narrow { max-width: 360px; }
 .kv-path .chk-pad { width: 36px; }
 .resp-meta + .pane-max { margin-left: var(--s2); }
 
@@ -376,7 +380,7 @@ body.resizing iframe { pointer-events: none; }
 .count.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); font-size: 0; display: inline-block; }
 .pane { flex: 1; min-height: 0; overflow: auto; padding: var(--s4) var(--gutter); }
 .pane-tools { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s3); flex-wrap: wrap; }
-.pane-tools .hint { margin: 0; flex: 1 1 260px; }
+.pane-tools .hint { margin: 0; flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pane-tools select { height: var(--h-sm); font-size: var(--fs-sm); padding: 0 var(--s2); }
 
 /* response meta lives in the tab row, so both columns line up */
@@ -384,8 +388,10 @@ body.resizing iframe { pointer-events: none; }
 .resp-meta > * { flex: none; }
 /* the response column degrades in a fixed order: size goes first, then time; the status code always stays */
 .resp-col { container: resp / inline-size; }
-@container resp (max-width: 560px) { .resp-meta .m-size { display: none; } }
-@container resp (max-width: 470px) { .resp-meta .m-time { display: none; } .resp-meta .m-reason { display: none; } }
+#respTabs.meta-below { flex-wrap: wrap; height: auto; min-height: var(--h-bar); align-content: center; row-gap: 0; padding-top: var(--s2); padding-bottom: var(--s2); }
+#respTabs.meta-below .resp-meta { order: 3; flex-basis: 100%; margin-left: 0; padding: var(--s2) 0 0; }
+#respTabs.meta-below .pane-max { order: 2; margin-left: auto; }
+#respTabs.hide-size .m-size, #respTabs.hide-time .m-time { display: none; }
 .resp-meta b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
 .resp-meta .status-code { margin-right: 2px; }
 
@@ -656,4 +662,28 @@ table.grid .tight { width: 1%; white-space: nowrap; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+
+/* ===================================================================================== round 5 additions */
+.find-bar { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s2); padding: var(--s1) var(--s1) var(--s1) var(--s2); border: 1px solid var(--line); border-radius: var(--r); background: var(--hover); flex: none; }
+.find-bar input { flex: 1; min-width: 0; height: var(--h-sm); font-family: var(--font-code); }
+.find-count { color: var(--muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; min-width: 8ch; text-align: right; }
+.find-bar .btn[aria-pressed="true"] { color: var(--focus); border-color: var(--line); background: var(--panel); }
+.cm-find { background: color-mix(in srgb, var(--post) 28%, transparent); border-radius: 2px; }
+.cm-find-current { background: color-mix(in srgb, var(--focus) 45%, transparent); outline: 1px solid var(--focus); border-radius: 2px; }
+mark { background: color-mix(in srgb, var(--post) 30%, transparent); color: inherit; border-radius: 2px; padding: 0 1px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 var(--s4); }
+.unit-select { height: var(--h-sm); padding: 0 calc(var(--s2) + 16px) 0 var(--s2); font-size: var(--fs-sm); }
+.docs-preview { flex: 1; overflow: auto; line-height: 1.6; padding: var(--s2) 0; }
+.docs-preview h3, .docs-preview h4, .docs-preview h5, .docs-preview h6 { margin: var(--s4) 0 var(--s2); font-size: var(--fs-lg); }
+.docs-preview p, .docs-preview ul, .docs-preview ol { margin: 0 0 var(--s3); }
+.docs-preview a { color: var(--focus); }
+#pane-docs textarea.prose[hidden] { display: none; }
+@media (max-width: 820px) {
+  .crumb { display: none; }
+  .titlebar { flex-wrap: nowrap; }
+  .titlebar > .btn { margin-left: 0; }
+  .name-input { flex: 1; max-width: none; }
+  .pane-tools .seg { flex-wrap: wrap; }
+  .grid-3 { grid-template-columns: 1fr; }
 }

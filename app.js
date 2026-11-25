@@ -164,7 +164,9 @@ function applyAppearance(s = state.settings) {
   document.querySelectorAll('.CodeMirror').forEach((el) => el.CodeMirror && el.CodeMirror.refresh());
   root.dataset.layout = s.layout === 'stacked' ? 'stacked' : 'auto';
   root.dataset.wrap = s.wrap === false ? 'off' : 'on';
+  if (initResizers.autoStack) initResizers.autoStack();
   if (initResizers.refresh) initResizers.refresh();
+  if (!isPhone()) $('#btnSide')?.setAttribute('aria-expanded', String(!s.sideHidden)); // #15
 }
 
 const state = {
@@ -636,10 +638,9 @@ function locate(col, id) {
   };
   return col ? walk(col.item, []) : null;
 }
-function eachRequest(items, fn, parents = []) {
+function eachRequest(items, fn, parents = [], onFolders = null) {
   for (const it of items) {
-    if (Array.isArray(it.item)) eachRequest(it.item, fn, [...parents, it]);
-    else fn(it, parents);
+    if (Array.isArray(it.item)) { if (onFolders) onFolders([it]); eachRequest(it.item, fn, [...parents, it], onFolders); } else fn(it, parents);
   }
 }
 function countRequests(items) { let n = 0; eachRequest(items, () => n++); return n; }
@@ -1073,13 +1074,12 @@ async function persistScopes(cid, before, after, logs, envId = state.activeEnv) 
     logs.push({ level: 'warn', text: 'pm.environment changes were ignored because no environment is selected.', src: 'ApiMan' });
   }
   if (JSON.stringify(before.globals) !== JSON.stringify(after.globals)) {
-    const doc = await ensureGlobals();
-    if (sync(doc.values, before.globals, after.globals, envMk)) await backend.environments.put(GLOBALS_ID, doc);
+    await ensureGlobals();
+    await mutateDoc('environments', GLOBALS_ID, (doc) => sync(doc.values, before.globals, after.globals, envMk));
   }
   const col = cid && state.cols[cid];
   if (col) {
-    col.variable = col.variable || [];
-    if (sync(col.variable, before.collection, after.collection, (key, value) => ({ key, value }))) await backend.collections.put(cid, col);
+    await mutateDoc('collections', cid, (doc) => { doc.variable = doc.variable || []; return sync(doc.variable, before.collection, after.collection, (key, value) => ({ key, value })); });
   } else if (JSON.stringify(before.collection) !== JSON.stringify(after.collection)) {
     logs.push({ level: 'warn', text: 'pm.collectionVariables changes were ignored: save this request into a collection first.', src: 'ApiMan' });
   }
@@ -1106,20 +1106,26 @@ async function urlVariableNames(extraPairs = []) {
   let complete = true;
   const urls = []; // { label, url, colId }
   const hostHeaders = []; // Host header values also decide where a request lands on shared servers
-  const hostIn = (headers) => (Array.isArray(headers) ? headers : []).filter((x) => x && String(x.key || '').trim().toLowerCase() === 'host').map((x) => String(x.value ?? ''));
+  // A variable used in any header name or value (or API-key auth) could later become "Host: attacker", so all are guarded.
+  const headerParts = (headers) => (Array.isArray(headers) ? headers : []).filter((x) => x && typeof x === 'object').flatMap((x) => [String(x.key ?? ''), String(x.value ?? '')]);
+  const authParts = (auth) => { const a = authIn(auth); return a.type === 'apikey' ? [a.key, a.value] : []; };
   for (const c of state.colList) {
     try {
       const col = await withCol(c.id);
       eachRequest(col.item, (it) => {
         const rq = it.request && typeof it.request === 'object' ? it.request : {};
         urls.push({ label: `${c.name} / ${String(it.name ?? '') || 'Untitled'}`, url: urlIn(rq.url).raw, colId: c.id });
-        hostHeaders.push(...hostIn(rq.header));
-      });
+        hostHeaders.push(...headerParts(rq.header), ...authParts(rq.auth));
+      }, [], (parents) => parents.forEach((f) => hostHeaders.push(...authParts(f.auth))));
+      hostHeaders.push(...authParts(col.auth));
     } catch (e) {
       if (!/Not a Postman v2 collection/.test(e.message)) complete = false; // a stray non-collection .json isn't a gap
     }
   }
-  for (const t of state.tabs) { urls.push({ label: `${t.ed.name} (open tab)`, url: t.ed.url, colId: t.cid }); hostHeaders.push(...hostIn(t.ed.headers)); }
+  for (const t of state.tabs) {
+    urls.push({ label: `${t.ed.name} (open tab)`, url: t.ed.url, colId: t.cid });
+    hostHeaders.push(...t.ed.headers.flatMap((x) => [x.key, x.value]), ...authParts(authOut(t.ed.auth)));
+  }
   const names = new Set();
   const add = (s) => { for (const m of String(s ?? '').matchAll(VAR_RE)) names.add(m[1]); };
   urls.forEach((u) => add(u.url));
@@ -1193,7 +1199,10 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
   let scopes = JSON.parse(JSON.stringify(before));
   scopes.local = {};
   let req = requestSnapshot(ed);
-  const plannedOrigin = originOf(resolve(ed.url, merged(before)));
+  // The destination baseline always comes from the SAVED (user-approved) variables, never from values
+  // scripts carried over in memory during a run.
+  const trusted = merged(scopesFor(cid));
+  const plannedOrigin = originOf(resolve(ed.url, trusted));
   const preScripts = scriptChain(cid, itemId, ed, 'prerequest');
   const info = { requestName: ed.name, requestId: itemId || '', iteration, eventName: 'prerequest' };
   const envName = state.activeEnv && state.envs[state.activeEnv] ? state.envs[state.activeEnv].name : '';
@@ -1219,15 +1228,16 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
 
   // A pre-request script may not silently send this request (and its auth) to a different server.
   const finalOrigin = originOf(wire.url);
-  const approvalKey = `${cid || 'scratch'}:${itemId || ed.name} -> ${finalOrigin}`;
+  if (!itemId && !ed._approvalId) ed._approvalId = uid();
+  const approvalKey = `${cid || 'scratch'}:${itemId || ed._approvalId} -> ${finalOrigin}`;
   const hostOf = (hs) => ((hs.filter(([k]) => k.toLowerCase() === 'host').pop() || [])[1] || '').trim().toLowerCase(); // the server sends the last one
-  const plannedHost = hostOf(requestSnapshot(ed).headers.map(([k, v]) => [k, resolve(v, merged(before))]));
+  const plannedHost = hostOf(requestSnapshot(ed).headers.map(([k, v]) => [k, resolve(v, trusted)]));
   const finalHost = hostOf(wire.headers);
-  const hostChanged = preScripts.length > 0 && finalHost !== plannedHost; // shared servers route by Host
-  if (preScripts.length && (finalOrigin !== plannedOrigin || hostChanged) && !approvedOrigins.has(`${approvalKey} host=${finalHost}`)) {
+  const hostChanged = finalHost !== plannedHost; // shared servers route by Host
+  if ((finalOrigin !== plannedOrigin || hostChanged) && !approvedOrigins.has(`${approvalKey} host=${finalHost}`)) {
     const msg = hostChanged && finalOrigin === plannedOrigin
-      ? `A pre-request script set the Host header to "${finalHost}". Shared servers use it to decide which site receives the request, so this can send your auth headers to a different site.\n\nSend it anyway? Only allow this if you trust the scripts in this collection.`
-      : `A pre-request script changed where this request goes:\n\n  from ${plannedOrigin || '(unresolved URL)'}\n  to   ${finalOrigin}${finalHost ? ` (Host: ${finalHost})` : ''}\n\nSend it there, including your auth headers? Only allow this if you trust the scripts in this collection.`;
+      ? `A script set the Host header to "${finalHost}". Shared servers use it to decide which site receives the request, so this can send your auth headers to a different site.\n\nSend it anyway? Only allow this if you trust the scripts in this collection.`
+      : `A script changed where this request goes:\n\n  from ${plannedOrigin || '(unresolved URL)'}\n  to   ${finalOrigin}${finalHost ? ` (Host: ${finalHost})` : ''}\n\nSend it there, including your auth headers? Only allow this if you trust the scripts in this collection.`;
     if (!(ask && await ask(msg))) {
       logs.push({ level: 'warn', text: `Blocked: a script redirected the request to ${finalOrigin}.`, src: 'ApiMan' });
       return { error: `Not sent: a pre-request script changed the destination to ${finalOrigin}${ask ? '' : '. Send this request on its own to approve it'}.`, logs, tests, warnings };
@@ -1491,6 +1501,14 @@ function rowActs(...btns) { return h('span', { class: 'acts' }, ...btns); }
 function iconBtn(name, title, onclick) {
   return h('button', { class: 'btn icon', title, 'aria-label': title, onclick: (e) => { e.stopPropagation(); onclick(e); } }, icon(name));
 }
+function countMatches(items) { let n = 0; eachRequest(items, (it) => { if (matches(it)) n++; }); return n; }
+/** The filter text, highlighted inside a name (built as DOM nodes, never HTML). */
+function markMatch(text) {
+  const f = state.filter;
+  const i = f ? String(text).toLowerCase().indexOf(f) : -1;
+  if (i === -1) return [String(text)];
+  return [String(text).slice(0, i), h('mark', null, String(text).slice(i, i + f.length)), String(text).slice(i + f.length)];
+}
 const matches = (it) => {
   const f = state.filter;
   if (!f) return true;
@@ -1520,7 +1538,7 @@ function renderCollectionTree() {
     },
       h('span', { class: `caret ${open ? 'open' : ''}` }, icon('chevron')),
       h('span', { class: 'name' }, c.name),
-      col ? h('span', { class: 'sub' }, String(countRequests(col.item))) : null,
+      col ? h('span', { class: 'sub' }, state.filter ? `${countMatches(col.item)} / ${countRequests(col.item)}` : String(countRequests(col.item))) : null,
       rowActs(
         iconBtn('plus', 'Add request', () => addRequest(c.id, null)),
         iconBtn('dots', 'More actions', (e) => collectionMenu(e.currentTarget, c.id)))));
@@ -1558,7 +1576,7 @@ function renderCollectionTree() {
         },
           h('span', { class: 'caret' }),
           h('span', { class: `mtag ${m}` }, m),
-          h('span', { class: 'name' }, it.name || 'Untitled'),
+          h('span', { class: 'name' }, ...markMatch(it.name || 'Untitled')),
           rowActs(iconBtn('dots', 'More actions', (e) => requestMenu(e.currentTarget, cid, it.id)))));
       }
     }
@@ -1942,6 +1960,7 @@ function renderEditor() {
   renderBody();
   renderScripts();
   $('#docsText').value = ed.docs;
+  if (!$('#docsPreview').hidden) $('#docsPreview').replaceChildren(...renderMarkdown(ed.docs));
   renderCounts();
   renderResponse();
 }
@@ -2229,8 +2248,8 @@ function codeEditor({ value = '', mode = 'text', readOnly = false, onChange, pla
     extraKeys: {
       Tab: (c) => (c.somethingSelected() ? c.indentSelection('add') : c.replaceSelection(' '.repeat(c.getOption('indentUnit')), 'end')),
       'Shift-Tab': (c) => c.indentSelection('subtract'),
-      'Cmd-F': 'findPersistent', 'Ctrl-F': 'findPersistent',
-      Esc: (c) => c.getInputField().blur(),
+      'Cmd-F': cls.includes('fill') ? () => openFind() : 'findPersistent', 'Ctrl-F': cls.includes('fill') ? () => openFind() : 'findPersistent',
+      Esc: (c) => { const d = host.closest('dialog'); c.getInputField().blur(); (d || document.body).focus(); },
     },
   });
   if (onChange) cm.on('change', (c, ch) => { if (ch.origin !== 'setValue') onChange(c.getValue()); });
@@ -2318,7 +2337,7 @@ function renderResponse() {
   const res = out.res;
   const hasRes = res && !out.error;
   status.replaceChildren(...(hasRes ? [
-    h('span', { title: `Status ${res.status} ${res.reason || REASONS[res.status] || ''}` }, h('span', { class: `status-code s${String(res.status)[0]}` }, String(res.status),
+    h('span', { title: `${res.status} ${res.reason || REASONS[res.status] || ''}, ${fmtMs(res.timeMs)}, ${fmtSize(res.size)}` }, h('span', { class: `status-code s${String(res.status)[0]}` }, String(res.status),
       h('span', { class: 'm-reason' }, ` ${res.reason || REASONS[res.status] || ''}`))),
     h('span', { class: 'm-time', title: 'Time' }, h('b', null, fmtMs(res.timeMs))),
     h('span', { class: 'm-size', title: 'Size' }, h('b', null, fmtSize(res.size)), res.truncated ? ' (truncated)' : ''),
@@ -2343,9 +2362,11 @@ function renderResponse() {
   // body
   $('#respTools').hidden = !hasRes;
   $$('#respTools .seg-btn').forEach((b) => b.classList.toggle('on', b.dataset.view === t.bodyView));
+  clearFind();
   $('#respBody').replaceChildren(...notes, ...(notes.length && hasRes ? [h('div', { class: 'gap' })] : []), ...(hasRes ? [bodyView(res, t.bodyView)] : []));
   // headers
-  $('#respHeaders').replaceChildren(...(hasRes ? res.headers.map(([k, v]) => h('tr', null, h('td', null, k), h('td', { class: 'mono' }, v))) : []));
+  $('#respHeaders').replaceChildren(...(hasRes ? [h('thead', null, h('tr', null, h('th', null, 'Name'), h('th', null, 'Value'))),
+    h('tbody', null, res.headers.map(([k, v]) => h('tr', null, h('td', null, k), h('td', { class: 'mono' }, v))))] : []));
   // cookies
   $('#respCookies').replaceChildren(cookies.length
     ? h('table', { class: 'grid' }, h('thead', null, h('tr', null, ...['Name', 'Value', 'Domain', 'Path', 'Expires', 'Flags'].map((x) => h('th', null, x)))),
@@ -2370,6 +2391,96 @@ const REASONS = { 200: 'OK', 201: 'Created', 202: 'Accepted', 204: 'No Content',
   405: 'Method Not Allowed', 409: 'Conflict', 415: 'Unsupported Media Type', 422: 'Unprocessable Content', 429: 'Too Many Requests',
   500: 'Internal Server Error', 502: 'Bad Gateway', 503: 'Service Unavailable', 504: 'Gateway Timeout' };
 
+/** Small Markdown renderer for Docs: headings, lists, code, bold, italic, links. Builds DOM nodes, never HTML. */
+function renderMarkdown(src) {
+  const inline = (text) => {
+    const out = [];
+    const re = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\((https?:\/\/[^\s)]+)\))/g;
+    let last = 0, m;
+    while ((m = re.exec(text))) {
+      out.push(text.slice(last, m.index));
+      const t = m[0];
+      if (t.startsWith('`')) out.push(h('code', { class: 'inline' }, t.slice(1, -1)));
+      else if (t.startsWith('**')) out.push(h('strong', null, t.slice(2, -2)));
+      else if (t.startsWith('*')) out.push(h('em', null, t.slice(1, -1)));
+      else out.push(h('a', { href: m[2], target: '_blank', rel: 'noopener noreferrer' }, t.slice(1, t.indexOf(']'))));
+      last = m.index + t.length;
+    }
+    out.push(text.slice(last));
+    return out;
+  };
+  const blocks = [];
+  const lines = String(src || '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith('```')) {
+      const code = [];
+      for (i++; i < lines.length && !lines[i].startsWith('```'); i++) code.push(lines[i]);
+      blocks.push(h('pre', { class: 'hint-code' }, code.join('\n')));
+    } else if (/^#{1,6}\s/.test(line)) {
+      const level = line.match(/^#+/)[0].length;
+      blocks.push(h(`h${Math.min(level + 2, 6)}`, null, ...inline(line.replace(/^#+\s/, ''))));
+    } else if (/^\s*([-*]|\d+\.)\s/.test(line)) {
+      const ordered = /^\s*\d+\./.test(line);
+      const items = [];
+      for (; i < lines.length && /^\s*([-*]|\d+\.)\s/.test(lines[i]); i++) items.push(h('li', null, ...inline(lines[i].replace(/^\s*([-*]|\d+\.)\s/, ''))));
+      i--;
+      blocks.push(h(ordered ? 'ol' : 'ul', null, ...items));
+    } else if (line.trim()) {
+      const para = [line];
+      for (; i + 1 < lines.length && lines[i + 1].trim() && !/^(#|```|\s*([-*]|\d+\.)\s)/.test(lines[i + 1]); i++) para.push(lines[i + 1]);
+      blocks.push(h('p', null, ...inline(para.join(' '))));
+    }
+  }
+  return blocks.length ? blocks : [h('p', { class: 'hint' }, 'Nothing documented yet. Switch to Write to add notes.')];
+}
+
+/** Response HTML made inert for Preview: no refresh/redirect metas, <base>, links, forms or embedded frames. */
+function inertHtml(html) {
+  const doc = new DOMParser().parseFromString(String(html), 'text/html'); // parsing never runs scripts
+  doc.querySelectorAll('meta[http-equiv], base, script, iframe, frame, frameset, object, embed, link').forEach((el) => el.remove());
+  doc.querySelectorAll('[href]').forEach((el) => el.removeAttribute('href'));
+  doc.querySelectorAll('form').forEach((el) => { el.removeAttribute('action'); el.setAttribute('onsubmit', 'return false'); });
+  doc.querySelectorAll('*').forEach((el) => [...el.attributes].forEach((a) => { if (/^on/i.test(a.name) && el.tagName !== 'FORM') el.removeAttribute(a.name); }));
+  return doc.documentElement.outerHTML;
+}
+
+// ---------- Find in the response: a real toolbar row (never covers text), match count, previous/next ----------
+const find = { marks: [], hits: [], i: -1 };
+const findCm = () => { const el = $('#respBody .CodeMirror'); return el && el.CodeMirror; };
+function openFind() {
+  if (!findCm()) { toast('Send the request first: Find searches the response body.'); return; }
+  $('#findBar').hidden = false;
+  refreshEditors($('#pane-rbody'));
+  $('#findInput').focus();
+  $('#findInput').select();
+  if ($('#findInput').value) runFind(0);
+}
+function clearFind() { find.marks.forEach((m) => m.clear()); find.marks = []; find.hits = []; find.i = -1; }
+function closeFind() { clearFind(); $('#findBar').hidden = true; $('#findCount').textContent = ''; const cm = findCm(); if (cm) { refreshEditors($('#pane-rbody')); cm.focus(); } }
+function runFind(start) {
+  clearFind();
+  const cm = findCm();
+  const q = $('#findInput').value;
+  if (!cm || !q) { $('#findCount').textContent = ''; return; }
+  const caseFold = $('#findCase').getAttribute('aria-pressed') !== 'true';
+  const cur = cm.getSearchCursor(q, CodeMirror.Pos(0, 0), { caseFold });
+  while (cur.findNext() && find.hits.length < 5000) find.hits.push({ from: cur.from(), to: cur.to() });
+  find.marks = find.hits.map((m) => cm.markText(m.from, m.to, { className: 'cm-find' }));
+  stepFind(0, start);
+}
+function stepFind(dir, start = null) {
+  const cm = findCm();
+  const n = find.hits.length;
+  if (!cm || !n) { $('#findCount').textContent = $('#findInput').value ? 'No matches' : ''; return; }
+  find.i = start != null ? start : (find.i + dir + n) % n;
+  if (find.current) find.current.clear();
+  const hit = find.hits[find.i];
+  find.current = cm.markText(hit.from, hit.to, { className: 'cm-find-current' });
+  cm.scrollIntoView({ from: hit.from, to: hit.to }, 60);
+  $('#findCount').textContent = `${find.i + 1} of ${n}${n >= 5000 ? '+' : ''}`;
+}
+
 function contentType(res) {
   const f = res.headers.find(([k]) => k.toLowerCase() === 'content-type');
   return f ? f[1].toLowerCase() : '';
@@ -2382,7 +2493,7 @@ function bodyView(res, view) {
     if (!res.binary && /html|xml|svg/.test(ct)) {
       // No scripts, no network: sandbox="" plus a CSP that only allows inline styles and data: images.
       const frame = h('iframe', { class: 'preview', sandbox: '', title: 'Response preview', referrerpolicy: 'no-referrer' });
-      frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">${res.body}`;
+      frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">${inertHtml(res.body)}`;
       return frame;
     }
     return h('p', { class: 'hint' }, 'Preview works for HTML and images. Use Pretty or Raw for this response.');
@@ -2479,10 +2590,16 @@ async function save() {
   if (!t) return;
   if (!t.cid || !state.cols[t.cid] || !locate(state.cols[t.cid], t.itemId)) return saveAs();
   const loc = locate(state.cols[t.cid], t.itemId);
+  const previous = loc.item;
   loc.list[loc.index] = toItem(t.ed, loc.item);
   try {
     await saveCol(t.cid);
-  } catch (e) { toast(`Couldn't save: ${e.message}`); return; }
+  } catch (e) {
+    // roll back, so a later unrelated save can't write these "unsaved" edits (a 409 already reloaded the doc)
+    if (!e.message.includes('changed in another window') && loc.list[loc.index] !== previous) loc.list[loc.index] = previous;
+    toast(`Couldn't save: ${e.message}`);
+    return;
+  }
   t.dirty = false;
   persistTabs();
   renderTabs();
@@ -2516,10 +2633,15 @@ async function saveAs() {
       const target = targets[Number(sel.value)];
       t.ed.name = nameIn.value.trim() || t.ed.name;
       const col = state.cols[target.cid];
-      const list = target.folderId ? locate(col, target.folderId).item.item : col.item;
+      const folder = target.folderId ? locate(col, target.folderId) : null;
+      if (target.folderId && !folder) throw new Error('That folder no longer exists. Pick another place to save.');
+      const list = folder ? folder.item.item : col.item;
       const item = toItem(t.ed);
       list.push(item);
-      await saveCol(target.cid);
+      try { await saveCol(target.cid); } catch (e) {
+        const i = list.indexOf(item); if (i !== -1) list.splice(i, 1); // no duplicate on retry
+        throw e;
+      }
       Object.assign(t, { cid: target.cid, itemId: item.id, dirty: false });
       state.open.add(target.cid);
       if (target.folderId) state.open.add(`${target.cid}:${target.folderId}`);
@@ -2537,7 +2659,8 @@ async function saveAs() {
 // Dialogs
 // =====================================================================================================
 const dialogQueue = [];
-let dialogOnClose = null;
+let dialogSeq = 0, closingSeq = null;
+const dialogCloses = new Map(); // dialog number -> its onClose
 /** Opens the dialog, or queues it if one is already open, so a background prompt never replaces your open dialog. */
 function openDialog(opts) {
   if ($('#dlg').open) { dialogQueue.push(opts); return; }
@@ -2565,7 +2688,8 @@ function renderDialog({ title, body, buttons = [], wide = false, confirm = false
       try { if (await b.onClick()) dlg.close(); } catch (err) { toast(err.message); } finally { btn.disabled = false; }
     },
   }, b.label)));
-  dialogOnClose = onClose || null;
+  dialogSeq += 1;
+  dialogCloses.set(dialogSeq, onClose || null);
   if (!dlg.open) dlg.showModal();
   // Start on the first field, not on the close button (or on what the dialog asks for).
   const first = $('#dlgBody').querySelector('input:not([type=checkbox]):not([type=file]):not([type=range]):not([disabled]):not([readonly]), select, textarea');
@@ -3109,6 +3233,7 @@ function openCode() {
   draw();
   openDialog({
     title: 'Generate code',
+    focus: '#dlgFoot .btn.primary',
     wide: true,
     body: [tabsBar, viewer,
       h('label', { class: 'check dlg-after' }, mask, h('span', null, 'Hide secrets', h('small', null, 'Masks tokens, API keys and cookies, so the code is safe to paste into chats and tickets.')))],
@@ -3187,7 +3312,18 @@ async function openRunner(cid, folderId) {
           const ed = fromItem(item);
           // Values set by scripts carry through the whole run (like Postman), saved or not.
           const out = await execute({ ed, cid: runCid, itemId: item.id, iteration: it, signal: ctrl.signal, persist: keepVars.checked, runScopes: keepVars.checked ? null : runScopes });
-          if (!keepVars.checked && out.scopes) runScopes = out.scopes;
+          if (!keepVars.checked && out.scopes) {
+            // carry script values to the next request, except ones that decide where requests go (URL/Host)
+            const { names } = await urlVariableNames();
+            for (const sc of ['environment', 'collection', 'globals']) {
+              for (const k of new Set([...Object.keys(runScopes[sc]), ...Object.keys(out.scopes[sc])])) {
+                if (!names.has(k) || runScopes[sc][k] === out.scopes[sc][k]) continue;
+                if (Object.hasOwn(runScopes[sc], k)) out.scopes[sc][k] = runScopes[sc][k]; else delete out.scopes[sc][k];
+                out.logs.push({ level: 'warn', text: `Not carried to the next request: ${sc} variable "${k}" decides where requests go.`, src: 'ApiMan' });
+              }
+            }
+            runScopes = out.scopes;
+          }
           n++;
           const tp = out.tests.filter((x) => x.passed === true).length;
           const tf = out.tests.filter((x) => x.passed === false).length;
@@ -3203,7 +3339,7 @@ async function openRunner(cid, folderId) {
             h('td', null, h('span', { class: `mtag ${ed.method}` }, ed.method), ' ', ed.name,
               ...out.tests.filter((x) => x.passed === false).map((x) => h('div', { class: 'runner-fail' }, h('span', { class: 'pill err' }, 'Fail'), `${x.name}: ${x.error}`)),
               out.error ? h('div', { class: 'runner-fail' }, h('span', { class: 'pill err' }, 'Error'), out.error) : null),
-            h('td', { class: 'num' }, h('span', { class: `status-code ${out.error ? 's-err' : sc}` }, out.error ? 'Error' : String(out.res.status))),
+            h('td', { class: 'num' }, (out.error ? '–' : h('span', { class: `status-code ${sc}` }, String(out.res.status)))),
             h('td', { class: 'num' }, out.res && !out.error ? fmtMs(out.res.timeMs) : '–'),
             h('td', { class: 'num' }, out.tests.length ? `${tp}/${out.tests.length}` : '–')));
           bar.firstChild.style.width = `${(n / total) * 100}%`;
@@ -3227,10 +3363,11 @@ async function openRunner(cid, folderId) {
 }
 
 // ---------- settings ----------
-function openSettings(initial = null) {
+function openSettings(initial = null, layoutSnap = null) {
   const s = state.settings;
+  const snap = layoutSnap || initResizers.snapshot(); // panel sizes when Settings opened: Cancel goes back to these
   const draft = { ...s, ...(initial || {}) };
-  let saved = false;
+  let saved = false, reopening = false;
   const preview = () => { applyAppearance(draft); };
   const seg = (key, options, label) => {
     const bar = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': label });
@@ -3262,11 +3399,26 @@ function openSettings(initial = null) {
   if (draft.densityScale == null) draft.densityScale = DENSITY[draft.density] || 1;
   if (initial) setTimeout(() => { if (initial.theme === 'light' || initial.theme === 'dark') document.documentElement.dataset.theme = initial.theme; else delete document.documentElement.dataset.theme; applyAppearance(draft); }, 0);
   // exact panel sizes (applied immediately, like dragging)
-  const sz = initResizers.sizes();
-  const sideNum = h('input', { type: 'number', class: 'num-input', min: '180', max: '640', step: '1', value: String(sz.side), 'aria-label': 'Sidebar width in pixels',
-    onchange: (e) => { initResizers.setSide(Number(e.target.value)); e.target.value = String(initResizers.sizes().side); } });
-  const splitNum = h('input', { type: 'number', class: 'num-input', min: '15', max: '85', step: '0.5', value: String(sz.split), 'aria-label': 'Request pane share in percent',
-    onchange: (e) => { initResizers.setSplit(Number(e.target.value)); e.target.value = String(initResizers.sizes().split); } });
+  // Exact sizes, in the unit you prefer (96 px = 1 inch). Every field always shows the size actually rendered.
+  let unit = ls.get('apiman:sizeUnit', 'px');
+  const PER = { px: 1, in: 96, cm: 96 / 2.54 };
+  const show = (px) => (unit === 'px' ? String(Math.round(px)) : String(Math.round((px / PER[unit]) * 100) / 100));
+  const sideNum = h('input', { type: 'number', class: 'num-input', step: 'any', 'aria-label': 'Sidebar width' });
+  const reqNum = h('input', { type: 'number', class: 'num-input', step: 'any', 'aria-label': 'Request pane size' });
+  const splitNum = h('input', { type: 'number', class: 'num-input', min: '15', max: '85', step: '0.5', 'aria-label': 'Request pane share in percent' });
+  const unitSel = h('select', { class: 'unit-select', 'aria-label': 'Size unit' }, ...['px', 'in', 'cm'].map((u) => h('option', { value: u, ...(u === unit ? { selected: true } : {}) }, u)));
+  const unitTxt = () => $$('.size-unit', unitSel.closest('.dlg-body') || document).forEach((el) => { el.textContent = unit; });
+  const syncSizes = () => {
+    const z = initResizers.sizes();
+    sideNum.value = show(z.side);
+    reqNum.value = show(initResizers.paneSize());
+    splitNum.value = String(z.split);
+  };
+  sideNum.addEventListener('change', () => { initResizers.setSide(Number(sideNum.value) * PER[unit]); syncSizes(); });
+  reqNum.addEventListener('change', () => { initResizers.setSplit(((Number(reqNum.value) * PER[unit]) / initResizers.splitTotal()) * 100); syncSizes(); });
+  splitNum.addEventListener('change', () => { initResizers.setSplit(Number(splitNum.value)); syncSizes(); });
+  unitSel.addEventListener('change', () => { unit = unitSel.value; ls.set('apiman:sizeUnit', unit); syncSizes(); unitTxt(); });
+  setTimeout(syncSizes, 0);
   const swatches = h('div', { class: 'swatches', role: 'radiogroup', 'aria-label': 'Accent colour' });
   const custom = h('input', { type: 'color', value: draft.accentCustom || '#2560cf', 'aria-label': 'Custom accent colour', title: 'Custom colour',
     oninput: (e) => { draft.accent = 'custom'; draft.accentCustom = e.target.value; drawSwatches(); preview(); } });
@@ -3298,11 +3450,12 @@ function openSettings(initial = null) {
     h('div', { class: 'grid-2 desktop-only' },
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Request and response'), seg('layout', [['auto', 'Side by side'], ['stacked', 'Stacked']], 'Layout')),
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Sidebar'), seg('sidePosition', [['left', 'Left'], ['right', 'Right']], 'Sidebar position'))),
-    h('div', { class: 'grid-2 desktop-only' },
-      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Sidebar width'), h('div', { class: 'slider-row' }, sideNum, h('span', { class: 'unit' }, 'px'))),
+    h('div', { class: 'grid-3 desktop-only' },
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Sidebar width'), h('div', { class: 'slider-row' }, sideNum, h('span', { class: 'unit size-unit' }, unit), unitSel)),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, initResizers.isStacked() ? 'Request pane height' : 'Request pane width'), h('div', { class: 'slider-row' }, reqNum, h('span', { class: 'unit size-unit' }, unit))),
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Request pane share'), h('div', { class: 'slider-row' }, splitNum, h('span', { class: 'unit' }, '%')))),
     h('div', { class: 'field-row desktop-only' },
-      h('button', { type: 'button', class: 'btn small', onclick: () => { initResizers.reset(); const z = initResizers.sizes(); sideNum.value = String(z.side); splitNum.value = String(z.split); toast('Panel sizes reset'); } }, 'Reset panel sizes'),
+      h('button', { type: 'button', class: 'btn small', onclick: () => { initResizers.reset(); syncSizes(); toast('Panel sizes reset'); } }, 'Reset panel sizes'),
       h('span', { class: 'hint' }, 'Drag the lines between panels to resize them (sizes show while dragging). Double-click a line to reset it. Cmd/Ctrl+B hides the sidebar.')),
   ];
   const requests = [
@@ -3318,13 +3471,15 @@ function openSettings(initial = null) {
     title: 'Settings',
     tall: true, wide: true,
     body: dlgTabs([{ key: 'appearance', label: 'Appearance', content: appearance }, { key: 'requests', label: 'Requests', content: requests }]),
-    onClose: () => { if (!saved) { applyTheme(); applyAppearance(); } }, // closing without saving undoes the preview
+    onClose: () => { if (!saved && !reopening) { applyTheme(); applyAppearance(); initResizers.restore(snap); } }, // Cancel undoes everything, panel sizes included
     buttons: [
       { label: 'Restore defaults', left: true, onClick: () => {
         // Only the form is reset and previewed; nothing is stored until Save, and Cancel brings everything back.
         const defaults = { ...draft, theme: DEFAULT_SETTINGS.theme, textScale: 1, codeSize: 13, density: 'comfortable', densityScale: 1, layout: 'auto', wrap: true,
           lineHeight: 1.6, tabSize: 2, uiFont: 'geist', codeFont: 'geist-mono', accent: 'blue', sidePosition: 'left', sideHidden: false };
-        setTimeout(() => { openSettings(defaults); toast('Defaults loaded. Save to keep them, or Cancel to go back.'); }, 0);
+        reopening = true;
+        initResizers.setSide(288); initResizers.setSplit(50); // previewed like everything else; Cancel restores
+        setTimeout(() => { openSettings(defaults, snap); toast('Defaults loaded. Save to keep them, or Cancel to go back.'); }, 0);
         return true;
       } },
       { label: 'Save', primary: true, onClick: () => {
@@ -3412,10 +3567,16 @@ function bindEditor() {
     navigator.clipboard.writeText(text).then(() => toast('Response copied'), () => toast('Copy failed'));
   });
   $('#btnSaveBody').addEventListener('click', saveBody);
-  $('#btnFindBody').addEventListener('click', () => {
-    const el = $('#respBody .CodeMirror');
-    if (el && el.CodeMirror) { el.CodeMirror.focus(); el.CodeMirror.execCommand('findPersistent'); }
+  $('#btnFindBody').addEventListener('click', () => openFind());
+  $('#findInput').addEventListener('input', () => runFind(0));
+  $('#findInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); stepFind(e.shiftKey ? -1 : 1); }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFind(); }
   });
+  $('#findPrev').addEventListener('click', () => stepFind(-1));
+  $('#findNext').addEventListener('click', () => stepFind(1));
+  $('#findCase').addEventListener('click', (e) => { e.currentTarget.setAttribute('aria-pressed', String(e.currentTarget.getAttribute('aria-pressed') !== 'true')); runFind(0); });
+  $('#findClose').addEventListener('click', closeFind);
   $$('#editor [data-script]').forEach((c) => c.addEventListener('click', () => { cur().scriptKind = c.dataset.script; renderScripts(); }));
 
   $('#btnSnippets').addEventListener('click', (e) => {
@@ -3431,6 +3592,13 @@ function bindEditor() {
     } })));
   });
   $('#docsText').addEventListener('input', (e) => { cur().ed.docs = e.target.value; markDirty(); });
+  $$('[data-docs]').forEach((b) => b.addEventListener('click', () => {
+    const preview = b.dataset.docs === 'preview';
+    $$('[data-docs]').forEach((x) => { x.classList.toggle('on', x === b); x.setAttribute('aria-checked', String(x === b)); });
+    $('#docsText').hidden = preview;
+    $('#docsPreview').hidden = !preview;
+    if (preview) $('#docsPreview').replaceChildren(...renderMarkdown(cur().ed.docs));
+  }));
 }
 
 function bindChrome() {
@@ -3525,18 +3693,29 @@ function initResizers() {
   const root = document.documentElement;
   const layout = ls.get('apiman:layout', {});
   const save = (k, v) => { layout[k] = v; ls.set('apiman:layout', layout); };
-  const stacked = () => document.documentElement.dataset.layout === 'stacked' || matchMedia('(max-width: 1180px)').matches || $('.work').clientWidth <= 760;
+  const stacked = () => document.documentElement.dataset.layout === 'stacked' || document.documentElement.dataset.autoStack === 'true' || matchMedia('(max-width: 1180px)').matches;
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const side = $('#sideResizer'), split = $('#splitResizer');
+  const sideMin = () => Math.ceil(262 * (Number(state.settings.textScale) || 1)); // matches --side-eff in app.css
   const setSideW = (px, persist = true) => {
-    px = clamp(Math.round(px), 180, 640);
+    px = clamp(Math.round(px), sideMin(), 640);
     root.style.setProperty('--side-w', `${px}px`);
     Object.assign(side.dataset, { now: px });
-    side.setAttribute('aria-valuenow', String(px)); side.setAttribute('aria-valuemin', '180'); side.setAttribute('aria-valuemax', '640');
+    side.setAttribute('aria-valuenow', String(px)); side.setAttribute('aria-valuemin', String(sideMin())); side.setAttribute('aria-valuemax', '640');
     if (persist) save('side', px);
+    if (initResizers.autoStack) requestAnimationFrame(() => initResizers.autoStack()); // the work area just changed width
+  };
+  // The share can never go below what each pane's minimum allows, so the number shown is the real size.
+  const splitBounds = () => {
+    const r = $('.split').getBoundingClientRect();
+    const total = stacked() ? r.height : r.width;
+    const minPx = stacked() ? 160 : 320 * (Number(state.settings.textScale) || 1);
+    const lo = total > 0 ? Math.max(15, (minPx / total) * 100) : 15;
+    return [Math.min(lo, 50), Math.max(100 - lo, 50) > 85 ? 85 : Math.max(100 - lo, 50)];
   };
   const setSplit = (pct, persist = true) => {
-    pct = Math.round(clamp(pct, 15, 85) * 10) / 10;
+    const [lo, hi] = splitBounds();
+    pct = Math.round(clamp(pct, lo, hi) * 10) / 10;
     const key = stacked() ? 'reqH' : 'req';
     root.style.setProperty(stacked() ? '--req-h' : '--req-w', `${pct}%`);
     split.dataset.now = pct;
@@ -3599,6 +3778,32 @@ function initResizers() {
   side.title = split.title = 'Drag to resize, double-click to reset';
   initResizers.refresh = () => setSplit((stacked() ? layout.reqH : layout.req) || 50, false);
   initResizers.setSide = (px) => setSideW(px);
+  initResizers.snapshot = () => ({ ...ls.get('apiman:layout', {}) });
+  initResizers.restore = (snap) => {
+    Object.assign(layout, { side: snap.side, req: snap.req, reqH: snap.reqH });
+    ls.set('apiman:layout', layout);
+    setSideW(snap.side || 288, false);
+    root.style.setProperty('--req-w', `${snap.req || 50}%`);
+    root.style.setProperty('--req-h', `${snap.reqH || 50}%`);
+    initResizers.refresh();
+  };
+  initResizers.paneSize = () => { const r = $('.req-col').getBoundingClientRect(); return stacked() ? r.height : r.width; };
+  initResizers.splitTotal = () => { const r = $('.split').getBoundingClientRect(); return stacked() ? r.height : r.width; };
+  initResizers.isStacked = stacked;
+  // #6: auto-stack whenever side-by-side panes would be narrower than their content needs (text-size aware)
+  const autoStack = () => {
+    const need = 560 * (Number(state.settings.textScale) || 1);
+    const on = document.documentElement.dataset.layout !== 'stacked' && ($('.work').clientWidth - 1) / 2 < need && !matchMedia('(max-width: 820px)').matches;
+    if ((document.documentElement.dataset.autoStack === 'true') !== on) {
+      if (on) document.documentElement.dataset.autoStack = 'true'; else delete document.documentElement.dataset.autoStack;
+      setSplit((stacked() ? layout.reqH : layout.req) || 50, false);
+      refreshEditors(document);
+    }
+  };
+  new ResizeObserver(() => requestAnimationFrame(autoStack)).observe($('.work'));
+  window.addEventListener('resize', () => requestAnimationFrame(autoStack));
+  requestAnimationFrame(autoStack);
+  initResizers.autoStack = autoStack;
   initResizers.setSplit = (pct) => setSplit(pct);
   initResizers.sizes = () => ({ side: Number(side.dataset.now), split: Number(split.dataset.now) });
   initResizers.reset = () => { setSideW(288); layout.req = 50; layout.reqH = 50; ls.set('apiman:layout', layout); root.style.setProperty('--req-w', '50%'); root.style.setProperty('--req-h', '50%'); setSplit(50); };
@@ -3618,9 +3823,31 @@ async function start() {
     $$('.pane-max').forEach((x) => { x.setAttribute('aria-pressed', String(!on && x === b)); x.title = !on && x === b ? 'Restore both panes' : `Maximise the ${x.dataset.max === 'req' ? 'request' : 'response'} pane`; });
     refreshEditors(document);
   }));
-  // Tab rows that don't fit fade out at the edge (and scroll), so no tab is ever silently cut off.
+  // The response row measures itself: if tabs + status + button don't fit, the status gets its own line, so no tab is hidden.
+  const respRow = $('#respTabs');
+  const fitResp = () => {
+    // Degrade in a fixed order so both tab rows keep one height: hide size, then time (both stay in the
+    // status tooltip), and only as a last resort give the status its own line.
+    const steps = ['hide-size', 'hide-time', 'meta-below'];
+    respRow.classList.remove(...steps);
+    const seg = respRow.querySelector('.seg'), meta = $('#respStatus'), max = respRow.querySelector('.pane-max');
+    if (!meta.textContent.trim()) return;
+    const fits = () => seg.scrollWidth + meta.scrollWidth + max.offsetWidth + 2 * 8 + 2 * 20 <= respRow.clientWidth;
+    for (const step of steps) {
+      if (fits()) return;
+      if (step === 'meta-below') respRow.classList.remove('hide-size', 'hide-time');
+      respRow.classList.add(step);
+    }
+  };
+  new ResizeObserver(fitResp).observe(respRow);
+  new MutationObserver(fitResp).observe($('#respStatus'), { childList: true, subtree: true, characterData: true });
+  // Tab rows that don't fit fade at whichever edge has more tabs (and scroll), so no tab is ever silently cut off.
   const watchOverflow = (el) => {
-    const update = () => el.classList.toggle('overflowing', el.scrollWidth > el.clientWidth + 1 && el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+    const update = () => {
+      const over = el.scrollWidth > el.clientWidth + 1;
+      el.classList.toggle('fade-right', over && el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+      el.classList.toggle('fade-left', over && el.scrollLeft > 1);
+    };
     new ResizeObserver(update).observe(el);
     el.addEventListener('scroll', update, { passive: true });
     update();
@@ -3696,9 +3923,18 @@ async function start() {
       if (next) next.focus();
     } else if (e.key === 'Escape') { e.preventDefault(); hideMenu(true); }
   });
+  // The close event fires a moment after close(); remember WHICH dialog was closing, so a dialog
+  // opened in between never receives the previous one's close (and never gets cancelled by it).
+  const dlgEl = $('#dlg');
+  const nativeClose = dlgEl.close.bind(dlgEl);
+  dlgEl.close = (...a) => { closingSeq = dialogSeq; nativeClose(...a); };
+  dlgEl.addEventListener('cancel', () => { closingSeq = dialogSeq; });
+  dlgEl.addEventListener('submit', (e) => { if (e.submitter && e.submitter.value === 'cancel') closingSeq = dialogSeq; });
   $('#dlg').addEventListener('close', () => {
-    const cb = dialogOnClose;
-    dialogOnClose = null;
+    const seq = closingSeq ?? dialogSeq;
+    closingSeq = null;
+    const cb = dialogCloses.get(seq);
+    dialogCloses.delete(seq);
     if (cb) cb();
     if (dialogQueue.length) setTimeout(() => { if (!$('#dlg').open && dialogQueue.length) renderDialog(dialogQueue.shift()); }, 0);
   });

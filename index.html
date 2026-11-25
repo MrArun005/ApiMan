@@ -133,7 +133,15 @@
             <div id="scriptEditor" class="editor-host"></div>
           </div>
           <div class="pane" role="tabpanel" id="pane-docs" aria-labelledby="tab-docs" data-pane="docs" hidden>
+            <div class="pane-tools">
+              <div class="seg" role="radiogroup" aria-label="Docs view">
+                <button class="seg-btn on" role="radio" aria-checked="true" data-docs="write">Write</button>
+                <button class="seg-btn" role="radio" aria-checked="false" data-docs="preview">Preview</button>
+              </div>
+              <span class="hint">Markdown: # headings, **bold**, *italic*, `code`, lists, links.</span>
+            </div>
             <textarea class="prose" id="docsText" aria-label="Documentation" placeholder="Describe what this request does, its parameters and gotchas."></textarea>
+            <div class="docs-preview" id="docsPreview" hidden></div>
           </div>
         </section>
 
@@ -162,6 +170,14 @@
               <button class="btn small ghost" id="btnFindBody" title="Search the response (Cmd/Ctrl+F in the body). Enter: next, Shift+Enter: previous, Esc: close.">Find</button>
               <button class="btn small ghost" id="btnCopyBody">Copy</button>
               <button class="btn small ghost" id="btnSaveBody">Save to file</button>
+            </div>
+            <div class="find-bar" id="findBar" role="search" hidden>
+              <input id="findInput" type="search" placeholder="Find in response" aria-label="Find in response" spellcheck="false" autocomplete="off">
+              <span class="find-count" id="findCount" aria-live="polite"></span>
+              <button class="btn small ghost" id="findCase" aria-pressed="false" title="Match case">Aa</button>
+              <button class="btn icon small" id="findPrev" title="Previous match (Shift+Enter)" aria-label="Previous match"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 12.5l5-5 5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+              <button class="btn icon small" id="findNext" title="Next match (Enter)" aria-label="Next match"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 7.5l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+              <button class="btn icon small" id="findClose" title="Close (Esc)" aria-label="Close find"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
             </div>
             <div id="respBody" class="resp-body"></div>
           </div>

@@ -12,6 +12,7 @@ Collections are Postman v2.1 JSON files; environments are Postman environment JS
 """
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -63,11 +64,15 @@ class Store:
         self.name_of = name_of
 
     def path(self, doc_id):
-        if not ID_RE.match(doc_id):
+        if not ID_RE.fullmatch(doc_id):  # fullmatch: "$" would also accept a trailing newline
             raise ValueError("Invalid id")
         p = (self.root / doc_id).resolve()
         if p.parent != self.root:  # no ../ escapes
             raise ValueError("Invalid id")
+        # macOS/Windows file systems ignore case: "foo.json" must not silently alias "Foo.json"
+        clash = next((q.name for q in self.root.glob("*.json") if q.name.lower() == doc_id.lower() and q.name != doc_id), None)
+        if clash:
+            raise ValueError(f"Invalid id: {clash} already exists")
         return p
 
     def list(self):
@@ -84,7 +89,12 @@ class Store:
         return json.loads(self.path(doc_id).read_text("utf-8"))
 
     def version(self, doc_id):
-        return str(self.path(doc_id).stat().st_mtime_ns)
+        # a content hash, not mtime: coarse timestamps (network shares, FAT) can't hide a change
+        return hashlib.sha256(self.path(doc_id).read_bytes()).hexdigest()[:32]
+
+    def get_with_version(self, doc_id):
+        raw = self.path(doc_id).read_bytes()  # one read: the content and its version always match
+        return json.loads(raw.decode("utf-8")), hashlib.sha256(raw).hexdigest()[:32]
 
     def put(self, doc_id, data):
         self.validate(data)
@@ -267,6 +277,7 @@ def send(spec):
 
 class Handler(BaseHTTPRequestHandler):
     stores = None  # set in main()
+    timeout = 30   # seconds a client may stall mid-request
 
     # ---- safety: this server can reach your VPN, so only our own page may talk to it ----
     def allowed(self):
@@ -276,7 +287,11 @@ class Handler(BaseHTTPRequestHandler):
             return False
         origin = self.headers.get("Origin")
         # Blocks other websites in your browser from using this as a proxy into your network.
-        return origin is None or origin in {f"http://{h}" for h in hosts}
+        if not (origin is None or origin in {f"http://{h}" for h in hosts}):
+            return False
+        # Browsers label cross-site requests (<script>, <img>, links) even when they carry no Origin.
+        site = self.headers.get("Sec-Fetch-Site")
+        return site in (None, "same-origin", "none")
 
     def route(self, method):
         if not self.allowed():
@@ -303,16 +318,22 @@ class Handler(BaseHTTPRequestHandler):
                         "info": {"name": body.get("name") or "New collection", "schema": SCHEMA_V21}, "item": []}
                     return self.reply(201, {"id": store.create(data)})
                 if doc_id and method == "GET":
-                    return self.reply(200, store.get(doc_id), {"X-Version": store.version(doc_id)})
+                    data, version = store.get_with_version(doc_id)
+                    return self.reply(200, data, {"X-Version": version})
                 if doc_id and method == "PUT":
                     expected = self.headers.get("If-Match")
+                    body = self.read_json()  # read before locking: a slow client never blocks other saves
                     with store._create_lock:  # check-then-write must not interleave with another save
-                        if expected and store.path(doc_id).exists() and store.version(doc_id) != expected:
-                            return self.reply(409, {"error": "This document was changed elsewhere since it was loaded."})
-                        store.put(doc_id, self.read_json())
+                        if expected and (not store.path(doc_id).exists() or store.version(doc_id) != expected):
+                            return self.reply(409, {"error": "This document was changed or deleted elsewhere since it was loaded."})
+                        store.put(doc_id, body)
                         return self.reply(200, {"ok": True}, {"X-Version": store.version(doc_id)})
                 if doc_id and method == "DELETE":
-                    store.delete(doc_id)
+                    expected = self.headers.get("If-Match")
+                    with store._create_lock:
+                        if expected and store.path(doc_id).exists() and store.version(doc_id) != expected:
+                            return self.reply(409, {"error": "This document was changed elsewhere; reload before deleting it."})
+                        store.delete(doc_id)
                     return self.reply(200, {"ok": True})
             return self.reply(404, {"error": "Not found"})
         except FileNotFoundError:
@@ -339,6 +360,7 @@ class Handler(BaseHTTPRequestHandler):
         for k, val in (extra_headers or {}).items():
             self.send_header(k, val)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
