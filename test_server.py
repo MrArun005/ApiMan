@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -14,6 +15,12 @@ class Echo(BaseHTTPRequestHandler):
     """Fake target API: echoes method, auth header and body."""
 
     def handle_any(self):
+        if self.path.startswith("/redirect?to="):
+            self.send_response(302)
+            self.send_header("Location", urllib.parse.unquote(self.path[len("/redirect?to="):]))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
         status = 404 if self.path == "/missing" else 200
         data = json.dumps({"method": self.command, "auth": self.headers.get("Authorization"), "body": body}).encode()
@@ -77,6 +84,24 @@ class ServerTest(unittest.TestCase):
 
         _, res = self.call("POST", "/api/send", {"method": "GET", "url": "file:///etc/passwd"})
         self.assertIn("must start with http", res["error"])
+
+    def test_redirects_keep_token_on_same_origin_but_drop_it_cross_origin(self):
+        port = self.echo.server_address[1]
+        same = f"{self.target}/redirect?to=" + urllib.parse.quote(f"http://127.0.0.1:{port}/x", safe="")
+        cross = f"{self.target}/redirect?to=" + urllib.parse.quote(f"http://localhost:{port}/x", safe="")
+        auth = [["Authorization", "Bearer secret"]]
+
+        _, res = self.call("POST", "/api/send", {"method": "GET", "url": same, "headers": auth})
+        self.assertEqual(json.loads(res["body"])["auth"], "Bearer secret")
+
+        _, res = self.call("POST", "/api/send", {"method": "GET", "url": cross, "headers": auth})
+        self.assertEqual(res["finalUrl"], f"http://localhost:{port}/x")
+        self.assertIsNone(json.loads(res["body"])["auth"])  # token not leaked to the other host
+
+    def test_https_to_http_redirect_is_refused(self):
+        req = urllib.request.Request("https://api.example/a")
+        with self.assertRaises(server.RedirectRefused):
+            server.SafeRedirect().redirect_request(req, None, 302, "Found", {}, "http://api.example/b")
 
     def test_collections_crud_and_import_validation(self):
         coll = {"info": {"name": "My API"}, "item": [{"name": "r", "request": {"method": "GET", "url": "x"}}]}

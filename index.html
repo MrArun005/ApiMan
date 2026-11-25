@@ -123,6 +123,7 @@
     <button id="btnImport">Import</button>
     <input type="file" id="fileImport" accept=".json,application/json" multiple hidden>
     <button id="btnNewReq">+ Scratch request</button>
+    <button id="btnFolder" hidden title="Save collections as .json files in a folder on this computer">Use a folder…</button>
     <span class="spacer"></span>
     <label title="Last resort for internal APIs with self-signed certificates. Prefer starting the server with --ca-file.">
       <input type="checkbox" id="chkInsecure"> Skip TLS certificate check
@@ -389,11 +390,11 @@ function effectiveAuth() {
 }
 
 // ---------------- tree ----------------
-async function loadCol(id) { state.cols[id] = await api('GET', '/api/collections/' + enc(id)); }
-async function saveCol(id) { await api('PUT', '/api/collections/' + enc(id), state.cols[id]); }
+async function loadCol(id) { state.cols[id] = await backend.get(id); }
+async function saveCol(id) { await backend.put(id, state.cols[id]); }
 
 async function refresh() {
-  state.list = await api('GET', '/api/collections');
+  state.list = await backend.list();
   const ids = new Set(state.list.map((c) => c.id));
   for (const id of Object.keys(state.cols)) if (!ids.has(id)) delete state.cols[id];
   await Promise.all(state.list.filter((c) => state.open.has(c.id) && !state.cols[c.id]).map((c) => loadCol(c.id).catch(() => {})));
@@ -534,7 +535,7 @@ async function deleteNode(cid, path) {
 
 async function deleteCol(id, name) {
   if (!confirm(`Delete collection "${name}"? This deletes the file ${id}.`)) return;
-  await api('DELETE', '/api/collections/' + enc(id));
+  await backend.remove(id);
   if (state.target && state.target.cid === id) { state.target = null; renderCrumb(); }
   await refresh();
 }
@@ -542,7 +543,7 @@ async function deleteCol(id, name) {
 async function newCollection() {
   const name = prompt('Collection name');
   if (!name) return;
-  const { id } = await api('POST', '/api/collections', { name });
+  const id = await backend.create({ info: { name, schema: SCHEMA_V21 }, item: [] });
   state.open.add(id);
   await refresh();
   openColSettings(id);
@@ -552,7 +553,7 @@ async function importFiles(files) {
   for (const f of files) {
     try {
       const data = JSON.parse(await f.text());
-      const { id } = await api('POST', '/api/collections', { collection: data });
+      const id = await backend.create(data);
       state.open.add(id);
       toast(`Imported ${data.info.name}`);
     } catch (e) {
@@ -670,11 +671,13 @@ async function send() {
   $('#btnSend').disabled = true;
   $('#respHead').replaceChildren(h('span', { class: 'meta' }, `Sending ${ed.method} ${url} …`));
   try {
-    const res = await api('POST', '/api/send', {
+    const res = await backend.send({
       method: ed.method, url, headers, body, insecure: $('#chkInsecure').checked });
     res.error ? showError(res.error) : showResponse(res);
   } catch (e) {
-    showError('Local server not reachable. Is "python3 server.py" still running? ' + e.message);
+    showError(backend.mode === 'server'
+      ? 'Local server not reachable. Is "python3 server.py" still running? ' + e.message
+      : e.message);
   } finally {
     $('#btnSend').disabled = false;
   }
@@ -841,12 +844,175 @@ document.addEventListener('drop', (e) => {
   if (files.length) importFiles(files);
 });
 
+// ---------------- backends ----------------
+// "server": started with python3 server.py. Requests go through the local server (no CORS limits,
+//           works with any VPN host), collections are files in the server's folder.
+// "browser": opened as a website (GitHub Pages). Requests are sent by the browser itself, so the API
+//           must allow cross-site requests (CORS). Collections live in this browser, or in a folder
+//           you pick (Chrome/Edge).
+const SCHEMA_V21 = 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json';
+
+function validateCollection(data) {
+  if (!(data && typeof data === 'object' && data.info && typeof data.info.name === 'string' && Array.isArray(data.item))) {
+    throw new Error('Not a Postman v2 collection (needs info.name and item[]). In Postman: Export, then Collection v2.1.');
+  }
+}
+
+function newId(name, exists) {
+  const base = name.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 80) || 'collection';
+  let id = `${base}.json`;
+  for (let n = 2; exists(id); n++) id = `${base}-${n}.json`;
+  return id;
+}
+
+const serverBackend = {
+  mode: 'server',
+  list: () => api('GET', '/api/collections'),
+  get: (id) => api('GET', '/api/collections/' + enc(id)),
+  put: (id, data) => api('PUT', '/api/collections/' + enc(id), data),
+  create: async (data) => (await api('POST', '/api/collections', { collection: data })).id,
+  remove: (id) => api('DELETE', '/api/collections/' + enc(id)),
+  send: (spec) => api('POST', '/api/send', spec),
+};
+
+/** Collections kept in localStorage: { id: collection }. */
+const browserStore = {
+  read() { return store.get('apiman:collections', {}); },
+  write(all) { localStorage.setItem('apiman:collections', JSON.stringify(all)); }, // throws when full: surfaced as a toast
+  async list() { return Object.entries(this.read()).map(([id, c]) => ({ id, name: c.info.name })).sort((a, b) => a.name.localeCompare(b.name)); },
+  async get(id) { const c = this.read()[id]; if (!c) throw new Error('Collection not found'); return structuredClone(c); },
+  async put(id, data) { validateCollection(data); const all = this.read(); all[id] = data; this.write(all); },
+  async create(data) { validateCollection(data); const all = this.read(); const id = newId(data.info.name, (x) => x in all); all[id] = data; this.write(all); return id; },
+  async remove(id) { const all = this.read(); delete all[id]; this.write(all); },
+};
+
+/** Collections as .json files in a real folder, via the File System Access API (Chrome/Edge). */
+function folderStore(dir) {
+  const files = async () => {
+    const out = [];
+    for await (const [name, handle] of dir.entries()) if (handle.kind === 'file' && name.endsWith('.json')) out.push(name);
+    return out;
+  };
+  const read = async (id) => JSON.parse(await (await (await dir.getFileHandle(id)).getFile()).text());
+  const write = async (id, data) => {
+    const w = await (await dir.getFileHandle(id, { create: true })).createWritable();
+    await w.write(JSON.stringify(data, null, 2));
+    await w.close();
+  };
+  return {
+    async list() {
+      const out = [];
+      for (const id of await files()) {
+        try { out.push({ id, name: (await read(id)).info.name }); } catch { out.push({ id, name: id + ' (unreadable)' }); }
+      }
+      return out.sort((a, b) => a.name.localeCompare(b.name));
+    },
+    get: read,
+    async put(id, data) { validateCollection(data); await write(id, data); },
+    async create(data) { validateCollection(data); const names = new Set(await files()); const id = newId(data.info.name, (x) => names.has(x)); await write(id, data); return id; },
+    remove: (id) => dir.removeEntry(id),
+  };
+}
+
+// The chosen folder handle survives reloads in IndexedDB (localStorage can't hold it).
+function idb(op, value) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open('apiman', 1);
+    open.onupgradeneeded = () => open.result.createObjectStore('kv');
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const tx = open.result.transaction('kv', op === 'get' ? 'readonly' : 'readwrite');
+      const req = op === 'get' ? tx.objectStore('kv').get('dir') : tx.objectStore('kv').put(value, 'dir');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    };
+  });
+}
+
+async function directSend(spec) {
+  const target = new URL(spec.url);
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(target.hostname);
+  if (location.protocol === 'https:' && target.protocol === 'http:' && !local) {
+    return { error: 'Browsers block plain http:// APIs from a secure page. Use https://, or run ApiMan locally (python3 server.py).' };
+  }
+  const start = performance.now();
+  let r;
+  try {
+    r = await fetch(spec.url, {
+      method: spec.method,
+      headers: spec.headers,
+      body: ['GET', 'HEAD'].includes(spec.method) ? undefined : (spec.body ?? undefined),
+      credentials: 'omit',
+      redirect: 'follow',
+    });
+  } catch {
+    return { error: `The browser couldn't complete this request. Either ${target.host} doesn't allow cross-site requests (CORS), `
+      + 'or it isn\'t reachable from here. Run ApiMan locally (python3 server.py) to call any API without CORS limits.' };
+  }
+  const buf = await r.arrayBuffer();
+  let text = null;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { /* binary */ }
+  return { status: r.status, reason: r.statusText, headers: [...r.headers], body: text, binary: text === null,
+           size: buf.byteLength, truncated: false, timeMs: Math.round(performance.now() - start), finalUrl: r.url };
+}
+
+function bindAll(o) { return Object.fromEntries(['list', 'get', 'put', 'create', 'remove'].map((k) => [k, o[k].bind(o)])); }
+const browserBackend = { mode: 'browser', ...bindAll(browserStore), send: directSend };
+
+let backend = serverBackend;
+
+async function useFolder(dir) {
+  backend = { mode: 'browser', ...folderStore(dir), send: directSend };
+  state.cols = {};
+  state.target = null;
+  renderCrumb();
+  $('#dataDir').textContent = `Collections folder: ${dir.name} (on this computer)`;
+  $('#btnFolder').textContent = 'Change folder';
+  $('#btnFolder').onclick = () => pickFolder().catch((e) => e.name !== 'AbortError' && toast(e.message));
+  await refresh();
+}
+
+async function pickFolder() {
+  if (!confirmDiscard()) return;
+  const dir = await window.showDirectoryPicker({ id: 'apiman', mode: 'readwrite' });
+  await idb('set', dir);
+  setDirty(false);
+  await useFolder(dir);
+  toast(`Saving collections to the "${dir.name}" folder`);
+}
+
+async function startBrowserMode() {
+  backend = browserBackend;
+  $('#chkInsecure').checked = false;
+  $('#chkInsecure').parentElement.hidden = true; // browsers can't skip certificate checks
+  $('#dataDir').textContent = 'Collections are saved in this browser. Run ApiMan locally to call any API without CORS limits.';
+  if (!window.showDirectoryPicker) return refresh();
+  const btn = $('#btnFolder');
+  btn.hidden = false;
+  btn.onclick = () => pickFolder().catch((e) => e.name !== 'AbortError' && toast(e.message));
+  const dir = await idb('get').catch(() => null);
+  if (dir && (await dir.queryPermission({ mode: 'readwrite' })) === 'granted') return useFolder(dir);
+  if (dir) {
+    // After a browser restart, permission must be granted again, and only from a click.
+    btn.textContent = `Reconnect folder "${dir.name}"`;
+    btn.onclick = async () => {
+      if ((await dir.requestPermission({ mode: 'readwrite' })) === 'granted') await useFolder(dir);
+    };
+  }
+  return refresh();
+}
+
 (async () => {
   renderEditor();
   try {
-    const info = await api('GET', '/api/info');
-    $('#dataDir').textContent = 'Collections folder: ' + info.dataDir;
-    await refresh();
+    let info = null;
+    try { info = await api('GET', '/api/info'); } catch { /* no local server: website mode */ }
+    if (info && info.dataDir) {
+      $('#dataDir').textContent = 'Collections folder: ' + info.dataDir;
+      await refresh();
+    } else {
+      await startBrowserMode();
+    }
   } catch (e) {
     toast('Could not load collections: ' + e.message);
   }

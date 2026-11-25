@@ -91,6 +91,33 @@ class Store:
         self.path(cid).unlink()
 
 
+SENSITIVE_HEADERS = {"authorization", "cookie", "proxy-authorization"}
+
+
+class RedirectRefused(Exception):
+    pass
+
+
+class SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follows redirects like Postman, but never carries credentials to a different origin."""
+
+    @staticmethod
+    def origin(url):
+        u = urllib.parse.urlsplit(url)
+        return u.scheme, u.hostname, u.port or (443 if u.scheme == "https" else 80)
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        old_origin, new_origin = self.origin(req.full_url), self.origin(new.full_url)
+        if old_origin[0] == "https" and new_origin[0] != "https":
+            raise RedirectRefused(f"Refused redirect from HTTPS to insecure {new.full_url}")
+        if old_origin != new_origin:
+            new.headers = {k: v for k, v in new.headers.items() if k.lower() not in SENSITIVE_HEADERS}
+        return new
+
+
 def send(spec):
     """Execute one HTTP request exactly as described by the UI (variables and auth already applied)."""
     method = str(spec.get("method", "GET")).upper()
@@ -118,13 +145,15 @@ def send(spec):
         # Last resort, opt-in per click: skips certificate checks (exposes you to MITM). Off by default.
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx), SafeRedirect())
 
     start = time.perf_counter()
     try:
         resp = opener.open(req, timeout=float(spec.get("timeout", 60)))
     except urllib.error.HTTPError as e:   # 4xx/5xx still have a useful response
         resp = e
+    except RedirectRefused as e:
+        return {"error": str(e)}
     except urllib.error.URLError as e:
         return {"error": f"Could not connect: {e.reason}"}
     except Exception as e:  # timeouts, bad TLS, etc.
