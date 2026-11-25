@@ -39,7 +39,8 @@ MAX_RESPONSE = 20 * 1024 * 1024   # what we read back from the target API
 SCHEMA_V21 = "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 CA_FILE = None  # extra trusted CA bundle (PEM), set by --ca-file
 # A fresh secret per launch. It's written only into ApiMan's own page and required on every /api call,
-# so nothing else (other local programs, or requests ApiMan itself proxies) can use the API.
+# so other websites in your browser and requests ApiMan itself proxies can't use the API. (Local programs
+# running as you can read the page, but they can already read your collection files directly.)
 SESSION_TOKEN = secrets.token_urlsafe(32)
 SERVER_PORT = None  # set in main(); the proxy refuses to call ApiMan itself
 TOKEN_HEADER = "X-ApiMan-Token"
@@ -63,7 +64,8 @@ def targets_self(url):
             addrs = {ipaddress.ip_address(i[4][0]) for i in socket.getaddrinfo(host, port)}
         except OSError:
             return False
-    return any(a.is_loopback or a.is_unspecified for a in addrs)
+    addrs = {getattr(a, "ipv4_mapped", None) or a for a in addrs}  # ::ffff:127.0.0.1 is loopback too
+    return any(a.is_loopback or a.is_unspecified or (a.version == 4 and a in ipaddress.ip_network("0.0.0.0/8")) for a in addrs)
 STATIC = {"/": ("index.html", "text/html"), "/index.html": ("index.html", "text/html"),
           "/app.js": ("app.js", "text/javascript"), "/app.css": ("app.css", "text/css"),
           "/fonts/Geist-Variable.woff2": ("fonts/Geist-Variable.woff2", "font/woff2"),
@@ -235,7 +237,10 @@ def send(spec):
         return {"error": f"Invalid method: {method}"}
     if not re.match(r"^https?://", url, re.I):
         return {"error": "URL must start with http:// or https://"}
-    if targets_self(url):
+    # A custom Host naming ApiMan + a domain that re-resolves to 127.0.0.1 (DNS rebinding) would get past
+    # both targets_self and the server's Host check, so such a Host header is refused outright.
+    own_hosts = {f"127.0.0.1:{SERVER_PORT}", f"localhost:{SERVER_PORT}"}
+    if targets_self(url) or any(str(k).strip().lower() == "host" and str(v).strip().lower() in own_hosts for k, v in headers_in):
         return {"error": "ApiMan can't send requests to its own local server."}
 
     if spec.get("bodyBase64") is not None:

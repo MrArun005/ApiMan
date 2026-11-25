@@ -229,7 +229,7 @@ function newDocId(name, exists) {
 
 const API_TOKEN = (() => { const m = document.querySelector('meta[name="apiman-token"]'); const v = m && m.content; return v && v !== '__APIMAN_TOKEN__' ? v : ''; })();
 const lastPutAt = new Map(); // path -> time the last successful write finished
-async function api(method, path, body, signal, headers = {}) {
+async function api(method, path, body, signal, headers = {}, retried = false) {
   const started = performance.now();
   const r = await fetch(path, {
     method,
@@ -240,8 +240,9 @@ async function api(method, path, body, signal, headers = {}) {
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { status: r.status, conflict: r.status === 409 });
   if (method === 'PUT') lastPutAt.set(path, performance.now());
-  const stale = method === 'GET' && (lastPutAt.get(path) || 0) > started;
-  if (api.onVersion && r.headers.get('X-Version') && !stale) api.onVersion(path, r.headers.get('X-Version'));
+  // A GET that raced a later save of ours may carry the old body: fetch again rather than use stale data.
+  if (method === 'GET' && !retried && (lastPutAt.get(path) || 0) > started) return api(method, path, body, signal, headers, true);
+  if (api.onVersion && r.headers.get('X-Version')) api.onVersion(path, r.headers.get('X-Version'));
   return data;
 }
 
@@ -2869,6 +2870,7 @@ async function editEnvironment(id) {
   const doc = id ? (isGlobals ? await ensureGlobals() : state.envs[id]) : { name: '', values: [], _postman_variable_scope: 'environment' };
   if (!doc) return;
   const rows = doc.values.map((v) => ({ key: v.key || '', value: String(v.value ?? ''), disabled: v.enabled === false, type: v.type === 'secret' ? 'secret' : 'default' }));
+  const openedKeys = new Set(rows.map((r) => r.key)); // to tell variables added elsewhere from ones deleted here
   const nameIn = h('input', { value: isGlobals ? 'Globals' : doc.name, placeholder: 'e.g. Local, Staging, Production', disabled: isGlobals, spellcheck: 'false' });
   const box = h('div');
   kvTable(box, rows, { secret: true, placeholders: ['Variable', 'Value'] });
@@ -2889,7 +2891,16 @@ async function editEnvironment(id) {
         if (!name) { toast('Give the environment a name.'); return false; }
         const values = rows.filter((r) => r.key).map((r) => ({ key: r.key, value: r.value, type: r.type === 'secret' ? 'secret' : 'default', enabled: !r.disabled }));
         let envId = id;
-        if (id) await mutateDoc('environments', id, (d) => { d.name = name; d.values = values; return true; });
+        if (id) {
+          if (!state.envs[id]) throw new Error('This environment no longer exists (deleted in another window?).');
+          // On a conflict mutateDoc reloads and re-applies: rows edited here win, rows another window added are kept.
+          await mutateDoc('environments', id, (d) => {
+            const mine = new Set(values.map((v) => v.key));
+            d.name = name;
+            d.values = [...values, ...(d.values || []).filter((v) => !openedKeys.has(v.key) && !mine.has(v.key))];
+            return true;
+          });
+        }
         else { doc.name = name; doc.values = values; envId = await backend.environments.create(doc); }
         await refreshEnvironments();
         if (!isGlobals) setActiveEnv(activate.checked ? envId : (state.activeEnv === envId ? '' : state.activeEnv));
@@ -3888,6 +3899,7 @@ async function start() {
     const steps = ['hide-reason', 'tight-tabs', 'hide-size', 'hide-time', 'meta-below'];
     respRow.classList.remove(...steps);
     const seg = respRow.querySelector('.seg'), meta = $('#respStatus'), max = respRow.querySelector('.pane-max');
+    $('#respMetaAlt').replaceChildren();
     if (!meta.textContent.trim()) return;
     const fits = () => seg.scrollWidth + meta.scrollWidth + max.offsetWidth + 2 * 8 + 2 * 20 <= respRow.clientWidth;
     for (const step of steps) {

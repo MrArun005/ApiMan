@@ -229,6 +229,10 @@ class ServerTest(unittest.TestCase):
         self.assertIn("own local server", res["error"])
         echoed = json.loads(self.send(method="GET", url=self.target, headers=[[server.TOKEN_HEADER, "x"], ["X-Api-Key", "k"]])["body"])
         self.assertEqual(echoed["apikey"], "k")  # normal headers pass; the token header is never forwarded
+        port = self.app.server_address[1]
+        self.assertIn("own local server", self.send(method="GET", url=f"http://[::ffff:127.0.0.1]:{port}/")["error"])
+        # a rebinding domain plus a forged Host header naming ApiMan is refused before any lookup
+        self.assertIn("own local server", self.send(method="GET", url=self.target, headers=[["Host", f"127.0.0.1:{port}"]])["error"])
 
     def test_path_traversal_is_rejected(self):
         for bad in ("..%2Fsecret.json", "%2Fetc%2Fpasswd", ".hidden.json", "x.txt"):
