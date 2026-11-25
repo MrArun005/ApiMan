@@ -2899,7 +2899,9 @@ async function start() {
   // Enter inside a dialog field must not submit (and close) the dialog; only the ✕ button closes it.
   $('#dlg form').addEventListener('submit', (e) => { if (!e.submitter || e.submitter.value !== 'cancel') e.preventDefault(); });
   let local = false;
-  try { local = !!(await api('GET', '/api/info')).dataDir; } catch { /* website mode */ }
+  if (isLocalHost(location.hostname)) { // only the local server has an API; don't probe e.g. github.io
+    try { local = !!(await api('GET', '/api/info')).dataDir; } catch { /* static copy served locally: website mode */ }
+  }
 
   const badge = $('#modeBadge');
   if (local) {
