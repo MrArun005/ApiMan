@@ -116,7 +116,23 @@ const isLocalHost = (host) => ['localhost', '127.0.0.1', '[::1]'].includes(host)
 // =====================================================================================================
 // Settings & state
 // =====================================================================================================
-const DEFAULT_SETTINGS = { theme: 'system', timeout: 60, followRedirects: true, history: true, insecure: false };
+const DEFAULT_SETTINGS = {
+  theme: 'system', timeout: 60, followRedirects: true, history: true, insecure: false,
+  textScale: 1, codeSize: 13, density: 'comfortable', layout: 'auto', wrap: true,
+};
+const DENSITY = { compact: 0.875, comfortable: 1, spacious: 1.125 };
+const clampNum = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+
+/** Text size, code size, density, layout and line wrapping: all CSS custom properties, so they apply instantly. */
+function applyAppearance(s = state.settings) {
+  const root = document.documentElement;
+  root.style.setProperty('--text-scale', String(clampNum(s.textScale, 0.85, 1.3, 1)));
+  root.style.setProperty('--code-size', `${clampNum(s.codeSize, 11, 20, 13)}px`);
+  root.style.setProperty('--d', String(DENSITY[s.density] || 1));
+  root.dataset.layout = s.layout === 'stacked' ? 'stacked' : 'auto';
+  root.dataset.wrap = s.wrap === false ? 'off' : 'on';
+  if (initResizers.refresh) initResizers.refresh();
+}
 
 const state = {
   settings: { ...DEFAULT_SETTINGS, ...ls.get('apiman:settings', {}) },
@@ -999,13 +1015,43 @@ function originOf(url) {
 const approvedOrigins = new Set(); // "itemKey -> origin" pairs the user allowed this session
 
 /**
- * Scripts can't make network calls, but they can change (or delete) variables, and a variable can
- * decide where a later request goes. So instead of guessing from names, resolve the URL of every
- * saved request in every collection (environments and globals are shared) with the variables
- * before and after the script ran. If any destination would change, the user must approve; in
- * the runner (no one to ask) all of the script's variable changes are dropped. Because no saved
- * variable can move a destination without approval, the saved variables are a trusted baseline
- * for the per-request check in execute().
+ * Names of every variable that can influence a request URL: placeholders in the URLs of all saved
+ * requests (every collection) and all open tabs, expanded through variable values that themselves
+ * contain placeholders ({{baseUrl}} = "{{scheme}}://{{host}}"), across every environment, every
+ * collection's variables and globals. Shadowing doesn't matter: a value that is overridden today
+ * takes effect the moment you switch environment. `complete` is false if a collection couldn't be read.
+ */
+async function urlVariableNames() {
+  let complete = true;
+  const urls = [];
+  for (const c of state.colList) {
+    try {
+      const col = await withCol(c.id);
+      eachRequest(col.item, (it) => urls.push(urlIn(it.request && it.request.url).raw));
+    } catch { complete = false; }
+  }
+  for (const t of state.tabs) urls.push(t.ed.url);
+  const names = new Set();
+  const add = (s) => { for (const m of String(s ?? '').matchAll(VAR_RE)) names.add(m[1]); };
+  urls.forEach(add);
+  const pairs = [
+    ...Object.values(state.envs).flatMap((d) => (d && d.values) || []),
+    ...Object.values(state.cols).flatMap((c) => (c && c.variable) || []),
+  ];
+  for (let grew = true; grew;) {
+    const n = names.size;
+    for (const p of pairs) if (p && names.has(p.key)) add(p.value);
+    grew = names.size > n;
+  }
+  return { names, complete };
+}
+
+/**
+ * Scripts can't make network calls, but they can change (or delete) variables, and variables decide
+ * where requests go. Any script change to a variable that can influence a request URL (see above)
+ * needs the user's approval; in the runner (no one to ask) all of the script's variable changes are
+ * dropped. So the saved variables only ever hold destinations the user approved, which makes them a
+ * trusted baseline for the per-request check in execute().
  */
 async function guardVarChanges(cid, ed, before, after, ask, logs) {
   const changed = [];
@@ -1013,32 +1059,22 @@ async function guardVarChanges(cid, ed, before, after, ask, logs) {
     const b = before[scope], a = after[scope];
     for (const k of new Set([...Object.keys(b), ...Object.keys(a)])) {
       if (b[k] === a[k]) continue;
-      changed.push(`${scope}.${k}`);
+      changed.push({ scope, k, removed: !(k in a), value: a[k] });
       logs.push({ level: 'info', text: `Script ${k in a ? 'set' : 'removed'} ${scope} variable "${k}"`, src: 'ApiMan' });
     }
   }
   if (!changed.length) return after;
 
-  await Promise.all(state.colList.map((c) => withCol(c.id).catch(() => {})));
-  const varsFor = (sc, colId) => merged({ globals: sc.globals, environment: sc.environment, local: {},
-    collection: colId === cid ? sc.collection : colObj(state.cols[colId]) });
-  const moved = [];
-  const check = (name, rawUrl, colId) => {
-    const from = originOf(resolve(rawUrl, varsFor(before, colId)));
-    const to = originOf(resolve(rawUrl, varsFor(after, colId)));
-    if (from !== to) moved.push(`  ${name}: ${from || '(unresolved)'} → ${to || '(unresolved)'}`);
-  };
-  for (const c of state.colList) {
-    const col = state.cols[c.id];
-    if (col) eachRequest(col.item, (it) => check(`${c.name} / ${it.name || 'Untitled'}`, urlIn(it.request && it.request.url).raw, c.id));
-  }
-  if (!cid) check(ed.name, ed.url, null);
-  if (!moved.length) return after;
+  const { names, complete } = await urlVariableNames();
+  const risky = changed.filter((c) => names.has(c.k));
+  if (!risky.length && complete) return after;
 
-  const shown = moved.slice(0, 6).join('\n') + (moved.length > 6 ? `\n  …and ${moved.length - 6} more` : '');
-  const ok = ask ? await ask(`A script changed variables (${changed.join(', ')}) so that these requests would go to a different server:\n\n${shown}\n\nSave the changes? Only allow this if you trust the scripts in this collection.`) : false;
+  const show = (v) => (v.length > 70 ? `${v.slice(0, 67)}...` : v);
+  const list = risky.map((c) => `  ${c.scope}.${c.k} ${c.removed ? '(removed)' : `= ${show(c.value)}`}`).join('\n')
+    || '  (some collections could not be read, so ApiMan cannot check them)';
+  const ok = ask ? await ask(`A script changed variables that decide where requests are sent:\n\n${list}\n\nSave the changes? Only allow this if you trust the scripts in this collection.`) : false;
   if (ok) return after;
-  logs.push({ level: 'warn', text: `Not saved: the script's variable changes (${changed.join(', ')}) would change where ${moved.length} request${moved.length > 1 ? 's' : ''} go${ask ? '' : '. Send the request on its own to approve them'}.`, src: 'ApiMan' });
+  logs.push({ level: 'warn', text: `Not saved: the script changed variables used in request URLs (${risky.map((c) => `${c.scope}.${c.k}`).join(', ') || 'unverifiable'})${ask ? '' : '. Send the request on its own to approve them'}.`, src: 'ApiMan' });
   return JSON.parse(JSON.stringify(before));
 }
 
@@ -1184,7 +1220,17 @@ function newTab(init) {
   };
 }
 
+const isPhone = () => matchMedia('(max-width: 820px)').matches;
+/** Phones: the sidebar is a panel you open and close. Wider screens: always visible (no-op). */
+function setSide(open) {
+  if (!isPhone()) return;
+  $('.app').classList.toggle('side-open', open);
+  $('#btnSide').setAttribute('aria-expanded', String(open));
+  $('#btnSide').setAttribute('aria-label', open ? 'Hide sidebar' : 'Show sidebar');
+}
+
 function openTab(tab) {
+  setSide(false);
   state.tabs.push(tab);
   state.active = state.tabs.length - 1;
   persistTabs();
@@ -1193,15 +1239,17 @@ function openTab(tab) {
 
 function openItem(cid, itemId) {
   const existing = state.tabs.findIndex((t) => t.cid === cid && t.itemId === itemId);
-  if (existing !== -1) { state.active = existing; persistTabs(); renderAll(); return; }
+  if (existing !== -1) { setSide(false); state.active = existing; persistTabs(); renderAll(); return; }
   const loc = locate(state.cols[cid], itemId);
   if (!loc) return;
   openTab(newTab({ cid, itemId, ed: fromItem(loc.item) }));
 }
 
-function closeTab(i) {
+async function closeTab(i) {
   const t = state.tabs[i];
-  if (t.dirty && !confirm(`Close "${t.ed.name}" without saving your changes?`)) return;
+  if (t.dirty && !(await ask({ title: 'Close without saving?', message: `"${t.ed.name}" has changes that aren't saved.`, ok: 'Close without saving', danger: true }))) return;
+  i = state.tabs.indexOf(t);
+  if (i === -1) return;
   if (t.sending) t.sending.abort();
   state.tabs.splice(i, 1);
   if (state.active >= state.tabs.length) state.active = state.tabs.length - 1;
@@ -1251,10 +1299,18 @@ function renderSidebar() {
   $$('.side .seg-btn').forEach((b) => { const on = b.dataset.view === state.view; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
   $('#search').placeholder = state.view === 'history' ? 'Filter history  /' : state.view === 'environments' ? 'Filter environments  /' : 'Filter requests  /';
   const body = $('#sideBody');
+  body.setAttribute('role', state.view === 'collections' ? 'tree' : 'list');
+  body.setAttribute('aria-label', { collections: 'Collections', environments: 'Environments', history: 'History' }[state.view]);
   if (state.view === 'environments') body.replaceChildren(...renderEnvList());
   else if (state.view === 'history') body.replaceChildren(...renderHistoryList());
   else body.replaceChildren(...renderCollectionTree());
+  if (state.refocus) {
+    const el = body.querySelector(`[data-key="${CSS.escape(state.refocus)}"]`);
+    state.refocus = null;
+    if (el) el.focus();
+  }
 }
+const indent = (depth) => `padding-left: calc(var(--s2) + ${depth} * 20px)`; // 20px = caret + gap, so children sit under their parent's name
 
 function rowActs(...btns) { return h('span', { class: 'acts' }, ...btns); }
 function iconBtn(name, title, onclick) {
@@ -1284,7 +1340,7 @@ function renderCollectionTree() {
     const kids = open && col ? itemsNodes(c.id, col.item, 1) : [];
     if (state.filter && !kids.length && !c.name.toLowerCase().includes(state.filter)) continue;
     out.push(h('div', {
-      class: 'row collection', tabindex: '0', title: c.id,
+      class: 'row collection', tabindex: '0', title: c.id, role: 'treeitem', 'aria-level': '1', 'aria-expanded': String(open), 'data-key': `c:${c.id}`,
       onclick: () => toggleCollection(c.id), onkeydown: (e) => { if (e.key === 'Enter') toggleCollection(c.id); },
     },
       h('span', { class: `caret ${open ? 'open' : ''}` }, icon('chevron')),
@@ -1300,15 +1356,14 @@ function renderCollectionTree() {
   function itemsNodes(cid, items, depth) {
     const nodes = [];
     for (const it of items) {
-      const pad = `padding-left:${depth * 14}px`;
       if (isFolder(it)) {
         const key = `${cid}:${it.id}`;
         const fopen = state.filter ? true : state.open.has(key);
         const kids = fopen ? itemsNodes(cid, it.item, depth + 1) : [];
         if (state.filter && !kids.length && !matches(it)) continue;
         nodes.push(h('div', {
-          class: 'row', style: pad, tabindex: '0',
-          onclick: () => { toggleOpen(key); renderSidebar(); }, onkeydown: (e) => { if (e.key === 'Enter') { toggleOpen(key); renderSidebar(); } },
+          class: 'row', style: indent(depth), tabindex: '0', role: 'treeitem', 'aria-level': String(depth + 1), 'aria-expanded': String(fopen), 'data-key': `f:${key}`,
+          onclick: () => { toggleOpen(key); renderSidebar(); }, onkeydown: (e) => { if (e.key === 'Enter') { state.refocus = `f:${key}`; toggleOpen(key); renderSidebar(); } },
         },
           h('span', { class: `caret ${fopen ? 'open' : ''}` }, icon('chevron')),
           h('span', { class: 'folder-ico' }, icon('folder')),
@@ -1322,9 +1377,11 @@ function renderCollectionTree() {
         const m = itemMethod(it);
         const active = t && t.cid === cid && t.itemId === it.id;
         nodes.push(h('div', {
-          class: `row ${active ? 'active' : ''}`, style: `padding-left:${depth * 14 + 14}px`, tabindex: '0',
+          class: `row ${active ? 'active' : ''}`, style: indent(depth), tabindex: '0', role: 'treeitem', 'aria-level': String(depth + 1),
+          'aria-selected': String(!!active), 'data-key': `r:${cid}:${it.id}`,
           onclick: () => openItem(cid, it.id), onkeydown: (e) => { if (e.key === 'Enter') openItem(cid, it.id); },
         },
+          h('span', { class: 'caret' }),
           h('span', { class: `mtag ${m}` }, m),
           h('span', { class: 'name' }, it.name || 'Untitled'),
           rowActs(iconBtn('dots', 'More actions', (e) => requestMenu(e.currentTarget, cid, it.id)))));
@@ -1347,7 +1404,7 @@ function renderEnvList() {
     h('button', { class: 'btn small ghost', onclick: () => editEnvironment(null) }, '+ New'))];
   const g = state.envs[GLOBALS_ID];
   if (!f || 'globals'.includes(f)) {
-    rows.push(h('div', { class: 'row', tabindex: '0', onclick: () => editEnvironment(GLOBALS_ID), onkeydown: (e) => { if (e.key === 'Enter') editEnvironment(GLOBALS_ID); } },
+    rows.push(h('div', { class: 'row', tabindex: '0', role: 'button', 'data-key': 'e:globals', onclick: () => editEnvironment(GLOBALS_ID), onkeydown: (e) => { if (e.key === 'Enter') editEnvironment(GLOBALS_ID); } },
       h('span', { class: 'caret' }),
       h('span', { class: 'name' }, 'Globals'),
       h('span', { class: 'sub' }, `${g ? g.values.length : 0} vars`)));
@@ -1356,8 +1413,8 @@ function renderEnvList() {
     if (f && !e.name.toLowerCase().includes(f)) continue;
     const doc = state.envs[e.id];
     const active = e.id === state.activeEnv;
-    rows.push(h('div', { class: `row ${active ? 'active' : ''}`, tabindex: '0', onclick: () => editEnvironment(e.id), onkeydown: (ev) => { if (ev.key === 'Enter') editEnvironment(e.id); } },
-      h('span', { class: 'caret' }, h('span', { class: `env-dot ${active ? 'on' : ''}`, title: active ? 'Active' : '' })),
+    rows.push(h('div', { class: `row ${active ? 'active' : ''}`, tabindex: '0', role: 'button', 'data-key': `e:${e.id}`, 'aria-label': `${e.name}${active ? ' (active)' : ''}`, onclick: () => editEnvironment(e.id), onkeydown: (ev) => { if (ev.key === 'Enter') editEnvironment(e.id); } },
+      h('span', { class: 'caret' }, h('span', { class: `env-dot ${active ? 'on' : ''}`, role: active ? 'img' : null, 'aria-label': active ? 'Active' : null })),
       h('span', { class: 'name' }, e.name),
       h('span', { class: 'sub' }, `${doc ? doc.values.length : 0} vars`),
       rowActs(iconBtn('dots', 'More actions', (ev) => envMenu(ev.currentTarget, e.id)))));
@@ -1383,24 +1440,32 @@ function renderHistoryList() {
       const label = d === new Date().toDateString() ? 'Today' : d === new Date(Date.now() - 864e5).toDateString() ? 'Yesterday' : new Date(e.at).toLocaleDateString();
       out.push(h('div', { class: 'side-section' }, label));
     }
-    const sc = e.status ? `s${String(e.status)[0]}` : 'err';
-    out.push(h('div', {
-      class: 'row', tabindex: '0', title: `${e.method} ${e.url}\n${new Date(e.at).toLocaleString()}`,
-      onclick: () => openFromHistory(e), onkeydown: (ev) => { if (ev.key === 'Enter') openFromHistory(e); },
-    },
-      h('span', { class: `mtag ${e.method}` }, e.method),
-      h('span', { class: 'name' }, e.url || e.name),
-      h('span', { class: `status-code sm ${e.status ? sc : 's-err'}` }, e.status || 'Error')));
+    out.push(historyRow(e));
   }
   return out;
+}
+
+/** One history entry: method, path (the base URL is the same everywhere, so it's left out), time, status. */
+function historyRow(e) {
+  const url = e.url || '';
+  const path = url.replace(/^\s*{{[^{}]+}}/, '').replace(/^[a-z][\w+.-]*:\/\/[^/]*/i, '') || url || e.name;
+  const time = new Date(e.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return h('div', {
+    class: 'row', tabindex: '0', role: 'button', 'data-key': `h:${e.id}`, title: `${e.method} ${url}\n${new Date(e.at).toLocaleString()}`,
+    onclick: () => openFromHistory(e), onkeydown: (ev) => { if (ev.key === 'Enter') openFromHistory(e); },
+  },
+    h('span', { class: `mtag ${e.method}` }, e.method),
+    h('span', { class: 'name' }, path),
+    h('span', { class: 'time' }, time),
+    h('span', { class: `status-code sm ${e.status ? `s${String(e.status)[0]}` : 's-err'}` }, e.status ? String(e.status) : 'Error'));
 }
 
 function openFromHistory(e) {
   const ed = { ...blankEd(), ...e.ed, body: { ...blankBody(), ...(e.ed && e.ed.body) } };
   openTab(newTab({ ed }));
 }
-function clearHistory() {
-  if (!confirm('Clear all request history?')) return;
+async function clearHistory() {
+  if (!(await ask({ title: 'Clear history?', message: `This removes all ${state.history.length} requests from your history.`, ok: 'Clear history', danger: true }))) return;
   state.history = [];
   ls.set('apiman:history', []);
   renderSidebar();
@@ -1420,9 +1485,12 @@ function pushHistory(tab, out) {
 function showMenu(anchor, items) {
   const pop = $('#popover');
   const row = anchor.closest('.row');
-  pop.replaceChildren(...items.map((it) => (it === '-' ? h('div', { class: 'sep' })
-    : h('button', { class: `mi ${it.danger ? 'danger' : ''}`, onclick: () => { hideMenu(); it.onClick(); } }, it.label))));
+  pop.setAttribute('role', 'menu');
+  pop.replaceChildren(...items.map((it) => (it === '-' ? h('div', { class: 'sep', role: 'separator' })
+    : h('button', { class: `mi ${it.danger ? 'danger' : ''}`, role: 'menuitem', onclick: () => { hideMenu(); it.onClick(); } }, it.label))));
   placePopover(pop, anchor);
+  anchor.setAttribute('aria-expanded', 'true');
+  showMenu.anchor = anchor;
   if (row) { row.classList.add('menu-open'); pop.dataset.row = '1'; showMenu.row = row; }
   const first = pop.querySelector('button');
   if (first) first.focus();
@@ -1434,9 +1502,14 @@ function placePopover(pop, anchor) {
   pop.style.left = `${Math.max(8, Math.min(r.left, innerWidth - pw - 8))}px`;
   pop.style.top = `${r.bottom + ph + 8 > innerHeight ? Math.max(8, r.top - ph - 4) : r.bottom + 4}px`;
 }
-function hideMenu() {
+function hideMenu(refocus = false) {
   $('#popover').hidden = true;
   if (showMenu.row) { showMenu.row.classList.remove('menu-open'); showMenu.row = null; }
+  if (showMenu.anchor) {
+    showMenu.anchor.setAttribute('aria-expanded', 'false');
+    if (refocus && showMenu.anchor.isConnected) showMenu.anchor.focus();
+    showMenu.anchor = null;
+  }
 }
 document.addEventListener('mousedown', (e) => { if (!$('#popover').hidden && !e.target.closest('#popover')) hideMenu(); });
 
@@ -1502,7 +1575,7 @@ async function addRequest(cid, folderId) {
 }
 
 async function addFolder(cid, parentId) {
-  const name = prompt('Folder name');
+  const name = await ask({ title: 'New folder', input: { label: 'Folder name', placeholder: 'e.g. Orders' }, ok: 'Create folder' });
   if (!name) return;
   const col = await withCol(cid);
   const list = parentId ? locate(col, parentId).item.item : col.item;
@@ -1518,7 +1591,7 @@ async function addFolder(cid, parentId) {
 
 async function renameItem(cid, id) {
   const loc = locate(state.cols[cid], id);
-  const name = prompt('New name', loc.item.name || '');
+  const name = await ask({ title: `Rename ${isFolder(loc.item) ? 'folder' : 'request'}`, input: { label: 'Name', value: loc.item.name || '' }, ok: 'Rename' });
   if (!name) return;
   loc.item.name = name;
   await saveCol(cid);
@@ -1540,7 +1613,11 @@ async function duplicateItem(cid, id) {
 async function deleteItem(cid, id) {
   const loc = locate(state.cols[cid], id);
   const n = isFolder(loc.item) ? countRequests(loc.item.item) : 0;
-  if (!confirm(`Delete "${loc.item.name}"${n ? ` and the ${n} request${n > 1 ? 's' : ''} in it` : ''}?`)) return;
+  if (!(await ask({
+    title: `Delete ${isFolder(loc.item) ? 'folder' : 'request'}?`,
+    message: `"${loc.item.name}"${n ? ` and the ${n} request${n > 1 ? 's' : ''} in it` : ''} will be removed from the collection.`,
+    ok: `Delete ${isFolder(loc.item) ? 'folder' : 'request'}`, danger: true,
+  }))) return;
   loc.list.splice(loc.index, 1);
   await saveCol(cid);
   const gone = new Set();
@@ -1553,7 +1630,7 @@ async function deleteItem(cid, id) {
 }
 
 async function newCollection() {
-  const name = prompt('Collection name');
+  const name = await ask({ title: 'New collection', input: { label: 'Collection name', placeholder: 'e.g. Payments API' }, ok: 'Create collection' });
   if (!name) return;
   const doc = { info: { name, schema: SCHEMA_V21, _postman_id: uid() }, item: [] };
   const id = await backend.collections.create(doc);
@@ -1577,7 +1654,7 @@ async function duplicateCollection(cid) {
 }
 
 async function deleteCollection(cid, name) {
-  if (!confirm(`Delete the collection "${name}"? This deletes ${cid}${backend.mode === 'local' ? ' from your data folder' : ''}.`)) return;
+  if (!(await ask({ title: 'Delete collection?', message: `"${name}" and every request in it will be deleted${backend.mode === 'local' ? ` (the file ${cid} in your data folder)` : ''}.`, ok: 'Delete collection', danger: true }))) return;
   await backend.collections.remove(cid);
   delete state.cols[cid];
   state.tabs = state.tabs.filter((t) => t.cid !== cid);
@@ -1623,11 +1700,42 @@ function renderTabs() {
   if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 
+function renderWelcome() {
+  const hasData = state.colList.length > 0 || state.history.length > 0;
+  const where = backend && backend.mode === 'local' ? 'on this computer' : 'in this browser';
+  const kbd = (k) => h('kbd', null, k);
+  const cols = [];
+  if (state.history.length) {
+    cols.push(h('section', null, h('span', { class: 'label' }, 'Recent requests'), ...state.history.slice(0, 8).map(historyRow)));
+  }
+  if (state.colList.length) {
+    cols.push(h('section', null, h('span', { class: 'label' }, 'Collections'), ...state.colList.map((c) => h('div', {
+      class: 'row', tabindex: '0', role: 'button',
+      onclick: () => { state.view = 'collections'; setSide(true); if (!state.open.has(c.id)) toggleCollection(c.id); else renderSidebar(); },
+      onkeydown: (e) => { if (e.key === 'Enter') e.currentTarget.click(); },
+    },
+      h('span', { class: 'folder-ico' }, icon('folder')),
+      h('span', { class: 'name' }, c.name),
+      state.cols[c.id] ? h('span', { class: 'sub' }, `${countRequests(state.cols[c.id].item)} requests`) : null))));
+  }
+  $('#welcomeInner').replaceChildren(
+    h('h1', null, hasData ? 'No request open' : 'Send your first request'),
+    h('p', null, hasData
+      ? 'Pick up a recent request, open one from a collection, or start a new one.'
+      : `Paste a URL, import a Postman collection, or start from a cURL command. Everything stays ${where}.`),
+    h('div', { class: 'welcome-actions' },
+      h('button', { class: 'btn primary', 'data-act': 'new-request' }, 'New request'),
+      h('button', { class: 'btn', 'data-act': 'import' }, 'Import collection'),
+      h('button', { class: 'btn', 'data-act': 'import-curl' }, 'Paste cURL')),
+    h('p', { class: 'hint shortcuts empty-state' }, h('span', null, kbd('/'), ' filter requests, ', kbd('Ctrl'), ' / ', kbd('⌘'), ' + ', kbd('Enter'), ' send, ', kbd('Ctrl'), ' / ', kbd('⌘'), ' + ', kbd('S'), ' save')),
+    cols.length ? h('div', { class: 'welcome-cols' }, ...cols) : null);
+}
+
 function renderEditor() {
   const t = cur();
   $('#welcome').hidden = !!t;
   $('#editor').hidden = !t;
-  if (!t) return;
+  if (!t) { renderWelcome(); return; }
   const ed = t.ed;
   $('#reqName').value = ed.name;
   $('#method').value = METHODS.includes(ed.method) ? ed.method : 'GET';
@@ -1671,7 +1779,7 @@ function renderResolved() {
     last = m.index + m[0].length;
   }
   parts.push(t.ed.url.slice(last));
-  el.replaceChildren('Resolves to ', ...parts);
+  el.replaceChildren(h('span', null, 'Resolves to ', ...parts));
 }
 
 function renderCounts() {
@@ -1686,7 +1794,9 @@ function renderCounts() {
   $('#cntAuth').textContent = $('#cntAuth').classList.contains('dot') ? 'set' : '';
   $('#cntBody').classList.toggle('dot', ed.body.mode !== 'none');
   $('#cntBody').textContent = ed.body.mode !== 'none' ? 'set' : '';
-  $('#cntScripts').textContent = n((ed.pre.trim() ? 1 : 0) + (ed.test.trim() ? 1 : 0));
+  const hasScript = !!(ed.pre.trim() || ed.test.trim());
+  $('#cntScripts').classList.toggle('dot', hasScript);
+  $('#cntScripts').textContent = hasScript ? 'set' : '';
 }
 
 function switchPane(tabsSel, name) {
@@ -1821,6 +1931,7 @@ function authForm(model, { allowInherit, inheritText, onChange }) {
     if (model.type === 'unsupported') kids.push(h('p', { class: 'note warn' }, `The "${model.raw.type}" auth from Postman isn't supported yet. It stays in the file unchanged but isn't sent. Pick another type to replace it.`));
     if (['bearer', 'basic', 'apikey'].includes(model.type)) kids.push(h('p', { class: 'hint' }, 'Tip: keep secrets in an environment as Secret variables and reference them like {{token}}.'));
     wrap.replaceChildren(...kids);
+    linkLabels(wrap);
   };
   draw();
   return wrap;
@@ -1855,20 +1966,22 @@ function renderBody() {
     extras.push(h('select', { 'aria-label': 'Raw format', onchange: (e) => { b.lang = e.target.value; markDirty(); renderBody(); } },
       ...[['json', 'JSON'], ['text', 'Text'], ['xml', 'XML'], ['html', 'HTML'], ['javascript', 'JavaScript']]
         .map(([v, l]) => h('option', { value: v, ...(b.lang === v ? { selected: true } : {}) }, l))));
-    if (b.lang === 'json') extras.push(h('button', { class: 'btn small ghost', onclick: () => {
-      try { b.raw = JSON.stringify(JSON.parse(b.raw), null, 2); renderBody(); markDirty(); } catch (e) { toast(`Not valid JSON: ${e.message}`); }
-    } }, 'Beautify'));
   }
   $('#bodyExtras').replaceChildren(...extras);
 
   const box = $('#bodyEditor');
   const area = (key, placeholder, rows = 14) => h('textarea', {
-    class: 'code', spellcheck: 'false', placeholder, rows, value: b[key],
+    class: 'code', spellcheck: 'false', wrap: 'off', placeholder, rows, value: b[key], 'aria-label': key === 'raw' ? 'Request body' : key === 'gqlQuery' ? 'GraphQL query' : 'GraphQL variables',
     oninput: (e) => { b[key] = e.target.value; markDirty(); },
     onkeydown: tabIndent,
   });
   if (b.mode === 'none') box.replaceChildren(h('p', { class: 'hint' }, 'This request has no body.'));
-  else if (b.mode === 'raw') box.replaceChildren(area('raw', b.lang === 'json' ? '{\n  "name": "{{$randomFirstName}}"\n}' : ''));
+  else if (b.mode === 'raw') {
+    box.replaceChildren(area('raw', b.lang === 'json' ? '{\n  "name": "{{$randomFirstName}}"\n}' : ''),
+      b.lang === 'json' ? h('button', { class: 'btn small editor-corner', onclick: () => {
+        try { b.raw = JSON.stringify(JSON.parse(b.raw), null, 2); renderBody(); markDirty(); } catch (e) { toast(`Not valid JSON: ${e.message}`); }
+      } }, 'Beautify') : null);
+  }
   else if (b.mode === 'urlencoded') { box.replaceChildren(); kvTable(box, b.urlencoded, { onChange: markDirty }); }
   else if (b.mode === 'formdata') { box.replaceChildren(); kvTable(box, b.formdata, { file: true, onChange: markDirty }); }
   else if (b.mode === 'file') {
@@ -1941,9 +2054,9 @@ function renderResponse() {
   const res = out.res;
   const hasRes = res && !out.error;
   status.replaceChildren(...(hasRes ? [
-    h('span', null, h('span', { class: `status-code s${String(res.status)[0]}` }, String(res.status)), res.reason ? ` ${res.reason}` : ''),
-    h('span', null, h('b', null, fmtMs(res.timeMs))),
-    h('span', null, h('b', null, fmtSize(res.size)), res.truncated ? ' (truncated)' : ''),
+    h('span', { title: 'Status' }, h('span', { class: `status-code s${String(res.status)[0]}` }, `${res.status} ${res.reason || REASONS[res.status] || ''}`.trim())),
+    h('span', { title: 'Time' }, h('b', null, fmtMs(res.timeMs))),
+    h('span', { title: 'Size' }, h('b', null, fmtSize(res.size)), res.truncated ? ' (truncated)' : ''),
     ...(out.wire && res.finalUrl && res.finalUrl !== out.wire.url ? [h('span', { class: 'pill', title: res.finalUrl }, 'Redirected')] : []),
   ] : [h('span', { class: 'status-code s-err' }, 'Error')]));
   const notes = [
@@ -1979,12 +2092,18 @@ function renderResponse() {
       ...tests.map((x) => h('div', { class: 'test-row' },
         h('span', { class: `pill ${x.passed === false ? 'err' : x.passed === null ? '' : 'ok'}` }, x.passed === false ? 'Fail' : x.passed === null ? 'Skip' : 'Pass'),
         h('div', null, h('div', null, x.name), x.error && x.passed === false ? h('div', { class: 'msg' }, x.error) : null))))
-    : h('p', { class: 'hint' }, 'No tests ran. Add some in Scripts → Tests, for example pm.test("Status is 200", () => pm.response.to.have.status(200)).'));
+    : h('div', { class: 'empty-state' }, h('p', { class: 'hint' }, 'No tests ran. Add them in Scripts, then Tests. For example:'),
+      h('pre', { class: 'hint-code' }, 'pm.test("Status is 200", () => {\n  pm.response.to.have.status(200);\n});')));
   // console
   $('#respConsole').replaceChildren(...(out.logs && out.logs.length
     ? out.logs.map((l) => h('div', { class: `line ${l.level}` }, h('span', { class: 'src' }, l.src || ''), l.text))
     : [h('p', { class: 'hint' }, 'console.log() output from scripts appears here.')]));
 }
+
+const REASONS = { 200: 'OK', 201: 'Created', 202: 'Accepted', 204: 'No Content', 301: 'Moved Permanently', 302: 'Found', 304: 'Not Modified',
+  307: 'Temporary Redirect', 308: 'Permanent Redirect', 400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found',
+  405: 'Method Not Allowed', 409: 'Conflict', 415: 'Unsupported Media Type', 422: 'Unprocessable Content', 429: 'Too Many Requests',
+  500: 'Internal Server Error', 502: 'Bad Gateway', 503: 'Service Unavailable', 504: 'Gateway Timeout' };
 
 function contentType(res) {
   const f = res.headers.find(([k]) => k.toLowerCase() === 'content-type');
@@ -2077,7 +2196,7 @@ async function send() {
   t.sending = ctrl;
   t.out = null;
   renderResponse();
-  const out = await execute({ ed: t.ed, cid: t.cid, itemId: t.itemId, signal: ctrl.signal, ask: async (m) => confirm(m) });
+  const out = await execute({ ed: t.ed, cid: t.cid, itemId: t.itemId, signal: ctrl.signal, ask: (m) => ask({ title: 'Review this script change', message: m, ok: 'Allow', danger: true, pre: true }) });
   if (t.sending !== ctrl) return; // superseded
   t.sending = null;
   t.out = out;
@@ -2109,7 +2228,7 @@ async function save() {
 async function saveAs() {
   const t = cur();
   if (!state.colList.length) {
-    if (!confirm('You have no collections yet. Create one now to save this request?')) return;
+    if (!(await ask({ title: 'Create a collection first', message: 'Requests are saved inside collections, and you have none yet.', ok: 'Create collection' }))) return;
     await newCollection();
     if (!state.colList.length) return;
   }
@@ -2156,8 +2275,9 @@ function openDialog({ title, body, buttons = [], wide = false, onClose }) {
   dlg.classList.toggle('wide', wide);
   $('#dlgTitle').textContent = title;
   $('#dlgBody').replaceChildren(...[body].flat().filter((x) => x != null && x !== false));
+  linkLabels($('#dlgBody'));
   $('#dlgFoot').replaceChildren(...buttons.map((b) => h('button', {
-    type: 'button', class: `btn ${b.primary ? 'primary' : ''} ${b.danger ? 'danger' : ''}`,
+    type: 'button', class: `btn ${b.primary ? 'primary' : ''} ${b.danger ? 'danger' : ''} ${b.solid ? 'solid' : ''} ${b.left ? 'push-left' : ''}`,
     onclick: async (e) => {
       const btn = e.currentTarget;
       btn.disabled = true;
@@ -2167,17 +2287,60 @@ function openDialog({ title, body, buttons = [], wide = false, onClose }) {
   dlg.onclose = () => { if (onClose) onClose(); };
   if (!dlg.open) dlg.showModal();
   // Start on the first field, not on the close button.
-  const first = $('#dlgBody').querySelector('input:not([type=checkbox]):not([type=file]):not([disabled]), select, textarea');
+  const first = $('#dlgBody').querySelector('input:not([type=checkbox]):not([type=file]):not([type=range]):not([disabled]), select, textarea');
   if (first) first.focus();
 }
 function closeDialog() { $('#dlg').close(); }
+
+/** Themed replacement for prompt()/confirm(): resolves to the entered text / true, or null / false when cancelled. */
+function ask({ title, message, input, ok = 'OK', danger = false, pre = false }) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
+    const field = input ? h('input', { value: input.value || '', placeholder: input.placeholder || '', spellcheck: 'false', autocomplete: 'off' }) : null;
+    const submit = () => {
+      if (field && !field.value.trim()) { field.focus(); return false; }
+      settle(field ? field.value.trim() : true);
+      return true;
+    };
+    if (field) field.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (submit()) closeDialog(); } });
+    openDialog({
+      title,
+      body: [
+        message ? h('p', { class: `hint field ${pre ? 'pre-line' : ''}` }, message) : null,
+        field ? h('div', { class: 'field' }, h('label', null, input.label), field) : null,
+      ],
+      buttons: [
+        { label: 'Cancel', onClick: () => { settle(field ? null : false); return true; } },
+        { label: ok, primary: !danger, danger, solid: danger, onClick: submit },
+      ],
+      onClose: () => settle(field ? null : false),
+    });
+    if (field) field.select();
+    else $('#dlgFoot .btn:last-child').focus();
+  });
+}
+
+/** Ties every .field label to its control, so clicking the label works and screen readers name the control. */
+let labelSeq = 0;
+function linkLabels(root) {
+  for (const lab of $$('.field > label:not([for])', root)) {
+    const ctl = lab.parentElement.querySelector('input:not([type=checkbox]):not([type=file]), select, textarea');
+    if (!ctl) continue;
+    if (!ctl.id) ctl.id = `fld-${++labelSeq}`;
+    lab.htmlFor = ctl.id;
+  }
+}
 
 function dlgTabs(defs) {
   const bar = h('div', { class: 'seg dlg-tabs', role: 'tablist' });
   const panes = defs.map((d) => h('div', { 'data-pane': d.key, hidden: d !== defs[0] }, d.content));
   defs.forEach((d, i) => bar.append(h('button', {
-    type: 'button', class: `seg-btn ${i === 0 ? 'on' : ''}`, role: 'tab',
-    onclick: (e) => { $$('.seg-btn', bar).forEach((b) => b.classList.toggle('on', b === e.currentTarget)); panes.forEach((p) => { p.hidden = p.dataset.pane !== d.key; }); },
+    type: 'button', class: `seg-btn ${i === 0 ? 'on' : ''}`, role: 'tab', 'aria-selected': String(i === 0),
+    onclick: (e) => {
+      $$('.seg-btn', bar).forEach((b) => { const on = b === e.currentTarget; b.classList.toggle('on', on); b.setAttribute('aria-selected', String(on)); });
+      panes.forEach((p) => { p.hidden = p.dataset.pane !== d.key; });
+    },
   }, d.label)));
   return [bar, ...panes];
 }
@@ -2289,7 +2452,7 @@ async function duplicateEnvironment(id) {
 }
 
 async function deleteEnvironment(id) {
-  if (!confirm(`Delete the environment "${state.envs[id].name}"?`)) return;
+  if (!(await ask({ title: 'Delete environment?', message: `"${state.envs[id].name}" and its variables will be deleted.`, ok: 'Delete environment', danger: true }))) return;
   await backend.environments.remove(id);
   delete state.envs[id];
   if (state.activeEnv === id) setActiveEnv('');
@@ -2321,8 +2484,17 @@ function peekVariables(anchor) {
     if (!values) { peek.append(h('div', { class: 'hint' }, label === 'Environment' ? 'No environment selected.' : 'Open a saved request to see its collection variables.')); continue; }
     const on = values.filter((v) => v.key && v.enabled !== false && !v.disabled);
     if (!on.length) { peek.append(h('div', { class: 'hint' }, 'No variables.')); continue; }
-    peek.append(h('table', { class: 'grid' }, h('tbody', null, on.map((v) => h('tr', null, h('td', null, v.key),
-      h('td', { class: 'v' }, v.type === 'secret' ? '••••••••' : String(v.value ?? '').slice(0, 120)))))));
+    peek.append(h('table', { class: 'grid' }, h('tbody', null, on.map((v) => {
+      const secret = v.type === 'secret' || SECRET_HEADER.test(v.key) || /key$/i.test(v.key);
+      const value = String(v.value ?? '');
+      const cell = h('td', { class: 'v', title: secret ? '' : value }, secret ? '••••••••' : value);
+      let shown = false;
+      return h('tr', null, h('td', { title: v.key }, v.key), cell,
+        h('td', { class: 'r' }, secret ? h('button', {
+          class: 'btn icon small', title: 'Show value', 'aria-label': `Show ${v.key}`,
+          onclick: (e) => { shown = !shown; cell.textContent = shown ? value : '••••••••'; cell.title = shown ? value : ''; e.currentTarget.replaceChildren(icon(shown ? 'eyeOff' : 'eye')); },
+        }, icon('eye')) : null));
+    }))));
   }
   peek.append(h('div', { class: 'actions' },
     h('button', { class: 'btn small', onclick: () => { hideMenu(); if (state.activeEnv) editEnvironment(state.activeEnv); else editEnvironment(null); } }, state.activeEnv ? 'Edit environment' : 'New environment'),
@@ -2601,7 +2773,7 @@ function openCode() {
   const tabsBar = h('div', { class: 'seg dlg-tabs', role: 'tablist' });
   const draw = () => {
     tabsBar.replaceChildren(...Object.entries(GENERATORS).map(([k, g]) => h('button', {
-      type: 'button', class: `seg-btn ${k === lang ? 'on' : ''}`, onclick: () => { lang = k; ls.set('apiman:codeLang', k); draw(); },
+      type: 'button', class: `seg-btn ${k === lang ? 'on' : ''}`, role: 'tab', 'aria-selected': String(k === lang), onclick: () => { lang = k; ls.set('apiman:codeLang', k); draw(); },
     }, g.label)));
     const r = codeWire(mask.checked);
     pre.textContent = r.error ? `// ${r.error}` : GENERATORS[lang].gen(r.wire);
@@ -2677,7 +2849,7 @@ async function openRunner(cid, folderId) {
       runBtn.textContent = 'Stop';
       results.hidden = false;
       tbody.replaceChildren();
-      let n = 0, pass = 0, fail = 0, errors = 0, totalMs = 0;
+      let n = 0, pass = 0, fail = 0, errors = 0, totalMs = 0, ok = 0, c4 = 0, c5 = 0;
       const total = items.length * iterations;
       const started = performance.now();
       outer: for (let it = 0; it < iterations; it++) {
@@ -2690,6 +2862,9 @@ async function openRunner(cid, folderId) {
           const tf = out.tests.filter((x) => x.passed === false).length;
           pass += tp; fail += tf;
           if (out.error) errors++;
+          else if (out.res.status >= 500) c5++;
+          else if (out.res.status >= 400) c4++;
+          else ok++;
           if (out.res && !out.error) totalMs += out.res.timeMs;
           const sc = out.error ? 'err' : `s${String(out.res.status)[0]}`;
           tbody.append(h('tr', null,
@@ -2699,18 +2874,20 @@ async function openRunner(cid, folderId) {
               out.error ? h('div', { class: 'runner-fail' }, h('span', { class: 'pill err' }, 'Error'), out.error) : null),
             h('td', null, h('span', { class: `status-code ${out.error ? 's-err' : sc}` }, out.error ? 'Error' : String(out.res.status))),
             h('td', null, out.res && !out.error ? fmtMs(out.res.timeMs) : ''),
-            h('td', null, out.tests.length ? `${tp}/${out.tests.length}` : '')));
+            h('td', null, out.tests.length ? `${tp}/${out.tests.length}` : '–')));
           bar.firstChild.style.width = `${(n / total) * 100}%`;
-          bar.classList.toggle('has-fail', fail + errors > 0);
+          bar.classList.toggle('has-fail', fail + errors + c5 > 0);
+          bar.classList.toggle('has-warn', !(fail + errors + c5) && c4 > 0);
+          const outcome = [`${ok} succeeded`, ...(c4 ? [`${c4} returned 4xx`] : []), ...(c5 ? [`${c5} returned 5xx`] : []), ...(errors ? [`${errors} not sent`] : [])].join(', ');
           summary.replaceChildren(
-            h('span', { class: 'big pass' }, `${pass} passed`), h('span', { class: `big ${fail ? 'fail' : ''}` }, `${fail} failed`),
-            ...(errors ? [h('span', { class: 'big fail' }, `${errors} errors`)] : []),
-            h('span', { class: 'metric' }, `${n} of ${total} requests, average ${n - errors ? fmtMs(Math.round(totalMs / Math.max(1, n - errors))) : '–'}`));
+            h('span', null, h('b', null, `${n} of ${total}`), ` requests: ${outcome}`),
+            h('span', null, 'Tests: ', h('span', { class: `big ${pass ? 'pass' : 'zero'}` }, `${pass} passed`), ' ', h('span', { class: `big ${fail ? 'fail' : 'zero'}` }, `${fail} failed`)),
+            h('span', null, `Average ${n - errors ? fmtMs(Math.round(totalMs / Math.max(1, n - errors))) : '–'}`));
           if (stopOnFail.checked && (tf || out.error)) break outer;
           if (delay) await new Promise((r) => setTimeout(r, delay));
         }
       }
-      summary.append(h('span', { class: 'metric' }, `${ctrl.signal.aborted ? 'Stopped' : 'Finished'} in ${fmtMs(Math.round(performance.now() - started))}`));
+      summary.append(h('span', null, `${ctrl.signal.aborted ? 'Stopped' : 'Finished'} in ${fmtMs(Math.round(performance.now() - started))}`));
       ctrl = null;
       runBtn.textContent = 'Run again';
       if (state.view === 'environments') renderSidebar();
@@ -2721,34 +2898,84 @@ async function openRunner(cid, folderId) {
 // ---------- settings ----------
 function openSettings() {
   const s = state.settings;
-  const theme = h('select', null, ...[['system', 'Match the system'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => h('option', { value: v, ...(s.theme === v ? { selected: true } : {}) }, l)));
+  const draft = { ...s };
+  let saved = false;
+  const preview = () => { applyAppearance(draft); };
+  const seg = (key, options, label) => {
+    const bar = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': label });
+    const draw = () => bar.replaceChildren(...options.map(([v, l]) => h('button', {
+      type: 'button', class: `seg-btn ${draft[key] === v ? 'on' : ''}`, role: 'radio', 'aria-checked': String(draft[key] === v),
+      onclick: () => { draft[key] = v; draw(); if (key === 'theme') previewTheme(); else preview(); },
+    }, l)));
+    draw();
+    return bar;
+  };
+  const previewTheme = () => {
+    if (draft.theme === 'light' || draft.theme === 'dark') document.documentElement.dataset.theme = draft.theme;
+    else delete document.documentElement.dataset.theme;
+  };
+  const slider = (key, min, max, step, fmt, label) => {
+    const out = h('output', { class: 'mono' }, fmt(draft[key]));
+    const input = h('input', {
+      type: 'range', min: String(min), max: String(max), step: String(step), value: String(draft[key]), 'aria-label': label,
+      oninput: (e) => { draft[key] = Number(e.target.value); out.textContent = fmt(draft[key]); preview(); },
+    });
+    return h('div', { class: 'field' }, h('span', { class: 'label' }, label), h('div', { class: 'slider-row' }, input, out));
+  };
   const timeout = h('input', { type: 'number', min: '1', max: '600', value: String(s.timeout) });
   const follow = h('input', { type: 'checkbox', checked: s.followRedirects });
   const hist = h('input', { type: 'checkbox', checked: s.history });
   const insecure = h('input', { type: 'checkbox', checked: s.insecure });
+  const wrap = h('input', { type: 'checkbox', checked: draft.wrap !== false, onchange: (e) => { draft.wrap = e.target.checked; preview(); } });
+
+  const appearance = [
+    h('div', { class: 'field' }, h('span', { class: 'label' }, 'Theme'), seg('theme', [['system', 'Match system'], ['light', 'Light'], ['dark', 'Dark']], 'Theme')),
+    h('div', { class: 'grid-2' },
+      slider('textScale', 0.85, 1.3, 0.05, (v) => `${Math.round(v * 100)}%`, 'Interface text size'),
+      slider('codeSize', 11, 20, 1, (v) => `${v}px`, 'Code and body text size')),
+    h('div', { class: 'grid-2' },
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Density'), seg('density', [['compact', 'Compact'], ['comfortable', 'Comfortable'], ['spacious', 'Spacious']], 'Density')),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Request and response'), seg('layout', [['auto', 'Side by side'], ['stacked', 'Stacked']], 'Layout'))),
+    h('label', { class: 'check' }, wrap, h('span', null, 'Wrap long lines in responses', h('small', null, 'Turn off to scroll sideways instead, which keeps long JSON lines intact.'))),
+    h('div', { class: 'field-row' },
+      h('button', { type: 'button', class: 'btn small', onclick: () => { initResizers.reset(); toast('Panel sizes reset'); } }, 'Reset panel sizes'),
+      h('span', { class: 'hint' }, 'Drag the lines between panels to resize them. Double-click a line to reset it.')),
+  ];
+  const requests = [
+    h('div', { class: 'field narrow' }, h('label', null, 'Request timeout (seconds)'), timeout),
+    h('label', { class: 'check' }, follow, h('span', null, 'Follow redirects', h('small', null, 'Credentials are never forwarded to a different site, and HTTPS never downgrades to HTTP.'))),
+    h('label', { class: 'check' }, hist, h('span', null, 'Keep request history', h('small', null, 'Stored only in this browser. It includes request details as you typed them.'))),
+    backend.mode === 'local'
+      ? h('label', { class: 'check' }, insecure, h('span', null, 'Skip TLS certificate checks', h('small', null, 'Last resort for internal servers with self-signed certificates: it lets an attacker on the network read your traffic. Prefer starting the server with ', h('code', { class: 'inline' }, '--ca-file'), '.')))
+      : h('p', { class: 'hint' }, 'Website mode: the browser sends requests, so certificate and CORS rules apply. Run ApiMan locally (python3 server.py) to call any API, including internal ones over VPN.'),
+    h('p', { class: 'hint' }, $('#dataDir').textContent),
+  ];
   openDialog({
     title: 'Settings',
-    body: [
-      h('div', { class: 'grid-2' }, h('div', { class: 'field' }, h('label', null, 'Theme'), theme), h('div', { class: 'field' }, h('label', null, 'Request timeout (seconds)'), timeout)),
-      h('label', { class: 'check' }, follow, h('span', null, 'Follow redirects', h('small', null, 'Credentials are never forwarded to a different site, and HTTPS never downgrades to HTTP.'))),
-      h('label', { class: 'check' }, hist, h('span', null, 'Keep request history', h('small', null, 'Stored only in this browser. It includes request details as you typed them.'))),
-      backend.mode === 'local'
-        ? h('label', { class: 'check' }, insecure, h('span', null, 'Skip TLS certificate checks', h('small', null, 'Last resort for internal servers with self-signed certificates: it lets an attacker on the network read your traffic. Prefer starting the server with --ca-file.')))
-        : h('p', { class: 'hint' }, 'Website mode: the browser sends requests, so certificate and CORS rules apply. Run ApiMan locally (python3 server.py) to call any API, including internal ones over VPN.'),
-      h('p', { class: 'hint' }, `Data: ${$('#dataDir').textContent}`),
+    body: dlgTabs([{ key: 'appearance', label: 'Appearance', content: appearance }, { key: 'requests', label: 'Requests', content: requests }]),
+    onClose: () => { if (!saved) { applyTheme(); applyAppearance(); } }, // closing without saving undoes the preview
+    buttons: [
+      { label: 'Restore defaults', left: true, onClick: () => {
+        Object.assign(draft, { theme: DEFAULT_SETTINGS.theme, textScale: 1, codeSize: 13, density: 'comfortable', layout: 'auto', wrap: true });
+        Object.assign(s, draft); saveSettings(); saved = true; applyTheme(); applyAppearance(); closeDialog(); openSettings();
+        toast('Appearance restored to defaults');
+        return false;
+      } },
+      { label: 'Save', primary: true, onClick: () => {
+        Object.assign(s, {
+          theme: draft.theme, textScale: draft.textScale, codeSize: draft.codeSize, density: draft.density, layout: draft.layout, wrap: draft.wrap,
+          timeout: Math.max(1, Math.min(600, Number(timeout.value) || 60)),
+          followRedirects: follow.checked, history: hist.checked, insecure: backend.mode === 'local' && insecure.checked,
+        });
+        saved = true;
+        saveSettings();
+        applyTheme();
+        applyAppearance();
+        renderSidebar();
+        toast('Settings saved');
+        return true;
+      } },
     ],
-    buttons: [{ label: 'Save', primary: true, onClick: () => {
-      s.theme = theme.value;
-      s.timeout = Math.max(1, Math.min(600, Number(timeout.value) || 60));
-      s.followRedirects = follow.checked;
-      s.history = hist.checked;
-      s.insecure = backend.mode === 'local' && insecure.checked;
-      saveSettings();
-      applyTheme();
-      renderSidebar();
-      toast('Settings saved');
-      return true;
-    } }],
   });
 }
 
@@ -2901,7 +3128,7 @@ async function useFolder(dir) {
   renderAll();
 }
 async function pickFolder() {
-  if (state.tabs.some((t) => t.dirty && t.cid) && !confirm('Switching folders closes tabs from the current collections. Unsaved changes in them will be lost. Continue?')) return;
+  if (state.tabs.some((t) => t.dirty && t.cid) && !(await ask({ title: 'Switch folder?', message: 'Tabs from the current collections will close, and their unsaved changes will be lost.', ok: 'Switch folder', danger: true }))) return;
   const dir = await window.showDirectoryPicker({ id: 'apiman', mode: 'readwrite' });
   await idbHandle('set', dir);
   await useFolder(dir);
@@ -2911,10 +3138,111 @@ async function pickFolder() {
 // =====================================================================================================
 // Start
 // =====================================================================================================
+/** Drag handles for the sidebar and the request/response split (mouse, touch and arrow keys); sizes are remembered. */
+function initResizers() {
+  const root = document.documentElement;
+  const layout = ls.get('apiman:layout', {});
+  const save = (k, v) => { layout[k] = v; ls.set('apiman:layout', layout); };
+  const stacked = () => document.documentElement.dataset.layout === 'stacked' || matchMedia('(max-width: 1180px)').matches;
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const side = $('#sideResizer'), split = $('#splitResizer');
+  const setSideW = (px, persist = true) => {
+    px = clamp(Math.round(px), 220, 480);
+    root.style.setProperty('--side-w', `${px}px`);
+    Object.assign(side.dataset, { now: px });
+    side.setAttribute('aria-valuenow', String(px)); side.setAttribute('aria-valuemin', '220'); side.setAttribute('aria-valuemax', '480');
+    if (persist) save('side', px);
+  };
+  const setSplit = (pct, persist = true) => {
+    pct = Math.round(clamp(pct, 20, 80) * 10) / 10;
+    const key = stacked() ? 'reqH' : 'req';
+    root.style.setProperty(stacked() ? '--req-h' : '--req-w', `${pct}%`);
+    split.dataset.now = pct;
+    split.setAttribute('aria-orientation', stacked() ? 'horizontal' : 'vertical');
+    split.setAttribute('aria-valuenow', String(Math.round(pct))); split.setAttribute('aria-valuemin', '20'); split.setAttribute('aria-valuemax', '80');
+    if (persist) save(key, pct);
+  };
+  setSideW(layout.side || 288, false);
+  setSplit((stacked() ? layout.reqH : layout.req) || 50, false);
+  if (layout.req) root.style.setProperty('--req-w', `${layout.req}%`);
+  if (layout.reqH) root.style.setProperty('--req-h', `${layout.reqH}%`);
+  matchMedia('(max-width: 1180px)').addEventListener('change', () => setSplit((stacked() ? layout.reqH : layout.req) || 50, false));
+
+  const drag = (el, onMove) => el.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    el.setPointerCapture(e.pointerId);
+    el.classList.add('dragging');
+    document.body.classList.add('resizing');
+    document.body.classList.toggle('rows', el === split && stacked());
+    const end = () => {
+      el.classList.remove('dragging');
+      document.body.classList.remove('resizing', 'rows');
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', end);
+      el.removeEventListener('pointercancel', end);
+    };
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+  });
+  drag(side, (e) => setSideW(e.clientX));
+  drag(split, (e) => {
+    const r = $('.split').getBoundingClientRect();
+    setSplit(stacked() ? ((e.clientY - r.top) / r.height) * 100 : ((e.clientX - r.left) / r.width) * 100);
+  });
+  side.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    setSideW(Number(side.dataset.now) + (e.key === 'ArrowRight' ? 16 : -16));
+  });
+  split.addEventListener('keydown', (e) => {
+    const [less, more] = stacked() ? ['ArrowUp', 'ArrowDown'] : ['ArrowLeft', 'ArrowRight'];
+    if (e.key !== less && e.key !== more) return;
+    e.preventDefault();
+    setSplit(Number(split.dataset.now) + (e.key === more ? 2 : -2));
+  });
+  side.addEventListener('dblclick', () => setSideW(288));   // double-click resets
+  split.addEventListener('dblclick', () => setSplit(50));
+  side.title = split.title = 'Drag to resize, double-click to reset';
+  initResizers.refresh = () => setSplit((stacked() ? layout.reqH : layout.req) || 50, false);
+  initResizers.reset = () => { setSideW(288); layout.req = 50; layout.reqH = 50; ls.set('apiman:layout', layout); root.style.setProperty('--req-w', '50%'); root.style.setProperty('--req-h', '50%'); setSplit(50); };
+}
+
 async function start() {
   applyTheme();
+  initResizers();
+  applyAppearance();
   bindEditor();
   bindChrome();
+  $('#btnSide').addEventListener('click', () => setSide(!$('.app').classList.contains('side-open')));
+  // Sidebar tree keyboard: Up/Down move, Right/Left open/close, Space activates (Enter is handled per row).
+  $('#sideBody').addEventListener('keydown', (e) => {
+    const row = e.target.closest('.row');
+    if (!row || e.target !== row) return;
+    const rows = $$('#sideBody .row');
+    const i = rows.indexOf(row);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const next = rows[i + (e.key === 'ArrowDown' ? 1 : -1)];
+      if (next) next.focus();
+    } else if (e.key === ' ' || (e.key === 'ArrowRight' && row.getAttribute('aria-expanded') === 'false')
+      || (e.key === 'ArrowLeft' && row.getAttribute('aria-expanded') === 'true')) {
+      e.preventDefault();
+      state.refocus = row.dataset.key;
+      row.click();
+    }
+  });
+  // Menus: Up/Down between items, Escape closes and returns focus.
+  $('#popover').addEventListener('keydown', (e) => {
+    const items = $$('#popover .mi');
+    const i = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const next = items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length];
+      if (next) next.focus();
+    } else if (e.key === 'Escape') { e.preventDefault(); hideMenu(true); }
+  });
   // Enter inside a dialog field must not submit (and close) the dialog; only the ✕ button closes it.
   $('#dlg form').addEventListener('submit', (e) => { if (!e.submitter || e.submitter.value !== 'cancel') e.preventDefault(); });
   let local = false;

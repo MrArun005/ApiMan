@@ -33,7 +33,9 @@ MAX_RESPONSE = 20 * 1024 * 1024   # what we read back from the target API
 SCHEMA_V21 = "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 CA_FILE = None  # extra trusted CA bundle (PEM), set by --ca-file
 STATIC = {"/": ("index.html", "text/html"), "/index.html": ("index.html", "text/html"),
-          "/app.js": ("app.js", "text/javascript"), "/app.css": ("app.css", "text/css")}
+          "/app.js": ("app.js", "text/javascript"), "/app.css": ("app.css", "text/css"),
+          "/fonts/Geist-Variable.woff2": ("fonts/Geist-Variable.woff2", "font/woff2"),
+          "/fonts/GeistMono-Variable.woff2": ("fonts/GeistMono-Variable.woff2", "font/woff2")}
 
 
 def validate_collection(data):
@@ -294,7 +296,7 @@ class Handler(BaseHTTPRequestHandler):
     def reply_file(self, path, ctype):
         data = path.read_bytes()
         self.send_response(200)
-        self.send_header("Content-Type", f"{ctype}; charset=utf-8")
+        self.send_header("Content-Type", ctype if ctype.startswith("font/") else f"{ctype}; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")

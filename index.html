@@ -8,20 +8,31 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23193a5c'/><path d='M7 20c4 0 4-8 9-8s5 8 9 8' stroke='%23f2b33d' stroke-width='3' fill='none' stroke-linecap='round'/><circle cx='7' cy='20' r='2.6' fill='%2347b881'/><circle cx='25' cy='20' r='2.6' fill='%235b8def'/></svg>">
 <script>
   // Apply the saved theme before first paint, so there is no flash of the wrong theme.
-  try { const t = JSON.parse(localStorage.getItem('apiman:settings') || '{}').theme; if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch {}
+  try {
+    const s = JSON.parse(localStorage.getItem('apiman:settings') || '{}'), r = document.documentElement;
+    if (s.theme === 'light' || s.theme === 'dark') r.dataset.theme = s.theme;
+    if (s.layout === 'stacked') r.dataset.layout = 'stacked';
+    if (s.wrap === false) r.dataset.wrap = 'off';
+    if (s.textScale >= 0.85 && s.textScale <= 1.3) r.style.setProperty('--text-scale', String(s.textScale));
+    if (s.codeSize >= 11 && s.codeSize <= 20) r.style.setProperty('--code-size', s.codeSize + 'px');
+    const d = { compact: 0.875, spacious: 1.125 }[s.density]; if (d) r.style.setProperty('--d', String(d));
+  } catch {}
 </script>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <div class="app">
   <header class="top">
+    <button id="btnSide" class="btn icon" aria-label="Show sidebar" aria-expanded="false" aria-controls="side" title="Collections, environments, history">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    </button>
     <div class="brand">
       <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" class="logo-bg"/><path d="M7 20c4 0 4-8 9-8s5 8 9 8" stroke="#f2b33d" stroke-width="3" fill="none" stroke-linecap="round"/><circle cx="7" cy="20" r="2.6" fill="#47b881"/><circle cx="25" cy="20" r="2.6" fill="#5b8def"/></svg>
       <span class="wordmark">ApiMan</span>
       <span class="pill" id="modeBadge"></span>
     </div>
     <div class="top-actions">
-      <button id="btnNew" class="btn">New</button>
+      <button id="btnNew" class="btn" aria-haspopup="menu" aria-expanded="false">New</button>
       <button id="btnImport" class="btn">Import</button>
       <button id="btnRunner" class="btn">Runner</button>
     </div>
@@ -42,7 +53,7 @@
     </button>
   </header>
 
-  <aside class="side">
+  <aside class="side" id="side">
     <div class="seg block" role="tablist" aria-label="Sidebar">
       <button role="tab" class="seg-btn on" data-view="collections" aria-selected="true">Collections</button>
       <button role="tab" class="seg-btn" data-view="environments" aria-selected="false">Environments</button>
@@ -56,28 +67,21 @@
       <div id="dataDir" class="data-dir"></div>
       <button id="btnFolder" class="btn small" hidden>Use a folder…</button>
     </div>
+    <div class="resizer" id="sideResizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0"></div>
   </aside>
 
   <main class="work">
     <div class="tabstrip" id="tabstrip" role="tablist" aria-label="Open requests"></div>
 
     <div class="welcome" id="welcome" hidden>
-      <div class="welcome-inner">
-        <h1>Send your first request</h1>
-        <p>Paste a URL, import a Postman collection, or start from a cURL command. Everything stays on this computer.</p>
-        <div class="welcome-actions">
-          <button class="btn primary" data-act="new-request">New request</button>
-          <button class="btn" data-act="import">Import collection</button>
-          <button class="btn" data-act="import-curl">Paste cURL</button>
-        </div>
-      </div>
+      <div class="welcome-inner" id="welcomeInner"></div>
     </div>
 
     <div class="editor" id="editor" hidden>
       <div class="titlebar">
         <nav class="crumb" id="crumb" aria-label="Location"></nav>
         <input id="reqName" class="name-input" aria-label="Request name" spellcheck="false">
-        <span class="dirty-dot" id="dirtyDot" title="Unsaved changes" hidden></span>
+        <span class="dirty-dot" id="dirtyDot" role="img" aria-label="Unsaved changes" title="Unsaved changes" hidden></span>
         <div class="spacer"></div>
         <button id="btnCode" class="btn ghost" title="Generate code">&lt;/&gt; Code</button>
         <button id="btnSave" class="btn" title="Save (Ctrl/Cmd+S)">Save</button>
@@ -96,54 +100,60 @@
       <div class="split">
         <section class="pane-col req-col" aria-label="Request">
           <div class="tabs" id="reqTabs" role="tablist">
-            <button class="tab on" data-tab="params">Params<span class="count" id="cntParams"></span></button>
-            <button class="tab" data-tab="auth">Auth<span class="count" id="cntAuth"></span></button>
-            <button class="tab" data-tab="headers">Headers<span class="count" id="cntHeaders"></span></button>
-            <button class="tab" data-tab="body">Body<span class="count" id="cntBody"></span></button>
-            <button class="tab" data-tab="scripts">Scripts<span class="count" id="cntScripts"></span></button>
-            <button class="tab" data-tab="docs">Docs</button>
+            <div class="seg">
+            <button class="tab on" role="tab" id="tab-params" aria-controls="pane-params" aria-selected="true" data-tab="params">Params<span class="count" id="cntParams"></span></button>
+            <button class="tab" role="tab" id="tab-auth" aria-controls="pane-auth" aria-selected="false" data-tab="auth">Auth<span class="count" id="cntAuth"></span></button>
+            <button class="tab" role="tab" id="tab-headers" aria-controls="pane-headers" aria-selected="false" data-tab="headers">Headers<span class="count" id="cntHeaders"></span></button>
+            <button class="tab" role="tab" id="tab-body" aria-controls="pane-body" aria-selected="false" data-tab="body">Body<span class="count" id="cntBody"></span></button>
+            <button class="tab" role="tab" id="tab-scripts" aria-controls="pane-scripts" aria-selected="false" data-tab="scripts">Scripts<span class="count" id="cntScripts"></span></button>
+            <button class="tab" role="tab" id="tab-docs" aria-controls="pane-docs" aria-selected="false" data-tab="docs">Docs</button>
+            </div>
           </div>
-          <div class="pane" data-pane="params"><div id="paramsKv"></div></div>
-          <div class="pane" data-pane="auth" hidden><div id="authEditor"></div></div>
-          <div class="pane" data-pane="headers" hidden><div id="headersKv"></div></div>
-          <div class="pane" data-pane="body" hidden>
+          <div class="pane" role="tabpanel" id="pane-params" aria-labelledby="tab-params" data-pane="params"><div id="paramsKv"></div></div>
+          <div class="pane" role="tabpanel" id="pane-auth" aria-labelledby="tab-auth" data-pane="auth" hidden><div id="authEditor"></div></div>
+          <div class="pane" role="tabpanel" id="pane-headers" aria-labelledby="tab-headers" data-pane="headers" hidden><div id="headersKv"></div></div>
+          <div class="pane" role="tabpanel" id="pane-body" aria-labelledby="tab-body" data-pane="body" hidden>
             <div class="pane-tools">
               <div class="seg" id="bodyModes" role="radiogroup" aria-label="Body type"></div>
               <span id="bodyExtras" class="field-row"></span>
             </div>
             <div id="bodyEditor"></div>
           </div>
-          <div class="pane" data-pane="scripts" hidden>
+          <div class="pane" role="tabpanel" id="pane-scripts" aria-labelledby="tab-scripts" data-pane="scripts" hidden>
             <div class="pane-tools">
               <div class="seg" role="radiogroup" aria-label="Script">
-                <button class="seg-btn on" data-script="pre">Pre-request</button>
-                <button class="seg-btn" data-script="test">Tests</button>
+                <button class="seg-btn on" role="radio" aria-checked="true" data-script="pre">Pre-request</button>
+                <button class="seg-btn" role="radio" aria-checked="false" data-script="test">Tests</button>
               </div>
               <button class="btn small ghost" id="btnSnippets">Snippets</button>
               <span class="hint">Runs sandboxed: no network calls of its own, no access to stored data.</span>
             </div>
-            <textarea class="code" id="scriptText" spellcheck="false" aria-label="Script"></textarea>
+            <textarea class="code" id="scriptText" spellcheck="false" wrap="off" aria-label="Script"></textarea>
           </div>
-          <div class="pane" data-pane="docs" hidden>
+          <div class="pane" role="tabpanel" id="pane-docs" aria-labelledby="tab-docs" data-pane="docs" hidden>
             <textarea class="prose" id="docsText" aria-label="Documentation" placeholder="Describe what this request does, its parameters and gotchas."></textarea>
           </div>
         </section>
 
+        <div class="resizer" id="splitResizer" role="separator" aria-orientation="vertical" aria-label="Resize request and response panels" tabindex="0"></div>
+
         <section class="pane-col resp-col" aria-label="Response">
           <div class="tabs" id="respTabs" role="tablist">
-            <button class="tab on" data-tab="rbody">Body</button>
-            <button class="tab" data-tab="rheaders">Headers<span class="count" id="cntRHeaders"></span></button>
-            <button class="tab" data-tab="rcookies">Cookies<span class="count" id="cntRCookies"></span></button>
-            <button class="tab" data-tab="rtests">Tests<span class="count" id="cntRTests"></span></button>
-            <button class="tab" data-tab="rconsole">Console<span class="count" id="cntRConsole"></span></button>
-            <div class="resp-meta" id="respStatus"></div>
+            <div class="seg">
+            <button class="tab on" role="tab" id="tab-rbody" aria-controls="pane-rbody" aria-selected="true" data-tab="rbody">Body</button>
+            <button class="tab" role="tab" id="tab-rheaders" aria-controls="pane-rheaders" aria-selected="false" data-tab="rheaders">Headers<span class="count" id="cntRHeaders"></span></button>
+            <button class="tab" role="tab" id="tab-rcookies" aria-controls="pane-rcookies" aria-selected="false" data-tab="rcookies">Cookies<span class="count" id="cntRCookies"></span></button>
+            <button class="tab" role="tab" id="tab-rtests" aria-controls="pane-rtests" aria-selected="false" data-tab="rtests">Tests<span class="count" id="cntRTests"></span></button>
+            <button class="tab" role="tab" id="tab-rconsole" aria-controls="pane-rconsole" aria-selected="false" data-tab="rconsole">Console<span class="count" id="cntRConsole"></span></button>
+            </div>
+            <div class="resp-meta" id="respStatus" role="status" aria-live="polite"></div>
           </div>
-          <div class="pane" data-pane="rbody">
+          <div class="pane" role="tabpanel" id="pane-rbody" aria-labelledby="tab-rbody" data-pane="rbody">
             <div class="pane-tools" id="respTools" hidden>
               <div class="seg" role="radiogroup" aria-label="Body view">
-                <button class="seg-btn on" data-view="pretty">Pretty</button>
-                <button class="seg-btn" data-view="raw">Raw</button>
-                <button class="seg-btn" data-view="preview">Preview</button>
+                <button class="seg-btn on" role="radio" aria-checked="true" data-view="pretty">Pretty</button>
+                <button class="seg-btn" role="radio" aria-checked="false" data-view="raw">Raw</button>
+                <button class="seg-btn" role="radio" aria-checked="false" data-view="preview">Preview</button>
               </div>
               <div class="spacer"></div>
               <button class="btn small ghost" id="btnCopyBody">Copy</button>
@@ -151,10 +161,10 @@
             </div>
             <div id="respBody" class="resp-body"></div>
           </div>
-          <div class="pane" data-pane="rheaders" hidden><table class="grid" id="respHeaders"></table></div>
-          <div class="pane" data-pane="rcookies" hidden><div id="respCookies"></div></div>
-          <div class="pane" data-pane="rtests" hidden><div id="respTests"></div></div>
-          <div class="pane" data-pane="rconsole" hidden><div id="respConsole" class="console"></div></div>
+          <div class="pane" role="tabpanel" id="pane-rheaders" aria-labelledby="tab-rheaders" data-pane="rheaders" hidden><table class="grid" id="respHeaders"></table></div>
+          <div class="pane" role="tabpanel" id="pane-rcookies" aria-labelledby="tab-rcookies" data-pane="rcookies" hidden><div id="respCookies"></div></div>
+          <div class="pane" role="tabpanel" id="pane-rtests" aria-labelledby="tab-rtests" data-pane="rtests" hidden><div id="respTests"></div></div>
+          <div class="pane" role="tabpanel" id="pane-rconsole" aria-labelledby="tab-rconsole" data-pane="rconsole" hidden><div id="respConsole" class="console"></div></div>
         </section>
       </div>
     </div>
