@@ -119,8 +119,22 @@ const isLocalHost = (host) => ['localhost', '127.0.0.1', '[::1]'].includes(host)
 const DEFAULT_SETTINGS = {
   theme: 'system', timeout: 60, followRedirects: true, history: true, insecure: false,
   textScale: 1, codeSize: 13, density: 'comfortable', layout: 'auto', wrap: true,
+  densityScale: null, lineHeight: 1.6, tabSize: 2, uiFont: 'geist', codeFont: 'geist-mono', accent: 'blue', accentCustom: '#2560cf',
+  sidePosition: 'left', sideHidden: false,
 };
 const DENSITY = { compact: 0.875, comfortable: 1, spacious: 1.125 };
+const UI_FONTS = {
+  geist: ['Geist', '"Geist", system-ui, sans-serif'],
+  system: ['System', 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'],
+  humanist: ['Humanist', '"Avenir Next", "Segoe UI Variable Text", "Segoe UI", Ubuntu, sans-serif'],
+};
+const CODE_FONTS = {
+  'geist-mono': ['Geist Mono', '"Geist Mono", ui-monospace, monospace'],
+  system: ['System mono', 'ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace'],
+  menlo: ['Menlo / Monaco', 'Menlo, Monaco, "DejaVu Sans Mono", monospace'],
+};
+// [light, dark] pairs chosen for AA contrast on each theme's panels
+const ACCENTS = { blue: ['#2560cf', '#6b9cff'], violet: ['#6d44c9', '#b08cff'], teal: ['#0f766e', '#2dd4bf'], orange: ['#b4540a', '#f59e42'], pink: ['#be185d', '#f472b6'] };
 const clampNum = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
 
 /** Text size, code size, density, layout and line wrapping: all CSS custom properties, so they apply instantly. */
@@ -128,7 +142,16 @@ function applyAppearance(s = state.settings) {
   const root = document.documentElement;
   root.style.setProperty('--text-scale', String(clampNum(s.textScale, 0.85, 1.3, 1)));
   root.style.setProperty('--code-size', `${clampNum(s.codeSize, 11, 20, 13)}px`);
-  root.style.setProperty('--d', String(DENSITY[s.density] || 1));
+  root.style.setProperty('--d', String(clampNum(s.densityScale ?? DENSITY[s.density] ?? 1, 0.8, 1.25, 1)));
+  root.style.setProperty('--code-lh', String(clampNum(s.lineHeight, 1.3, 1.9, 1.6)));
+  root.style.setProperty('--font-ui', (UI_FONTS[s.uiFont] || UI_FONTS.geist)[1]);
+  root.style.setProperty('--font-code', (CODE_FONTS[s.codeFont] || CODE_FONTS['geist-mono'])[1]);
+  const dark = effectiveTheme(s) === 'dark';
+  const accent = s.accent === 'custom' && /^#[0-9a-f]{6}$/i.test(s.accentCustom || '') ? s.accentCustom : (ACCENTS[s.accent] || ACCENTS.blue)[dark ? 1 : 0];
+  root.style.setProperty('--focus', accent);
+  root.dataset.side = s.sidePosition === 'right' ? 'right' : 'left';
+  root.dataset.sideHidden = String(!!s.sideHidden);
+  document.querySelectorAll('.CodeMirror').forEach((el) => el.CodeMirror && el.CodeMirror.refresh());
   root.dataset.layout = s.layout === 'stacked' ? 'stacked' : 'auto';
   root.dataset.wrap = s.wrap === false ? 'off' : 'on';
   if (initResizers.refresh) initResizers.refresh();
@@ -154,9 +177,10 @@ function applyTheme() {
   const t = state.settings.theme;
   if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
   else delete document.documentElement.dataset.theme;
+  if (typeof applyAppearance === 'function' && document.body) applyAppearance(); // accent colour depends on the theme
 }
-function effectiveTheme() {
-  const t = state.settings.theme;
+function effectiveTheme(s = state.settings) {
+  const t = s.theme;
   if (t === 'light' || t === 'dark') return t;
   return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
@@ -184,15 +208,17 @@ const KINDS = {
 };
 
 function newDocId(name, exists) {
-  const base = String(name).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 80) || 'untitled';
+  let base = String(name).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-._]+|[-.]+$/g, '').slice(0, 80) || 'untitled';
+  if (base.toLowerCase() === 'globals') base = 'globals-env'; // globals.json is the Globals document
   let id = `${base}.json`;
-  for (let n = 2; exists(id); n++) id = `${base}-${n}.json`;
+  for (let n = 2; exists(id.toLowerCase()); n++) id = `${base}-${n}.json`; // file systems on macOS/Windows ignore case
   return id;
 }
 
-async function api(method, path, body) {
+async function api(method, path, body, signal) {
   const r = await fetch(path, {
     method,
+    signal,
     headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
@@ -223,7 +249,7 @@ function browserStore(kind) {
     async list() { return Object.entries(read()).map(([id, d]) => ({ id, name: nameOf(d) })).sort((a, b) => a.name.localeCompare(b.name)); },
     async get(id) { const d = read()[id]; if (!d) throw new Error('Not found'); return d; },
     async put(id, d) { validate(d); const all = read(); all[id] = d; write(all); },
-    async create(d) { validate(d); const all = read(); const id = newDocId(nameOf(d), (x) => x in all); all[id] = d; write(all); return id; },
+    async create(d) { validate(d); const all = read(); const id = newDocId(nameOf(d), (x) => Object.keys(all).some((k) => k.toLowerCase() === x)); all[id] = d; write(all); return id; },
     async remove(id) { const all = read(); delete all[id]; write(all); },
   };
 }
@@ -253,7 +279,7 @@ function folderStore(rootDir, kind) {
     },
     get: read,
     async put(id, d) { validate(d); await write(id, d); },
-    async create(d) { validate(d); const names = new Set(await files()); const id = newDocId(nameOf(d), (x) => names.has(x)); await write(id, d); return id; },
+    async create(d) { validate(d); const names = new Set((await files()).map((f) => f.toLowerCase())); const id = newDocId(nameOf(d), (x) => names.has(x)); await write(id, d); return id; },
     remove: async (id) => (await dirP).removeEntry(id),
   };
 }
@@ -284,7 +310,7 @@ async function materializeBody(body) {
   return { payload: fd, isForm: true };
 }
 
-async function serverSend(wire) {
+async function serverSend(wire, signal) {
   const spec = {
     method: wire.method, url: wire.url, headers: wire.headers,
     timeout: state.settings.timeout, followRedirects: state.settings.followRedirects, insecure: state.settings.insecure,
@@ -299,7 +325,7 @@ async function serverSend(wire) {
       spec.headers.push(['Content-Type', r.headers.get('content-type')]);
     }
   }
-  return api('POST', '/api/send', spec);
+  return api('POST', '/api/send', spec, signal);
 }
 
 async function browserSend(wire, signal) {
@@ -309,6 +335,8 @@ async function browserSend(wire, signal) {
   }
   const { payload, isForm } = await materializeBody(wire.body);
   const noBody = ['GET', 'HEAD'].includes(wire.method);
+  const SAFE = ['accept', 'accept-language', 'content-language', 'content-type'];
+  const carriesSecrets = wire.headers.some(([k]) => !SAFE.includes(k.toLowerCase()));
   const headers = wire.headers.filter(([k]) => !(isForm && k.toLowerCase() === 'content-type'));
   const timeout = AbortSignal.timeout ? AbortSignal.timeout(state.settings.timeout * 1000) : null;
   const sig = signal && timeout && AbortSignal.any ? AbortSignal.any([signal, timeout]) : (signal || timeout);
@@ -317,7 +345,8 @@ async function browserSend(wire, signal) {
   try {
     r = await fetch(wire.url, {
       method: wire.method, headers, body: noBody ? undefined : payload,
-      credentials: 'omit', redirect: state.settings.followRedirects ? 'follow' : 'manual', signal: sig,
+      // fetch only strips Authorization on cross-site redirects; custom headers (X-Api-Key, ...) would follow.
+      credentials: 'omit', redirect: state.settings.followRedirects && !carriesSecrets ? 'follow' : 'manual', signal: sig,
     });
   } catch (e) {
     if (e.name === 'TimeoutError') return { error: `No response within ${state.settings.timeout} s.` };
@@ -326,7 +355,9 @@ async function browserSend(wire, signal) {
       + 'or it isn\'t reachable from here. Run ApiMan locally (python3 server.py) to call any API without CORS limits.' };
   }
   if (r.type === 'opaqueredirect') {
-    return { error: 'The API answered with a redirect. Browsers hide redirect details; turn on "Follow redirects" in Settings or run ApiMan locally.' };
+    return { error: state.settings.followRedirects
+      ? 'The API answered with a redirect. ApiMan did not follow it because this request carries headers such as Authorization or API keys, which a browser could forward to another site. Run ApiMan locally to follow redirects safely.'
+      : 'The API answered with a redirect, and "Follow redirects" is off in Settings. Browsers hide redirect details; run ApiMan locally to see them.' };
   }
   const buf = await r.arrayBuffer();
   let text = null;
@@ -405,7 +436,7 @@ function bodyIn(b) {
     body.urlencoded = kvIn(b.urlencoded);
   } else if (b.mode === 'formdata') {
     body.mode = 'formdata';
-    body.formdata = (Array.isArray(b.formdata) ? b.formdata : []).map((x) => ({
+    body.formdata = (Array.isArray(b.formdata) ? b.formdata : []).filter((x) => x && typeof x === 'object').map((x) => ({
       key: String(x.key ?? ''), value: x.type === 'file' ? '' : String(x.value ?? ''), type: x.type === 'file' ? 'file' : 'text',
       src: Array.isArray(x.src) ? x.src.join(', ') : (x.src || ''), disabled: !!x.disabled, file: null,
     }));
@@ -455,17 +486,18 @@ function scriptsOut(events, pre, test) {
 function docIn(d) { return typeof d === 'string' ? d : (d && d.content) || ''; }
 
 function urlIn(u) {
-  if (!u) return { raw: '', disabled: [] };
-  if (typeof u === 'string') return { raw: u, disabled: [] };
+  if (!u) return { raw: '', disabled: [], pathVars: [] };
+  if (typeof u === 'string') return { raw: u, disabled: [], pathVars: [] };
   const disabled = kvIn(u.query).filter((q) => q.disabled);
-  if (u.raw) return { raw: String(u.raw), disabled };
+  const pathVars = kvIn(u.variable);
+  if (u.raw) return { raw: String(u.raw), disabled, pathVars };
   const host = Array.isArray(u.host) ? u.host.join('.') : (u.host || '');
   const path = Array.isArray(u.path) ? u.path.join('/') : (u.path || '');
   const q = kvIn(u.query).filter((x) => !x.disabled).map((x) => `${x.key}=${x.value}`).join('&');
-  return { raw: `${u.protocol ? u.protocol + '://' : ''}${host}${u.port ? ':' + u.port : ''}${path ? '/' + path : ''}${q ? '?' + q : ''}`, disabled };
+  return { pathVars, raw: `${u.protocol ? u.protocol + '://' : ''}${host}${u.port ? ':' + u.port : ''}${path ? '/' + path : ''}${q ? '?' + q : ''}`, disabled };
 }
 /** Same split Postman uses, so files stay readable by Postman. */
-function urlOut(raw, params) {
+function urlOut(raw, params, pathVars = []) {
   const out = { raw };
   let rest = raw.split('#')[0].split('?')[0];
   const proto = rest.match(/^([a-z][\w+.-]*):\/\//i);
@@ -479,6 +511,8 @@ function urlOut(raw, params) {
   if (path) out.path = path.split('/');
   const query = kvOut(params);
   if (query.length) out.query = query;
+  const variable = pathVars.filter((v) => v.key).map(({ key, value, description }) => ({ key, value, ...(description ? { description } : {}) }));
+  if (variable.length) out.variable = variable;
   return out;
 }
 
@@ -488,7 +522,7 @@ function parseQuery(url) {
   if (i === -1) return [];
   return q.slice(i + 1).split('&').filter((p) => p !== '').map((p) => {
     const eq = p.indexOf('=');
-    return { key: eq === -1 ? p : p.slice(0, eq), value: eq === -1 ? '' : p.slice(eq + 1), disabled: false };
+    return { key: eq === -1 ? p : p.slice(0, eq), value: eq === -1 ? '' : p.slice(eq + 1), disabled: false, keepEq: eq !== -1 };
   });
 }
 function withQuery(url, params) {
@@ -499,9 +533,25 @@ function withQuery(url, params) {
   return base + (q ? '?' + q : '') + hash;
 }
 
+/** ":name" path segments (Postman path variables), never the ":port" after a host. */
+function pathVarNames(url) {
+  const path = String(url).split(/[?#]/)[0].replace(/^[a-z][\w+.-]*:\/\/[^/]*/i, '').replace(/^{{[^{}]+}}/, '');
+  return [...path.matchAll(/\/:([A-Za-z_][\w-]*)/g)].map((m) => m[1]).filter((n, i, a) => a.indexOf(n) === i);
+}
+function syncPathVars(url, existing = []) {
+  return pathVarNames(url).map((key) => existing.find((v) => v.key === key) || { key, value: '' });
+}
+function applyPathVars(url, pathVars, r) {
+  const [beforeQ, ...rest] = String(url).split('?');
+  const map = new Map((pathVars || []).filter((v) => v.key && v.value !== '').map((v) => [v.key, r(v.value)]));
+  const swapped = beforeQ.replace(/(^[a-z][\w+.-]*:\/\/[^/]*|^{{[^{}]+}})?(.*)$/i, (m, origin = '', path) =>
+    origin + path.replace(/\/:([A-Za-z_][\w-]*)/g, (mm, k) => (map.has(k) ? `/${encodeURIComponent(map.get(k))}` : mm)));
+  return [swapped, ...rest].join('?');
+}
+
 function blankEd() {
   return {
-    name: 'Untitled request', method: 'GET', url: '', params: [], headers: [],
+    name: 'Untitled request', method: 'GET', url: '', params: [], pathVars: [], headers: [],
     auth: { type: 'inherit' }, body: blankBody(), pre: '', test: '', docs: '',
   };
 }
@@ -514,6 +564,7 @@ function fromItem(item) {
   const u = urlIn(req.url);
   ed.url = u.raw;
   ed.params = [...parseQuery(u.raw), ...u.disabled];
+  ed.pathVars = syncPathVars(u.raw, u.pathVars);
   ed.headers = kvIn(req.header);
   ed.auth = authIn(req.auth);
   ed.body = bodyIn(req.body);
@@ -524,7 +575,7 @@ function fromItem(item) {
 }
 function toItem(ed, orig = {}) {
   const origReq = orig.request && typeof orig.request === 'object' ? orig.request : {};
-  const req = { ...origReq, method: ed.method, header: kvOut(ed.headers), url: urlOut(ed.url, ed.params) };
+  const req = { ...origReq, method: ed.method, header: kvOut(ed.headers), url: urlOut(ed.url, ed.params, ed.pathVars || []) };
   const auth = authOut(ed.auth);
   if (auth) req.auth = auth; else delete req.auth;
   const body = bodyOut(ed.body);
@@ -544,8 +595,10 @@ function edForStorage(ed) {
 // ---------- collection tree helpers ----------
 function ensureIds(items) {
   let changed = false;
+  for (let i = items.length - 1; i >= 0; i--) {   // drop null/garbage entries from hand-edited files
+    if (!items[i] || typeof items[i] !== 'object') { items.splice(i, 1); changed = true; }
+  }
   for (const it of items) {
-    if (!it || typeof it !== 'object') continue;
     if (!it.id) { it.id = uid(); changed = true; }
     if (Array.isArray(it.item)) changed = ensureIds(it.item) || changed;
   }
@@ -606,7 +659,7 @@ const VAR_RE = /{{\s*([^{}]+?)\s*}}/g;
 function resolve(str, vars) {
   let s = String(str ?? '');
   for (let pass = 0; pass < 4 && s.includes('{{'); pass++) {
-    const next = s.replace(VAR_RE, (m, k) => (k in vars ? vars[k] : (dynamicVar(k) ?? m)));
+    const next = s.replace(VAR_RE, (m, k) => (Object.hasOwn(vars, k) ? vars[k] : (dynamicVar(k) ?? m)));
     if (next === s) break;
     s = next;
   }
@@ -632,6 +685,11 @@ const PM_WORKER = String.raw`
 'use strict';
 self.onmessage = async (e) => {
   const { code, ctx } = e.data;
+  // Self-check: the CSP inherited from the sandbox frame must block loading code/data from anywhere.
+  // If this browser doesn't enforce it, scripts could reach the network, so refuse to run them.
+  let isolated = false;
+  try { importScripts('data:text/javascript,void 0'); } catch (_) { isolated = true; }
+  if (!isolated) { postMessage({ fatal: 'Scripts are disabled: this browser does not isolate the script sandbox from the network.' }); return; }
   const logs = [], tests = [], pending = [];
   const show = (v) => { if (typeof v === 'string') return v; try { return JSON.stringify(v); } catch (_) { return String(v); } };
   const cons = {};
@@ -641,9 +699,10 @@ self.onmessage = async (e) => {
   const str = (v) => (v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
   const VAR_RE = /{{\s*([^{}]+?)\s*}}/g;
   const all = () => Object.assign({}, V.globals, V.collection, V.environment, V.local);
-  const replaceIn = (s) => String(s).replace(VAR_RE, (m, k) => { const a = all(); return k in a ? a[k] : m; });
+  const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  const replaceIn = (s) => String(s).replace(VAR_RE, (m, k) => { const a = all(); return own(a, k) ? a[k] : m; });
   const scope = (o, extra) => Object.assign({
-    get: (k) => o[k], set: (k, v) => { o[k] = str(v); }, unset: (k) => { delete o[k]; }, has: (k) => k in o,
+    get: (k) => o[k], set: (k, v) => { o[k] = str(v); }, unset: (k) => { delete o[k]; }, has: (k) => own(o, k),
     clear: () => { for (const k of Object.keys(o)) delete o[k]; }, toObject: () => Object.assign({}, o), replaceIn,
   }, extra || {});
 
@@ -771,7 +830,7 @@ self.onmessage = async (e) => {
     globals: scope(V.globals),
     variables: {
       get: (k) => { const a = all(); return a[k]; }, set: (k, v) => { V.local[k] = str(v); }, unset: (k) => { delete V.local[k]; },
-      has: (k) => k in all(), toObject: all, replaceIn,
+      has: (k) => own(all(), k), toObject: all, replaceIn,
     },
     request, response,
     info: ctx.info,
@@ -899,7 +958,7 @@ const CT_BY_LANG = { json: 'application/json', text: 'text/plain', xml: 'applica
 /** Builds the exact request to send. Returns { wire } or { error }. */
 function buildWire(ed, req, vars, authInfo) {
   const r = (s) => resolve(s, vars);
-  let url = r(req.url).trim();
+  let url = r(applyPathVars(req.url, ed.pathVars, r)).trim();
   if (url && !/^[a-z][\w+.-]*:\/\//i.test(url)) url = 'http://' + url;
   const headers = req.headers.map(([k, v]) => [r(k).trim(), r(v)]).filter(([k]) => k);
   const has = (n) => headers.some(([k]) => k.toLowerCase() === n);
@@ -979,7 +1038,7 @@ async function persistScopes(cid, before, after, logs) {
       changed = true;
     }
     for (const k of Object.keys(b)) {
-      if (!(k in a)) { const i = values.findIndex((x) => x.key === k); if (i !== -1) { values.splice(i, 1); changed = true; } }
+      if (!Object.hasOwn(a, k)) { const i = values.findIndex((x) => x.key === k); if (i !== -1) { values.splice(i, 1); changed = true; } }
     }
     return changed;
   };
@@ -1021,29 +1080,30 @@ const approvedOrigins = new Set(); // "itemKey -> origin" pairs the user allowed
  * collection's variables and globals. Shadowing doesn't matter: a value that is overridden today
  * takes effect the moment you switch environment. `complete` is false if a collection couldn't be read.
  */
-async function urlVariableNames() {
+async function urlVariableNames(extraPairs = []) {
   let complete = true;
-  const urls = [];
+  const urls = []; // { label, url, colId }
   for (const c of state.colList) {
     try {
       const col = await withCol(c.id);
-      eachRequest(col.item, (it) => urls.push(urlIn(it.request && it.request.url).raw));
+      eachRequest(col.item, (it) => urls.push({ label: `${c.name} / ${it.name || 'Untitled'}`, url: urlIn(it.request && it.request.url).raw, colId: c.id }));
     } catch { complete = false; }
   }
-  for (const t of state.tabs) urls.push(t.ed.url);
+  for (const t of state.tabs) urls.push({ label: `${t.ed.name} (open tab)`, url: t.ed.url, colId: t.cid });
   const names = new Set();
   const add = (s) => { for (const m of String(s ?? '').matchAll(VAR_RE)) names.add(m[1]); };
-  urls.forEach(add);
+  urls.forEach((u) => add(u.url));
   const pairs = [
     ...Object.values(state.envs).flatMap((d) => (d && d.values) || []),
     ...Object.values(state.cols).flatMap((c) => (c && c.variable) || []),
+    ...extraPairs, // values a script just wrote: they may reference further variables
   ];
   for (let grew = true; grew;) {
     const n = names.size;
     for (const p of pairs) if (p && names.has(p.key)) add(p.value);
     grew = names.size > n;
   }
-  return { names, complete };
+  return { names, complete, urls };
 }
 
 /**
@@ -1065,14 +1125,27 @@ async function guardVarChanges(cid, ed, before, after, ask, logs) {
   }
   if (!changed.length) return after;
 
-  const { names, complete } = await urlVariableNames();
+  const written = ['environment', 'collection', 'globals'].flatMap((sc) => Object.entries(after[sc]).map(([key, value]) => ({ key, value })));
+  const { names, complete, urls } = await urlVariableNames(written);
   const risky = changed.filter((c) => names.has(c.k));
   if (!risky.length && complete) return after;
 
-  const show = (v) => (v.length > 70 ? `${v.slice(0, 67)}...` : v);
-  const list = risky.map((c) => `  ${c.scope}.${c.k} ${c.removed ? '(removed)' : `= ${show(c.value)}`}`).join('\n')
+  // The prompt shows FULL values (never truncated: "...", or a long prefix, could hide the real host)
+  // and the resulting destination of each affected request with the current environment.
+  const varsFor = (sc, colId) => merged({ globals: sc.globals, environment: sc.environment, local: {},
+    collection: colId === cid ? sc.collection : colObj(state.cols[colId]) });
+  const moves = [];
+  for (const u of urls) {
+    const from = originOf(resolve(u.url, varsFor(before, u.colId)));
+    const to = originOf(resolve(u.url, varsFor(after, u.colId)));
+    if (from !== to) moves.push(`  ${u.label}:\n    ${from || '(unresolved)'}  →  ${to || '(unresolved)'}`);
+  }
+  const list = risky.map((c) => `  ${c.scope}.${c.k} ${c.removed ? '(removed)' : `= ${c.value}`}`).join('\n')
     || '  (some collections could not be read, so ApiMan cannot check them)';
-  const ok = ask ? await ask(`A script changed variables that decide where requests are sent:\n\n${list}\n\nSave the changes? Only allow this if you trust the scripts in this collection.`) : false;
+  const where = moves.length
+    ? `\n\nWith the current environment, requests would now go to:\n${moves.slice(0, 8).join('\n')}${moves.length > 8 ? `\n  …and ${moves.length - 8} more` : ''}`
+    : '\n\nNo request changes destination with the current environment, but these variables are used in request URLs and would apply when you switch environments.';
+  const ok = ask ? await ask(`A script changed variables that decide where requests are sent:\n\n${list}${where}\n\nSave the changes? Only allow this if you trust the scripts in this collection.`) : false;
   if (ok) return after;
   logs.push({ level: 'warn', text: `Not saved: the script changed variables used in request URLs (${risky.map((c) => `${c.scope}.${c.k}`).join(', ') || 'unverifiable'})${ask ? '' : '. Send the request on its own to approve them'}.`, src: 'ApiMan' });
   return JSON.parse(JSON.stringify(before));
@@ -1114,13 +1187,19 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
   // A pre-request script may not silently send this request (and its auth) to a different server.
   const finalOrigin = originOf(wire.url);
   const approvalKey = `${cid || 'scratch'}:${itemId || ed.name} -> ${finalOrigin}`;
-  if (preScripts.length && finalOrigin !== plannedOrigin && !approvedOrigins.has(approvalKey)) {
-    const msg = `A pre-request script changed where this request goes:\n\n  from ${plannedOrigin || '(unresolved URL)'}\n  to   ${finalOrigin}\n\nSend it there, including your auth headers? Only allow this if you trust the scripts in this collection.`;
+  const hostOf = (hs) => ((hs.find(([k]) => k.toLowerCase() === 'host') || [])[1] || '').trim().toLowerCase();
+  const plannedHost = hostOf(requestSnapshot(ed).headers.map(([k, v]) => [k, resolve(v, merged(before))]));
+  const finalHost = hostOf(wire.headers);
+  const hostChanged = preScripts.length > 0 && finalHost !== plannedHost; // shared servers route by Host
+  if (preScripts.length && (finalOrigin !== plannedOrigin || hostChanged) && !approvedOrigins.has(`${approvalKey} host=${finalHost}`)) {
+    const msg = hostChanged && finalOrigin === plannedOrigin
+      ? `A pre-request script set the Host header to "${finalHost}". Shared servers use it to decide which site receives the request, so this can send your auth headers to a different site.\n\nSend it anyway? Only allow this if you trust the scripts in this collection.`
+      : `A pre-request script changed where this request goes:\n\n  from ${plannedOrigin || '(unresolved URL)'}\n  to   ${finalOrigin}${finalHost ? ` (Host: ${finalHost})` : ''}\n\nSend it there, including your auth headers? Only allow this if you trust the scripts in this collection.`;
     if (!(ask && await ask(msg))) {
       logs.push({ level: 'warn', text: `Blocked: a script redirected the request to ${finalOrigin}.`, src: 'ApiMan' });
       return { error: `Not sent: a pre-request script changed the destination to ${finalOrigin}${ask ? '' : '. Send this request on its own to approve it'}.`, logs, tests, warnings };
     }
-    approvedOrigins.add(approvalKey);
+    approvedOrigins.add(`${approvalKey} host=${finalHost}`);
   }
 
   const target = new URL(wire.url);
@@ -1189,6 +1268,9 @@ async function refreshEnvironments() {
   state.envList = all.filter((e) => e.id !== GLOBALS_ID);
   await Promise.all(all.map(async (e) => { try { state.envs[e.id] = await backend.environments.get(e.id); } catch { /* unreadable */ } }));
   if (state.activeEnv && !state.envs[state.activeEnv]) setActiveEnv('');
+  let chosenBefore = true;
+  try { chosenBefore = localStorage.getItem('apiman:activeEnv') !== null; } catch { /* storage blocked */ }
+  if (!chosenBefore && state.envList.length === 1) setActiveEnv(state.envList[0].id);
 }
 
 async function ensureGlobals() {
@@ -1221,6 +1303,12 @@ function newTab(init) {
 }
 
 const isPhone = () => matchMedia('(max-width: 820px)').matches;
+function toggleSidebar() {
+  state.settings.sideHidden = !state.settings.sideHidden;
+  saveSettings();
+  applyAppearance();
+  toast(state.settings.sideHidden ? 'Sidebar hidden. Cmd/Ctrl+B shows it again.' : 'Sidebar shown');
+}
 /** Phones: the sidebar is a panel you open and close. Wider screens: always visible (no-op). */
 function setSide(open) {
   if (!isPhone()) return;
@@ -1245,9 +1333,37 @@ function openItem(cid, itemId) {
   openTab(newTab({ cid, itemId, ed: fromItem(loc.item) }));
 }
 
+function askSaveBeforeClose(t) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    openDialog({
+      title: 'Save changes?', confirm: true, cancel: false,
+      body: h('p', { class: 'hint field' }, `"${t.ed.name}" has changes that aren't saved.`),
+      buttons: [
+        { label: "Don't save", danger: true, left: true, onClick: () => { finish('discard'); return true; } },
+        { label: 'Cancel', onClick: () => { finish('cancel'); return true; } },
+        { label: 'Save', primary: true, onClick: () => { finish('save'); return true; } },
+      ],
+      onClose: () => finish('cancel'),
+    });
+    $('#dlgFoot .btn.primary').focus();
+  });
+}
+
 async function closeTab(i) {
   const t = state.tabs[i];
-  if (t.dirty && !(await ask({ title: 'Close without saving?', message: `"${t.ed.name}" has changes that aren't saved.`, ok: 'Close without saving', danger: true }))) return;
+  if (t.dirty) {
+    const choice = await askSaveBeforeClose(t);
+    if (choice === 'cancel') return;
+    if (choice === 'save') {
+      state.active = state.tabs.indexOf(t);
+      renderAll();
+      if (!t.cid) { await saveAs(); return; } // the save dialog takes over; the tab stays open
+      await save();
+      if (t.dirty) return; // saving failed
+    }
+  }
   i = state.tabs.indexOf(t);
   if (i === -1) return;
   if (t.sending) t.sending.abort();
@@ -1258,12 +1374,13 @@ async function closeTab(i) {
   renderAll();
 }
 
-const persistTabs = debounce(() => {
+function writeTabs() {
   ls.set('apiman:tabs', {
     active: state.active,
     tabs: state.tabs.map((t) => (t.cid ? { cid: t.cid, itemId: t.itemId, ed: t.dirty ? edForStorage(t.ed) : null } : { ed: edForStorage(t.ed) })),
   });
-}, 300);
+}
+const persistTabs = debounce(writeTabs, 300);
 
 async function restoreTabs() {
   const saved = ls.get('apiman:tabs', null);
@@ -1304,11 +1421,14 @@ function renderSidebar() {
   if (state.view === 'environments') body.replaceChildren(...renderEnvList());
   else if (state.view === 'history') body.replaceChildren(...renderHistoryList());
   else body.replaceChildren(...renderCollectionTree());
-  if (state.refocus) {
-    const el = body.querySelector(`[data-key="${CSS.escape(state.refocus)}"]`);
-    state.refocus = null;
-    if (el) el.focus();
-  }
+  // Roving tabindex: the tree is ONE tab stop; arrows move inside it. Row action buttons are reached with the menu key.
+  const rows = $$('.row', body);
+  rows.forEach((r) => { r.tabIndex = -1; $$('button', r).forEach((b) => { b.tabIndex = -1; }); });
+  const want = state.refocus || state.focusKey;
+  const current = (want && rows.find((r) => r.dataset.key === want)) || rows.find((r) => r.classList.contains('active')) || rows[0];
+  if (current) current.tabIndex = 0;
+  if (state.refocus && current) current.focus();
+  state.refocus = null;
 }
 const indent = (depth) => `padding-left: calc(var(--s2) + ${depth} * 20px)`; // 20px = caret + gap, so children sit under their parent's name
 
@@ -1449,7 +1569,8 @@ function renderHistoryList() {
 function historyRow(e) {
   const url = e.url || '';
   const path = url.replace(/^\s*{{[^{}]+}}/, '').replace(/^[a-z][\w+.-]*:\/\/[^/]*/i, '') || url || e.name;
-  const time = new Date(e.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const mins = Math.round((Date.now() - e.at) / 60000);
+  const time = mins < 1 ? 'now' : mins < 60 ? `${mins}m` : mins < 1440 ? `${Math.floor(mins / 60)}h` : new Date(e.at).toLocaleDateString([], { month: 'short', day: 'numeric' });
   return h('div', {
     class: 'row', tabindex: '0', role: 'button', 'data-key': `h:${e.id}`, title: `${e.method} ${url}\n${new Date(e.at).toLocaleString()}`,
     onclick: () => openFromHistory(e), onkeydown: (ev) => { if (ev.key === 'Enter') openFromHistory(e); },
@@ -1610,6 +1731,19 @@ async function duplicateItem(cid, id) {
   openItem(cid, copy.id);
 }
 
+/** Tabs of deleted items close; tabs with unsaved edits stay open as unsaved drafts instead. */
+function keepDirtyAsDrafts(affected) {
+  let kept = 0;
+  state.tabs = state.tabs.filter((t) => {
+    if (!affected(t)) return true;
+    if (!t.dirty) return false;
+    Object.assign(t, { cid: null, itemId: null });
+    kept++;
+    return true;
+  });
+  if (kept) toast(`${kept} tab${kept > 1 ? 's' : ''} with unsaved changes ${kept > 1 ? 'were' : 'was'} kept as unsaved draft${kept > 1 ? 's' : ''}.`);
+}
+
 async function deleteItem(cid, id) {
   const loc = locate(state.cols[cid], id);
   const n = isFolder(loc.item) ? countRequests(loc.item.item) : 0;
@@ -1623,7 +1757,7 @@ async function deleteItem(cid, id) {
   const gone = new Set();
   const collect = (it) => { gone.add(it.id); if (Array.isArray(it.item)) it.item.forEach(collect); };
   collect(loc.item);
-  state.tabs = state.tabs.filter((t) => !(t.cid === cid && gone.has(t.itemId)));
+  keepDirtyAsDrafts((t) => t.cid === cid && gone.has(t.itemId));
   state.active = Math.min(state.active, state.tabs.length - 1);
   persistTabs();
   renderAll();
@@ -1657,7 +1791,7 @@ async function deleteCollection(cid, name) {
   if (!(await ask({ title: 'Delete collection?', message: `"${name}" and every request in it will be deleted${backend.mode === 'local' ? ` (the file ${cid} in your data folder)` : ''}.`, ok: 'Delete collection', danger: true }))) return;
   await backend.collections.remove(cid);
   delete state.cols[cid];
-  state.tabs = state.tabs.filter((t) => t.cid !== cid);
+  keepDirtyAsDrafts((t) => t.cid === cid);
   state.active = Math.min(state.active, state.tabs.length - 1);
   persistTabs();
   await refreshCollections();
@@ -1692,7 +1826,7 @@ function renderTabs() {
       },
         h('span', { class: `mtag ${t.ed.method}` }, t.ed.method),
         h('span', { class: 'tname' }, t.ed.name),
-        t.dirty ? h('span', { class: 'dot', title: 'Unsaved changes' }) : null,
+        h('span', { class: `dot ${t.dirty ? '' : 'off'}`, role: t.dirty ? 'img' : null, 'aria-label': t.dirty ? 'Unsaved changes' : null, title: t.dirty ? 'Unsaved changes' : null }),
         h('button', { class: 'x', title: 'Close tab', 'aria-label': `Close ${t.ed.name}`, onclick: (e) => { e.stopPropagation(); closeTab(i); } }, icon('x')));
     }),
     h('button', { class: 'newtab', title: 'New request tab', 'aria-label': 'New request tab', onclick: () => openTab(newTab()) }, icon('plus')));
@@ -1774,7 +1908,7 @@ function renderResolved() {
   let last = 0;
   for (const m of t.ed.url.matchAll(VAR_RE)) {
     parts.push(t.ed.url.slice(last, m.index));
-    const v = m[1] in vars ? vars[m[1]] : dynamicVar(m[1]);
+    const v = Object.hasOwn(vars, m[1]) ? vars[m[1]] : dynamicVar(m[1]);
     parts.push(v === undefined ? h('span', { class: 'bad', title: 'Not defined in the environment, collection or Globals' }, m[0]) : (m[1].startsWith('$') ? `‹${m[1]}›` : v));
     last = m.index + m[0].length;
   }
@@ -1792,8 +1926,12 @@ function renderCounts() {
   // Numbers count things; a dot means "configured".
   $('#cntAuth').classList.toggle('dot', ['bearer', 'basic', 'apikey'].includes(ed.auth.type));
   $('#cntAuth').textContent = $('#cntAuth').classList.contains('dot') ? 'set' : '';
-  $('#cntBody').classList.toggle('dot', ed.body.mode !== 'none');
-  $('#cntBody').textContent = ed.body.mode !== 'none' ? 'set' : '';
+  const b = ed.body;
+  const hasBody = (b.mode === 'raw' && b.raw.trim()) || (b.mode === 'urlencoded' && b.urlencoded.some((r) => r.key))
+    || (b.mode === 'formdata' && b.formdata.some((r) => r.key)) || (b.mode === 'file' && (b.fileObj || b.fileSrc))
+    || (b.mode === 'graphql' && b.gqlQuery.trim()) || b.mode === 'unsupported';
+  $('#cntBody').classList.toggle('dot', !!hasBody);
+  $('#cntBody').textContent = hasBody ? 'set' : '';
   const hasScript = !!(ed.pre.trim() || ed.test.trim());
   $('#cntScripts').classList.toggle('dot', hasScript);
   $('#cntScripts').textContent = hasScript ? 'set' : '';
@@ -1801,8 +1939,8 @@ function renderCounts() {
 
 function switchPane(tabsSel, name) {
   const tabs = $(tabsSel);
-  $$('.tab', tabs).forEach((b) => { const on = b.dataset.tab === name; b.classList.toggle('on', on); b.setAttribute('aria-selected', String(on)); });
-  $$(':scope > .pane', tabs.parentElement).forEach((p) => { p.hidden = p.dataset.pane !== name; });
+  $$('.tab', tabs).forEach((b) => { const on = b.dataset.tab === name; b.classList.toggle('on', on); b.setAttribute('aria-selected', String(on)); if (on) b.scrollIntoView({ block: 'nearest', inline: 'nearest' }); });
+  $$(':scope > .pane', tabs.parentElement).forEach((p) => { p.hidden = p.dataset.pane !== name; if (!p.hidden) refreshEditors(p); });
 }
 
 // ---------- key/value table ----------
@@ -1872,6 +2010,17 @@ function kvTable(container, rows, opts = {}) {
 // ---------- request panes ----------
 function renderParams() {
   const t = cur();
+  t.ed.pathVars = syncPathVars(t.ed.url, t.ed.pathVars || []);
+  const pv = $('#pathVarsKv');
+  if (!t.ed.pathVars.length) pv.replaceChildren();
+  else {
+    pv.replaceChildren(h('div', { class: 'label section-label' }, 'Path variables'),
+      h('table', { class: 'kv' }, h('thead', null, h('tr', null, h('th', null, 'Variable'), h('th', null, 'Value'))),
+        h('tbody', null, t.ed.pathVars.map((v) => h('tr', null,
+          h('td', null, h('input', { type: 'text', value: `:${v.key}`, readonly: true, tabindex: '-1', 'aria-label': 'Path variable' })),
+          h('td', null, h('input', { type: 'text', value: v.value, placeholder: 'Value', spellcheck: 'false', 'aria-label': `Value for :${v.key}`,
+            oninput: (e) => { v.value = e.target.value; markDirty(); } })))))));
+  }
   kvTable($('#paramsKv'), t.ed.params, {
     placeholders: ['Query parameter', 'Value'],
     onChange: () => {
@@ -1900,7 +2049,7 @@ function authForm(model, { allowInherit, inheritText, onChange }) {
         oninput: (e) => { model[key] = e.target.value; onChange(); },
       });
       return h('div', { class: 'field' }, h('label', null, label),
-        secret ? h('div', { class: 'field-row' }, input,
+        secret ? h('div', { class: 'secret-field' }, input,
           h('button', { class: 'btn icon', type: 'button', title: 'Show / hide', 'aria-label': 'Show or hide', onclick: (e) => { reveal = !reveal; input.type = reveal ? 'text' : 'password'; e.currentTarget.replaceChildren(icon(reveal ? 'eyeOff' : 'eye')); } }, icon('eye')))
           : input);
     };
@@ -1977,7 +2126,8 @@ function renderBody() {
   });
   if (b.mode === 'none') box.replaceChildren(h('p', { class: 'hint' }, 'This request has no body.'));
   else if (b.mode === 'raw') {
-    box.replaceChildren(area('raw', b.lang === 'json' ? '{\n  "name": "{{$randomFirstName}}"\n}' : ''),
+    box.replaceChildren(codeEditor({ value: b.raw, mode: b.lang, label: 'Request body', placeholder: b.lang === 'json' ? '{ "name": "{{$randomFirstName}}" }' : 'Request body',
+      onChange: (v) => { b.raw = v; renderCounts(); markDirty(); } }),
       b.lang === 'json' ? h('button', { class: 'btn small editor-corner', onclick: () => {
         try { b.raw = JSON.stringify(JSON.parse(b.raw), null, 2); renderBody(); markDirty(); } catch (e) { toast(`Not valid JSON: ${e.message}`); }
       } }, 'Beautify') : null);
@@ -1991,10 +2141,46 @@ function renderBody() {
       h('button', { class: 'btn', onclick: () => pick.click() }, b.fileObj ? 'Change file' : 'Choose file'), pick));
   } else if (b.mode === 'graphql') {
     box.replaceChildren(
-      h('div', { class: 'field' }, h('label', null, 'Query'), area('gqlQuery', 'query {\n  users { id name }\n}', 10)),
-      h('div', { class: 'field' }, h('label', null, 'Variables (JSON)'), area('gqlVars', '{ "id": 1 }', 5)));
+      h('div', { class: 'field grow' }, h('label', null, 'Query'), codeEditor({ value: b.gqlQuery, mode: 'graphql', label: 'GraphQL query', placeholder: 'query { users { id name } }', onChange: (v) => { b.gqlQuery = v; renderCounts(); markDirty(); } })),
+      h('div', { class: 'field' }, h('label', null, 'Variables (JSON)'), codeEditor({ value: b.gqlVars, mode: 'json', label: 'GraphQL variables', placeholder: '{ "id": 1 }', cls: 'short', onChange: (v) => { b.gqlVars = v; markDirty(); } })));
   } else box.replaceChildren(h('p', { class: 'note warn' }, `The "${b.unsupported.mode}" body from Postman isn't supported. It's kept in the file but not sent. Pick another body type to replace it.`));
 }
+
+const CM_MODES = {
+  json: { name: 'javascript', json: true }, javascript: 'javascript', xml: 'xml', html: 'htmlmixed', text: null,
+  graphql: 'javascript', shell: 'shell', python: 'python', java: 'text/x-java',
+};
+/**
+ * A code editor with line numbers, syntax colours, bracket matching, search (Cmd/Ctrl+F) and, when `fold`
+ * is set, collapsible JSON/XML blocks. Tab indents; Esc leaves the editor so keyboard users are never trapped.
+ */
+function codeEditor({ value = '', mode = 'text', readOnly = false, onChange, placeholder = '', fold = false, label = 'Code', wrap = false, cls = '' }) {
+  const host = h('div', { class: `code-editor ${readOnly ? 'readonly' : ''} ${cls}` });
+  if (!window.CodeMirror) {
+    const ta = h(readOnly ? 'pre' : 'textarea', readOnly ? { class: 'out' } : { class: 'code', spellcheck: 'false', wrap: 'off', placeholder, 'aria-label': label, value, oninput: (e) => onChange && onChange(e.target.value) }, readOnly ? value : null);
+    host.append(ta);
+    return host;
+  }
+  const tab = Number(state.settings.tabSize) || 2;
+  const cm = CodeMirror(host, {
+    value: String(value ?? ''), mode: CM_MODES[mode] ?? null, readOnly, lineNumbers: true, lineWrapping: wrap,
+    tabSize: tab, indentUnit: tab, indentWithTabs: false, matchBrackets: true, autoCloseBrackets: !readOnly,
+    styleActiveLine: !readOnly, foldGutter: fold, gutters: fold ? ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'] : ['CodeMirror-linenumbers'],
+    placeholder, viewportMargin: 30, screenReaderLabel: label, cursorBlinkRate: readOnly ? -1 : 530,
+    extraKeys: {
+      Tab: (c) => (c.somethingSelected() ? c.indentSelection('add') : c.replaceSelection(' '.repeat(c.getOption('indentUnit')), 'end')),
+      'Shift-Tab': (c) => c.indentSelection('subtract'),
+      'Cmd-F': 'findPersistent', 'Ctrl-F': 'findPersistent',
+      Esc: (c) => c.getInputField().blur(),
+    },
+  });
+  if (onChange) cm.on('change', (c, ch) => { if (ch.origin !== 'setValue') onChange(c.getValue()); });
+  host.cm = cm;
+  requestAnimationFrame(() => cm.refresh());
+  return host;
+}
+/** CodeMirror can't measure itself while hidden: refresh the editors inside a pane once it is shown. */
+function refreshEditors(root) { $$('.CodeMirror', root).forEach((el) => el.CodeMirror && el.CodeMirror.refresh()); }
 
 function tabIndent(e) {
   if (e.key !== 'Tab' || e.shiftKey) return; // Shift+Tab still moves focus, so keyboard users are never trapped
@@ -2005,13 +2191,25 @@ function tabIndent(e) {
   ta.dispatchEvent(new Event('input'));
 }
 
+let scriptEditor = null;
 function renderScripts() {
   const t = cur();
   $$('[data-script]').forEach((c) => { const on = c.dataset.script === t.scriptKind; c.classList.toggle('on', on); c.setAttribute('aria-checked', String(on)); });
-  $('#scriptText').value = t.scriptKind === 'pre' ? t.ed.pre : t.ed.test;
-  $('#scriptText').placeholder = t.scriptKind === 'pre'
-    ? '// Runs before the request is sent\npm.environment.set("requestId", pm.variables.replaceIn("{{$guid}}"));'
-    : '// Runs after the response arrives\npm.test("Status is 200", () => pm.response.to.have.status(200));';
+  if (!scriptEditor) {
+    scriptEditor = codeEditor({ mode: 'javascript', label: 'Script', onChange: (v) => { const tt = cur(); tt.ed[tt.scriptKind === 'pre' ? 'pre' : 'test'] = v; renderCounts(); markDirty(); } });
+    $('#scriptEditor').replaceChildren(scriptEditor);
+  }
+  const value = t.scriptKind === 'pre' ? t.ed.pre : t.ed.test;
+  const placeholder = t.scriptKind === 'pre' ? '// Runs before the request is sent' : '// Runs after the response arrives, e.g. pm.test(...)';
+  if (scriptEditor.cm) {
+    if (scriptEditor.cm.getValue() !== value) scriptEditor.cm.setValue(value);
+    scriptEditor.cm.setOption('placeholder', placeholder);
+    scriptEditor.cm.clearHistory();
+  } else {
+    const ta = scriptEditor.querySelector('textarea');
+    ta.value = value;
+    ta.placeholder = placeholder;
+  }
 }
 
 const SNIPPETS = {
@@ -2128,16 +2326,17 @@ function bodyView(res, view) {
   }
   const text = res.body ?? '';
   if (!text) return h('p', { class: 'hint' }, 'The response body is empty.');
+  const wrap = state.settings.wrap !== false;
+  const langOf = () => (/json/.test(ct) ? 'json' : /html/.test(ct) ? 'html' : /xml|svg/.test(ct) ? 'xml' : /javascript/.test(ct) ? 'javascript' : 'text');
   if (view === 'pretty') {
     try {
       const pretty = JSON.stringify(JSON.parse(text), null, 2);
-      const pre = h('pre', { class: 'out' });
-      if (pretty.length < 400000) pre.innerHTML = highlightJson(pretty); // escaped before highlighting
-      else pre.textContent = pretty;
-      return pre;
-    } catch { /* not JSON */ }
+      if (pretty.length > 2_000_000) return h('pre', { class: 'out' }, pretty); // keep very large bodies fast
+      return codeEditor({ value: pretty, mode: 'json', readOnly: true, fold: true, wrap, label: 'Response body', cls: 'fill' });
+    } catch { /* not JSON: show as-is below */ }
   }
-  return h('pre', { class: 'out' }, text);
+  if (text.length > 2_000_000) return h('pre', { class: 'out' }, text);
+  return codeEditor({ value: text, mode: view === 'pretty' ? langOf() : 'text', readOnly: true, fold: view === 'pretty', wrap, label: 'Response body', cls: 'fill' });
 }
 
 function escapeHtml(s) { return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -2270,9 +2469,17 @@ async function saveAs() {
 // =====================================================================================================
 // Dialogs
 // =====================================================================================================
-function openDialog({ title, body, buttons = [], wide = false, onClose }) {
+function openDialog({ title, body, buttons = [], wide = false, confirm = false, tall = false, cancel = 'Cancel', onClose }) {
   const dlg = $('#dlg');
   dlg.classList.toggle('wide', wide);
+  dlg.classList.toggle('confirm', confirm);
+  $('#dlgBody').classList.toggle('tall', tall); // dialogs with tabs keep one height, so nothing jumps under the cursor
+  // Every dialog gets the same footer: [destructive/left actions]  ...  Cancel  Primary
+  if (cancel && !buttons.some((b) => b.label === 'Cancel')) {
+    const at = buttons.findIndex((b) => b.primary || b.solid);
+    buttons = [...buttons];
+    buttons.splice(at === -1 ? buttons.length : at, 0, { label: cancel, onClick: () => true });
+  }
   $('#dlgTitle').textContent = title;
   $('#dlgBody').replaceChildren(...[body].flat().filter((x) => x != null && x !== false));
   linkLabels($('#dlgBody'));
@@ -2287,8 +2494,9 @@ function openDialog({ title, body, buttons = [], wide = false, onClose }) {
   dlg.onclose = () => { if (onClose) onClose(); };
   if (!dlg.open) dlg.showModal();
   // Start on the first field, not on the close button.
-  const first = $('#dlgBody').querySelector('input:not([type=checkbox]):not([type=file]):not([type=range]):not([disabled]), select, textarea');
+  const first = $('#dlgBody').querySelector('input:not([type=checkbox]):not([type=file]):not([type=range]):not([disabled]):not([readonly]), select, textarea');
   if (first) first.focus();
+  else ($('#dlgFoot .btn.primary') || $('#dlgFoot .btn:last-child') || $('#dlg')).focus();
 }
 function closeDialog() { $('#dlg').close(); }
 
@@ -2310,6 +2518,7 @@ function ask({ title, message, input, ok = 'OK', danger = false, pre = false }) 
         message ? h('p', { class: `hint field ${pre ? 'pre-line' : ''}` }, message) : null,
         field ? h('div', { class: 'field' }, h('label', null, input.label), field) : null,
       ],
+      confirm: true,
       buttons: [
         { label: 'Cancel', onClick: () => { settle(field ? null : false); return true; } },
         { label: ok, primary: !danger, danger, solid: danger, onClick: submit },
@@ -2317,7 +2526,7 @@ function ask({ title, message, input, ok = 'OK', danger = false, pre = false }) 
       onClose: () => settle(field ? null : false),
     });
     if (field) field.select();
-    else $('#dlgFoot .btn:last-child').focus();
+    else $(danger ? '#dlgFoot .btn:first-child' : '#dlgFoot .btn:last-child').focus(); // Enter never confirms something destructive
   });
 }
 
@@ -2339,7 +2548,7 @@ function dlgTabs(defs) {
     type: 'button', class: `seg-btn ${i === 0 ? 'on' : ''}`, role: 'tab', 'aria-selected': String(i === 0),
     onclick: (e) => {
       $$('.seg-btn', bar).forEach((b) => { const on = b === e.currentTarget; b.classList.toggle('on', on); b.setAttribute('aria-selected', String(on)); });
-      panes.forEach((p) => { p.hidden = p.dataset.pane !== d.key; });
+      panes.forEach((p) => { p.hidden = p.dataset.pane !== d.key; if (!p.hidden) refreshEditors(p); });
     },
   }, d.label)));
   return [bar, ...panes];
@@ -2347,7 +2556,7 @@ function dlgTabs(defs) {
 
 function scriptsPair(model) {
   const mk = (key, label, ph) => h('div', { class: 'field' }, h('label', null, label),
-    h('textarea', { class: 'code', rows: 8, spellcheck: 'false', placeholder: ph, value: model[key], oninput: (e) => { model[key] = e.target.value; }, onkeydown: tabIndent }));
+    codeEditor({ value: model[key], mode: 'javascript', label, placeholder: ph.split('\n')[0], cls: 'short', onChange: (v) => { model[key] = v; } }));
   return [
     mk('pre', 'Pre-request: runs before every request inside', '// e.g. refresh a timestamp\npm.collectionVariables.set("now", Date.now());'),
     mk('test', 'Tests: run after every request inside', 'pm.test("No server errors", () => pm.expect(pm.response.code).to.be.below(500));'),
@@ -2516,14 +2725,23 @@ function openImport(start = 'file') {
   const pasteIn = h('textarea', { class: 'code', rows: 10, spellcheck: 'false', placeholder: 'Paste a Postman collection or environment JSON' });
   const defs = [
     { key: 'file', label: 'File', content: [drop, h('p', { class: 'hint' }, 'In Postman: ⋯ on a collection → Export → Collection v2.1. Environments: ⋯ → Export.')] },
-    { key: 'curl', label: 'cURL', content: [curlIn, h('div', { class: 'dlg-inline-actions' }, h('button', { type: 'button', class: 'btn primary', onclick: () => {
+    { key: 'curl', label: 'cURL', content: [curlIn, h('div', { hidden: true }, h('button', { type: 'button', class: 'btn primary', 'data-import': 'curl', onclick: () => {
       try { const ed = parseCurl(curlIn.value); closeDialog(); openTab(newTab({ ed, dirty: true })); toast('Imported from cURL'); } catch (e) { toast(e.message); }
     } }, 'Import cURL'))] },
-    { key: 'paste', label: 'Paste JSON', content: [pasteIn, h('div', { class: 'dlg-inline-actions' }, h('button', { type: 'button', class: 'btn primary', onclick: async () => {
+    { key: 'paste', label: 'Paste JSON', content: [pasteIn, h('div', { hidden: true }, h('button', { type: 'button', class: 'btn primary', 'data-import': 'paste', onclick: async () => {
       try { await importJson(JSON.parse(pasteIn.value), 'pasted JSON'); closeDialog(); } catch (e) { toast(e.message); }
     } }, 'Import'))] },
   ];
-  openDialog({ title: 'Import', body: dlgTabs(defs) });
+  const tabsAndPanes = dlgTabs(defs);
+  openDialog({
+    title: 'Import', tall: true, body: tabsAndPanes,
+    buttons: [{ label: 'Import', primary: true, onClick: () => {
+      const active = [...tabsAndPanes[0].children].findIndex((b) => b.classList.contains('on'));
+      if (active === 0) fileIn.click();
+      else $(`#dlgBody [data-import="${active === 1 ? 'curl' : 'paste'}"]`).click();
+      return false;
+    } }],
+  });
   if (start !== 'file') $$('#dlgBody .dlg-tabs .seg-btn')[start === 'curl' ? 1 : 2].click();
   setTimeout(() => { if (start === 'curl') curlIn.focus(); }, 50);
 }
@@ -2695,8 +2913,24 @@ function codeWire(mask) {
   if (built.error) return built;
   const w = built.wire;
   if (mask) {
-    w.headers = w.headers.map(([k, v]) => [k, SECRET_HEADER.test(k) ? (/^authorization$/i.test(k) ? v.replace(/^(\w+\s+).+$/, '$1••••••') : '••••••') : v]);
     const a = effectiveAuth(t.ed, t.cid, t.itemId).auth;
+    const vars = merged(sc);
+    const apiKeyHeader = a.type === 'apikey' && a.in !== 'query' ? resolve(a.key, vars).toLowerCase() : '';
+    w.headers = w.headers.map(([k, v]) => [k, SECRET_HEADER.test(k) || k.toLowerCase() === apiKeyHeader
+      ? (/^authorization$/i.test(k) ? v.replace(/^(\w+\s+).+$/, '$1••••••') : '••••••') : v]);
+    // values of Secret variables (and auth secrets) are hidden wherever they were substituted
+    const secrets = new Set();
+    const addSecret = (v) => { if (v && String(v).length >= 3) secrets.add(String(v)); };
+    for (const doc of [state.envs[state.activeEnv], state.envs[GLOBALS_ID]]) for (const v of (doc && doc.values) || []) if (v.type === 'secret') addSecret(v.value);
+    for (const v of (t.cid && state.cols[t.cid] && state.cols[t.cid].variable) || []) if (v.type === 'secret') addSecret(v.value);
+    if (a.type === 'bearer') addSecret(resolve(a.token, vars));
+    if (a.type === 'basic') addSecret(resolve(a.password, vars));
+    if (a.type === 'apikey') addSecret(resolve(a.value, vars));
+    const hide = (str) => [...secrets].sort((x, y) => y.length - x.length).reduce((acc, sec) => acc.split(sec).join('••••••'), String(str));
+    w.url = hide(w.url);
+    w.headers = w.headers.map(([k, v]) => [k, hide(v)]);
+    if (w.body.kind === 'text') w.body = { ...w.body, text: hide(w.body.text) };
+    if (w.body.kind === 'formdata') w.body = { ...w.body, fields: w.body.fields.map((f) => (f.file ? f : { ...f, value: hide(f.value) })) };
     if (a.type === 'apikey' && a.in === 'query') { try { const u = new URL(w.url); u.searchParams.set(resolve(a.key, merged(sc)), '••••••'); w.url = u.toString(); } catch { /* keep */ } }
   }
   return { wire: w };
@@ -2769,7 +3003,10 @@ function openCode() {
   if (!t) return;
   let lang = ls.get('apiman:codeLang', 'curl');
   const mask = h('input', { type: 'checkbox', checked: true });
-  const pre = h('pre', { class: 'codegen' });
+  const LANG_MODE = { curl: 'shell', fetch: 'javascript', python: 'python', java: 'java' };
+  const viewer = codeEditor({ readOnly: true, label: 'Generated code', cls: 'codegen' });
+  const pre = { set textContent(v) { if (viewer.cm) { viewer.cm.setValue(v); viewer.cm.setOption('mode', CM_MODES[LANG_MODE[lang]] ?? null); } else viewer.querySelector('pre').textContent = v; },
+                get textContent() { return viewer.cm ? viewer.cm.getValue() : viewer.querySelector('pre').textContent; } };
   const tabsBar = h('div', { class: 'seg dlg-tabs', role: 'tablist' });
   const draw = () => {
     tabsBar.replaceChildren(...Object.entries(GENERATORS).map(([k, g]) => h('button', {
@@ -2783,7 +3020,7 @@ function openCode() {
   openDialog({
     title: 'Generate code',
     wide: true,
-    body: [tabsBar, pre,
+    body: [tabsBar, viewer,
       h('label', { class: 'check dlg-after' }, mask, h('span', null, 'Hide secrets', h('small', null, 'Masks tokens, API keys and cookies, so the code is safe to paste into chats and tickets.')))],
     buttons: [{ label: 'Copy', primary: true, onClick: async () => { await navigator.clipboard.writeText(pre.textContent); toast('Code copied'); return false; } }],
   });
@@ -2813,7 +3050,7 @@ async function openRunner(cid, folderId) {
   const bar = h('div', { class: 'bar' }, h('div', { style: 'width:0%' }));
   const tbody = h('tbody');
   const results = h('div', { hidden: true }, summary, bar,
-    h('table', { class: 'grid' }, h('thead', null, h('tr', null, ...['#', 'Request', 'Status', 'Time', 'Tests'].map((x) => h('th', null, x)))), tbody));
+    h('table', { class: 'grid' }, h('thead', null, h('tr', null, h('th', { class: 'tight' }, '#'), h('th', null, 'Request'), ...['Status', 'Time', 'Tests'].map((x) => h('th', { class: 'num' }, x)))), tbody));
   let ctrl = null;
 
   openDialog({
@@ -2868,13 +3105,13 @@ async function openRunner(cid, folderId) {
           if (out.res && !out.error) totalMs += out.res.timeMs;
           const sc = out.error ? 'err' : `s${String(out.res.status)[0]}`;
           tbody.append(h('tr', null,
-            h('td', null, iterations > 1 ? `${it + 1}.${items.indexOf(item) + 1}` : String(n)),
+            h('td', { class: 'tight' }, iterations > 1 ? `${it + 1}.${items.indexOf(item) + 1}` : String(n)),
             h('td', null, h('span', { class: `mtag ${ed.method}` }, ed.method), ' ', ed.name,
               ...out.tests.filter((x) => x.passed === false).map((x) => h('div', { class: 'runner-fail' }, h('span', { class: 'pill err' }, 'Fail'), `${x.name}: ${x.error}`)),
               out.error ? h('div', { class: 'runner-fail' }, h('span', { class: 'pill err' }, 'Error'), out.error) : null),
-            h('td', null, h('span', { class: `status-code ${out.error ? 's-err' : sc}` }, out.error ? 'Error' : String(out.res.status))),
-            h('td', null, out.res && !out.error ? fmtMs(out.res.timeMs) : ''),
-            h('td', null, out.tests.length ? `${tp}/${out.tests.length}` : '–')));
+            h('td', { class: 'num' }, h('span', { class: `status-code ${out.error ? 's-err' : sc}` }, out.error ? 'Error' : String(out.res.status))),
+            h('td', { class: 'num' }, out.res && !out.error ? fmtMs(out.res.timeMs) : '–'),
+            h('td', { class: 'num' }, out.tests.length ? `${tp}/${out.tests.length}` : '–')));
           bar.firstChild.style.width = `${(n / total) * 100}%`;
           bar.classList.toggle('has-fail', fail + errors + c5 > 0);
           bar.classList.toggle('has-warn', !(fail + errors + c5) && c4 > 0);
@@ -2913,15 +3150,30 @@ function openSettings() {
   const previewTheme = () => {
     if (draft.theme === 'light' || draft.theme === 'dark') document.documentElement.dataset.theme = draft.theme;
     else delete document.documentElement.dataset.theme;
+    drawSwatches();
+    preview();
   };
-  const slider = (key, min, max, step, fmt, label) => {
-    const out = h('output', { class: 'mono' }, fmt(draft[key]));
-    const input = h('input', {
-      type: 'range', min: String(min), max: String(max), step: String(step), value: String(draft[key]), 'aria-label': label,
-      oninput: (e) => { draft[key] = Number(e.target.value); out.textContent = fmt(draft[key]); preview(); },
-    });
-    return h('div', { class: 'field' }, h('span', { class: 'label' }, label), h('div', { class: 'slider-row' }, input, out));
+  // Every size is a slider AND an exact number field, kept in sync.
+  const slider = (key, min, max, step, unit, label, scale = 1) => {
+    const shown = (v) => String(Math.round(v * scale * 100) / 100);
+    const num = h('input', { type: 'number', class: 'num-input', min: String(min * scale), max: String(max * scale), step: String(step * scale), value: shown(draft[key]), 'aria-label': `${label} (${unit})` });
+    const range = h('input', { type: 'range', min: String(min), max: String(max), step: String(step), value: String(draft[key]), 'aria-label': label });
+    range.addEventListener('input', () => { draft[key] = Number(range.value); num.value = shown(draft[key]); preview(); });
+    num.addEventListener('change', () => { draft[key] = clampNum(Number(num.value) / scale, min, max, draft[key]); range.value = String(draft[key]); num.value = shown(draft[key]); preview(); });
+    return h('div', { class: 'field' }, h('span', { class: 'label' }, label), h('div', { class: 'slider-row' }, range, num, h('span', { class: 'unit' }, unit)));
   };
+  const select = (key, options, label) => h('div', { class: 'field' }, h('label', null, label),
+    h('select', { onchange: (e) => { draft[key] = e.target.value; preview(); } },
+      ...Object.entries(options).map(([v, [l]]) => h('option', { value: v, ...(draft[key] === v ? { selected: true } : {}) }, l))));
+  if (draft.densityScale == null) draft.densityScale = DENSITY[draft.density] || 1;
+  const swatches = h('div', { class: 'swatches', role: 'radiogroup', 'aria-label': 'Accent colour' });
+  const custom = h('input', { type: 'color', value: draft.accentCustom || '#2560cf', 'aria-label': 'Custom accent colour', title: 'Custom colour',
+    oninput: (e) => { draft.accent = 'custom'; draft.accentCustom = e.target.value; drawSwatches(); preview(); } });
+  const drawSwatches = () => swatches.replaceChildren(...Object.entries(ACCENTS).map(([k, [light, darkC]]) => h('button', {
+    type: 'button', class: `swatch ${draft.accent === k ? 'on' : ''}`, role: 'radio', 'aria-checked': String(draft.accent === k), 'aria-label': k, title: k,
+    style: `--sw: ${effectiveTheme(draft) === 'dark' ? darkC : light}`, onclick: () => { draft.accent = k; drawSwatches(); preview(); },
+  })), h('label', { class: `swatch custom ${draft.accent === 'custom' ? 'on' : ''}`, title: 'Custom colour' }, custom));
+  drawSwatches();
   const timeout = h('input', { type: 'number', min: '1', max: '600', value: String(s.timeout) });
   const follow = h('input', { type: 'checkbox', checked: s.followRedirects });
   const hist = h('input', { type: 'checkbox', checked: s.history });
@@ -2929,17 +3181,25 @@ function openSettings() {
   const wrap = h('input', { type: 'checkbox', checked: draft.wrap !== false, onchange: (e) => { draft.wrap = e.target.checked; preview(); } });
 
   const appearance = [
-    h('div', { class: 'field' }, h('span', { class: 'label' }, 'Theme'), seg('theme', [['system', 'Match system'], ['light', 'Light'], ['dark', 'Dark']], 'Theme')),
     h('div', { class: 'grid-2' },
-      slider('textScale', 0.85, 1.3, 0.05, (v) => `${Math.round(v * 100)}%`, 'Interface text size'),
-      slider('codeSize', 11, 20, 1, (v) => `${v}px`, 'Code and body text size')),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Theme'), seg('theme', [['system', 'Match system'], ['light', 'Light'], ['dark', 'Dark']], 'Theme')),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Accent colour'), swatches)),
+    h('div', { class: 'grid-2' }, select('uiFont', UI_FONTS, 'Interface font'), select('codeFont', CODE_FONTS, 'Code font')),
     h('div', { class: 'grid-2' },
-      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Density'), seg('density', [['compact', 'Compact'], ['comfortable', 'Comfortable'], ['spacious', 'Spacious']], 'Density')),
-      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Request and response'), seg('layout', [['auto', 'Side by side'], ['stacked', 'Stacked']], 'Layout'))),
-    h('label', { class: 'check' }, wrap, h('span', null, 'Wrap long lines in responses', h('small', null, 'Turn off to scroll sideways instead, which keeps long JSON lines intact.'))),
-    h('div', { class: 'field-row' },
+      slider('textScale', 0.85, 1.3, 0.05, '%', 'Interface text size', 100),
+      slider('codeSize', 11, 20, 1, 'px', 'Code and body text size')),
+    h('div', { class: 'grid-2' },
+      slider('densityScale', 0.8, 1.25, 0.05, '%', 'Density (spacing and control height)', 100),
+      slider('lineHeight', 1.3, 1.9, 0.05, '×', 'Code line height')),
+    h('div', { class: 'grid-2' },
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Tab width in editors'), seg('tabSize', [[2, '2 spaces'], [4, '4 spaces'], [8, '8 spaces']], 'Tab width')),
+      h('label', { class: 'check align-end' }, wrap, h('span', null, 'Wrap long lines in responses'))),
+    h('div', { class: 'grid-2 desktop-only' },
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Request and response'), seg('layout', [['auto', 'Side by side'], ['stacked', 'Stacked']], 'Layout')),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Sidebar'), seg('sidePosition', [['left', 'Left'], ['right', 'Right']], 'Sidebar position'))),
+    h('div', { class: 'field-row desktop-only' },
       h('button', { type: 'button', class: 'btn small', onclick: () => { initResizers.reset(); toast('Panel sizes reset'); } }, 'Reset panel sizes'),
-      h('span', { class: 'hint' }, 'Drag the lines between panels to resize them. Double-click a line to reset it.')),
+      h('span', { class: 'hint' }, 'Drag the lines between panels to resize them (sizes show while dragging). Double-click a line to reset it. Cmd/Ctrl+B hides the sidebar.')),
   ];
   const requests = [
     h('div', { class: 'field narrow' }, h('label', null, 'Request timeout (seconds)'), timeout),
@@ -2952,11 +3212,13 @@ function openSettings() {
   ];
   openDialog({
     title: 'Settings',
+    tall: true, wide: true,
     body: dlgTabs([{ key: 'appearance', label: 'Appearance', content: appearance }, { key: 'requests', label: 'Requests', content: requests }]),
     onClose: () => { if (!saved) { applyTheme(); applyAppearance(); } }, // closing without saving undoes the preview
     buttons: [
       { label: 'Restore defaults', left: true, onClick: () => {
-        Object.assign(draft, { theme: DEFAULT_SETTINGS.theme, textScale: 1, codeSize: 13, density: 'comfortable', layout: 'auto', wrap: true });
+        Object.assign(draft, { theme: DEFAULT_SETTINGS.theme, textScale: 1, codeSize: 13, density: 'comfortable', densityScale: 1, layout: 'auto', wrap: true,
+          lineHeight: 1.6, tabSize: 2, uiFont: 'geist', codeFont: 'geist-mono', accent: 'blue', sidePosition: 'left', sideHidden: false });
         Object.assign(s, draft); saveSettings(); saved = true; applyTheme(); applyAppearance(); closeDialog(); openSettings();
         toast('Appearance restored to defaults');
         return false;
@@ -2964,6 +3226,8 @@ function openSettings() {
       { label: 'Save', primary: true, onClick: () => {
         Object.assign(s, {
           theme: draft.theme, textScale: draft.textScale, codeSize: draft.codeSize, density: draft.density, layout: draft.layout, wrap: draft.wrap,
+          densityScale: draft.densityScale, lineHeight: draft.lineHeight, tabSize: Number(draft.tabSize) || 2, uiFont: draft.uiFont, codeFont: draft.codeFont,
+          accent: draft.accent, accentCustom: draft.accentCustom, sidePosition: draft.sidePosition,
           timeout: Math.max(1, Math.min(600, Number(timeout.value) || 60)),
           followRedirects: follow.checked, history: hist.checked, insecure: backend.mode === 'local' && insecure.checked,
         });
@@ -2990,12 +3254,13 @@ function bindEditor() {
     const t = cur();
     t.ed.url = e.target.value;
     t.ed.params = [...parseQuery(t.ed.url), ...t.ed.params.filter((p) => p.disabled)];
+    t.ed.pathVars = syncPathVars(t.ed.url, t.ed.pathVars || []);
     if (t.reqTab === 'params') renderParams();
     renderResolved();
     renderCounts();
     markDirty();
   });
-  $('#url').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); send(); } });
+  $('#url').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); send(); } }); // Cmd/Ctrl+Enter is the global shortcut
   $('#url').addEventListener('paste', (e) => {
     const text = e.clipboardData.getData('text');
     if (/^\s*curl\s/i.test(text)) {
@@ -3041,15 +3306,17 @@ function bindEditor() {
   });
   $('#btnSaveBody').addEventListener('click', saveBody);
   $$('#editor [data-script]').forEach((c) => c.addEventListener('click', () => { cur().scriptKind = c.dataset.script; renderScripts(); }));
-  $('#scriptText').addEventListener('input', (e) => { const t = cur(); t.ed[t.scriptKind === 'pre' ? 'pre' : 'test'] = e.target.value; renderCounts(); markDirty(); });
-  $('#scriptText').addEventListener('keydown', tabIndent);
+
   $('#btnSnippets').addEventListener('click', (e) => {
     const t = cur();
     showMenu(e.currentTarget, SNIPPETS[t.scriptKind].map(([label, code]) => ({ label, onClick: () => {
-      const ta = $('#scriptText');
-      ta.value = ta.value ? `${ta.value.replace(/\s*$/, '')}\n\n${code}\n` : `${code}\n`;
-      ta.dispatchEvent(new Event('input'));
-      ta.focus();
+      const tt = cur();
+      const key = tt.scriptKind === 'pre' ? 'pre' : 'test';
+      tt.ed[key] = tt.ed[key] ? `${tt.ed[key].replace(/\s*$/, '')}\n\n${code}\n` : `${code}\n`;
+      renderScripts();
+      renderCounts();
+      markDirty();
+      if (scriptEditor && scriptEditor.cm) { scriptEditor.cm.focus(); scriptEditor.cm.setCursor(scriptEditor.cm.lineCount(), 0); }
     } })));
   });
   $('#docsText').addEventListener('input', (e) => { cur().ed.docs = e.target.value; markDirty(); });
@@ -3099,10 +3366,13 @@ function bindChrome() {
     if (e.key === 'Escape' && !$('#popover').hidden) { hideMenu(); return; }
     if (mod && e.key === 'Enter') { e.preventDefault(); if (cur()) send(); return; }
     if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); if (cur()) save().catch((err) => toast(err.message)); return; }
+    if (mod && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSidebar(); return; }
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
     if (!typing && e.key === '/') { e.preventDefault(); $('#search').focus(); }
   });
-  window.addEventListener('beforeunload', (e) => { if (state.tabs.some((t) => t.dirty)) persistTabs(); }); // unsaved edits are kept and restored
+  // Unsaved edits are kept and restored. Write synchronously: a debounced write never runs once the page unloads.
+  window.addEventListener('pagehide', writeTabs);
+  window.addEventListener('beforeunload', writeTabs);
   document.addEventListener('dragover', (e) => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
   document.addEventListener('drop', (e) => {
     if (e.target.closest('dialog') || e.target.closest('input[type=file]')) return;
@@ -3147,19 +3417,19 @@ function initResizers() {
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const side = $('#sideResizer'), split = $('#splitResizer');
   const setSideW = (px, persist = true) => {
-    px = clamp(Math.round(px), 220, 480);
+    px = clamp(Math.round(px), 180, 640);
     root.style.setProperty('--side-w', `${px}px`);
     Object.assign(side.dataset, { now: px });
-    side.setAttribute('aria-valuenow', String(px)); side.setAttribute('aria-valuemin', '220'); side.setAttribute('aria-valuemax', '480');
+    side.setAttribute('aria-valuenow', String(px)); side.setAttribute('aria-valuemin', '180'); side.setAttribute('aria-valuemax', '640');
     if (persist) save('side', px);
   };
   const setSplit = (pct, persist = true) => {
-    pct = Math.round(clamp(pct, 20, 80) * 10) / 10;
+    pct = Math.round(clamp(pct, 15, 85) * 10) / 10;
     const key = stacked() ? 'reqH' : 'req';
     root.style.setProperty(stacked() ? '--req-h' : '--req-w', `${pct}%`);
     split.dataset.now = pct;
     split.setAttribute('aria-orientation', stacked() ? 'horizontal' : 'vertical');
-    split.setAttribute('aria-valuenow', String(Math.round(pct))); split.setAttribute('aria-valuemin', '20'); split.setAttribute('aria-valuemax', '80');
+    split.setAttribute('aria-valuenow', String(Math.round(pct))); split.setAttribute('aria-valuemin', '15'); split.setAttribute('aria-valuemax', '85');
     if (persist) save(key, pct);
   };
   setSideW(layout.side || 288, false);
@@ -3186,10 +3456,20 @@ function initResizers() {
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', end);
   });
-  drag(side, (e) => setSideW(e.clientX));
+  const tip = h('div', { class: 'drag-tip', hidden: true });
+  document.body.append(tip);
+  const showTip = (e, text) => { tip.hidden = false; tip.textContent = text; tip.style.left = `${e.clientX + 14}px`; tip.style.top = `${e.clientY + 14}px`; };
+  document.addEventListener('pointerup', () => { tip.hidden = true; });
+  drag(side, (e) => {
+    const right = document.documentElement.dataset.side === 'right';
+    setSideW(right ? innerWidth - e.clientX : e.clientX);
+    showTip(e, `Sidebar ${side.dataset.now} px`);
+  });
   drag(split, (e) => {
     const r = $('.split').getBoundingClientRect();
     setSplit(stacked() ? ((e.clientY - r.top) / r.height) * 100 : ((e.clientX - r.left) / r.width) * 100);
+    const reqPx = Math.round((stacked() ? r.height : r.width) * Number(split.dataset.now) / 100);
+    showTip(e, `${stacked() ? 'Request height' : 'Request width'} ${reqPx} px (${Math.round(split.dataset.now)}%)`);
   });
   side.addEventListener('keydown', (e) => {
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
@@ -3215,22 +3495,51 @@ async function start() {
   applyAppearance();
   bindEditor();
   bindChrome();
-  $('#btnSide').addEventListener('click', () => setSide(!$('.app').classList.contains('side-open')));
+  $('#btnSide').addEventListener('click', () => (isPhone() ? setSide(!$('.app').classList.contains('side-open')) : toggleSidebar()));
+  $$('.pane-max').forEach((b) => b.addEventListener('click', () => {
+    const split = $('.split');
+    const on = split.dataset.max === b.dataset.max;
+    if (on) delete split.dataset.max; else split.dataset.max = b.dataset.max;
+    $$('.pane-max').forEach((x) => { x.setAttribute('aria-pressed', String(!on && x === b)); x.title = !on && x === b ? 'Restore both panes' : `Maximise the ${x.dataset.max === 'req' ? 'request' : 'response'} pane`; });
+    refreshEditors(document);
+  }));
+  // Tab rows that don't fit fade out at the edge (and scroll), so no tab is ever silently cut off.
+  const watchOverflow = (el) => {
+    const update = () => el.classList.toggle('overflowing', el.scrollWidth > el.clientWidth + 1 && el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+    new ResizeObserver(update).observe(el);
+    el.addEventListener('scroll', update, { passive: true });
+    update();
+  };
+  ['#reqTabs', '#respTabs', '.side .seg.block'].forEach((sel) => watchOverflow($(sel)));
   // Sidebar tree keyboard: Up/Down move, Right/Left open/close, Space activates (Enter is handled per row).
+  $('#sideBody').addEventListener('focusin', (e) => {
+    const row = e.target.closest('.row');
+    if (!row) return;
+    state.focusKey = row.dataset.key;
+    $$('#sideBody .row').forEach((r) => { r.tabIndex = r === row ? 0 : -1; });
+  });
   $('#sideBody').addEventListener('keydown', (e) => {
     const row = e.target.closest('.row');
     if (!row || e.target !== row) return;
     const rows = $$('#sideBody .row');
     const i = rows.indexOf(row);
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      const next = rows[i + (e.key === 'ArrowDown' ? 1 : -1)];
-      if (next) next.focus();
-    } else if (e.key === ' ' || (e.key === 'ArrowRight' && row.getAttribute('aria-expanded') === 'false')
-      || (e.key === 'ArrowLeft' && row.getAttribute('aria-expanded') === 'true')) {
+    const level = Number(row.getAttribute('aria-level') || 0);
+    const expanded = row.getAttribute('aria-expanded');
+    const go = (r) => { if (r) { e.preventDefault(); r.focus(); } };
+    if (e.key === 'ArrowDown') go(rows[i + 1]);
+    else if (e.key === 'ArrowUp') go(rows[i - 1]);
+    else if (e.key === 'Home') go(rows[0]);
+    else if (e.key === 'End') go(rows[rows.length - 1]);
+    else if (e.key === 'ArrowRight' && expanded === 'true') go(rows[i + 1]);                      // into the first child
+    else if (e.key === 'ArrowLeft' && expanded !== 'true' && level > 1) {                          // up to the parent
+      go(rows.slice(0, i).reverse().find((r) => Number(r.getAttribute('aria-level')) === level - 1));
+    } else if (e.key === ' ' || (e.key === 'ArrowRight' && expanded === 'false') || (e.key === 'ArrowLeft' && expanded === 'true')) {
       e.preventDefault();
       state.refocus = row.dataset.key;
       row.click();
+    } else if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {                      // row actions menu
+      const more = $$('.acts .btn', row).pop();
+      if (more) { e.preventDefault(); more.click(); }
     }
   });
   // Menus: Up/Down between items, Escape closes and returns focus.

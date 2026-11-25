@@ -22,6 +22,14 @@ class Echo(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if self.path == "/broken":  # promises 1000 bytes, sends 3, then hangs up
+            self.send_response(200)
+            self.send_header("Content-Length", "1000")
+            self.end_headers()
+            self.wfile.write(b"abc")
+            self.wfile.flush()
+            self.connection.shutdown(2)
+            return
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         status = 404 if self.path == "/missing" else 200
         data = json.dumps({"method": self.command, "auth": self.headers.get("Authorization"),
@@ -120,6 +128,20 @@ class ServerTest(unittest.TestCase):
         with self.assertRaises(server.RedirectRefused):
             server.SafeRedirect().redirect_request(req, None, 302, "Found", {}, "http://api.example/b")
 
+    def test_redirect_to_non_http_scheme_is_refused(self):
+        res = self.send(method="GET", url=self.redirect_to("ftp://127.0.0.1:1/x"))
+        self.assertIn("non-HTTP", res["error"])
+
+    def test_response_that_breaks_off_is_reported_not_dropped(self):
+        res = self.send(method="GET", url=self.target + "/broken")
+        self.assertIn("broke off", res["error"])
+
+    def test_malformed_send_requests_get_a_clear_error(self):
+        self.assertEqual(self.call("POST", "/api/send", [])[1]["error"], "Invalid request")
+        self.assertEqual(self.send(method="GET", url=self.target, headers=None)["status"], 200)  # null = no headers
+        self.assertEqual(self.send(method="GET", url=self.target, headers=[["only-one"]])["error"], "Invalid headers")
+        self.assertEqual(self.call("POST", "/api/collections", [1, 2])[0], 400)
+
     def test_follow_redirects_can_be_turned_off(self):
         res = self.send(method="GET", url=self.redirect_to(self.target + "/x"), followRedirects=False)
         self.assertEqual(res["status"], 302)
@@ -150,6 +172,16 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.call("GET", f"/api/environments/{eid}")[1]["values"][0]["key"], "baseUrl")
         self.assertNotIn(eid, [c["id"] for c in self.call("GET", "/api/collections")[1]])
         self.assertEqual(self.call("POST", "/api/environments", {"document": {"info": {}}})[0], 400)
+
+    def test_ids_are_always_valid_case_insensitive_and_never_globals(self):
+        mk = lambda name: self.call("POST", "/api/collections", {"collection": {"info": {"name": name}, "item": []}})[1]["id"]
+        self.assertEqual(mk("_Internal API"), "Internal-API.json")              # leading _ no longer rejected
+        self.assertEqual(mk("internal api"), "internal-api-2.json")             # same name in other case: new file
+        env = lambda name: self.call("POST", "/api/environments", {"document": {"name": name, "values": []}})[1]["id"]
+        self.assertEqual(env("Globals"), "globals-env.json")                    # never overwrites the Globals doc
+        path = server.Handler.stores["collections"].root / "Internal-API.json"
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)                     # not mkstemp's 0600
+        self.assertEqual(list(path.parent.glob("*.tmp")), [])                   # no leftovers
 
     def test_path_traversal_is_rejected(self):
         for bad in ("..%2Fsecret.json", "%2Fetc%2Fpasswd", ".hidden.json", "x.txt"):

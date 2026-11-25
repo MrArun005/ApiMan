@@ -19,7 +19,8 @@ You only need Python 3. There's nothing to install.
 
 | | |
 |---|---|
-| **Requests** | All methods, a Params table kept in sync with the URL, headers, and multiple tabs with unsaved work restored after a reload |
+| **Requests** | All methods, a Params table kept in sync with the URL, Postman path variables (`/users/:id`), headers, and multiple tabs with unsaved work restored after a reload |
+| **Editors** | Code editors with line numbers, syntax colours, bracket matching, search (<kbd>Cmd/Ctrl+F</kbd>) and collapsible JSON/XML, for bodies, scripts, responses and generated code (CodeMirror, bundled) |
 | **Bodies** | JSON / text / XML / HTML raw, form data with file uploads, URL-encoded, binary file, GraphQL |
 | **Auth** | Bearer token, Basic, API key (header or query), inherited from folder or collection, or none |
 | **Variables** | Environments, collection variables, globals and dynamic values (`{{$guid}}`, `{{$timestamp}}`, …), with a live "Resolves to" preview under the URL |
@@ -28,7 +29,9 @@ You only need Python 3. There's nothing to install.
 | **Responses** | Pretty (highlighted JSON) / raw / preview views, headers, cookies, test results, script console, copy, save to file |
 | **Import / export** | Postman collections v2.1, environments and globals, cURL commands (paste into the URL bar or use Import), export as JSON |
 | **Code** | cURL, JavaScript fetch, Python requests, Java HttpClient |
-| **Comfort** | Light / dark / system theme, filter, history, keyboard shortcuts (<kbd>Ctrl/Cmd+Enter</kbd> send, <kbd>Ctrl/Cmd+S</kbd> save, <kbd>/</kbd> filter) |
+| **Your layout** | Drag the sidebar edge and the request/response divider (live size readout, arrow keys, double-click resets); maximise either pane; sidebar left, right or hidden (<kbd>Cmd/Ctrl+B</kbd>); side-by-side or stacked |
+| **Appearance** | Light / dark / system theme, accent colour (presets or any colour), interface and code fonts, interface text size, code size, density, code line height, tab width, line wrapping: every size as a slider and an exact number |
+| **Comfort** | Filter, history, keyboard shortcuts (<kbd>Ctrl/Cmd+Enter</kbd> send, <kbd>Ctrl/Cmd+S</kbd> save, <kbd>/</kbd> filter), full keyboard navigation in the sidebar tree |
 
 ## Safety
 
@@ -45,3 +48,5 @@ You only need Python 3. There's nothing to install.
 ## Not included (yet)
 
 Cloud and team sync, mock servers, monitors, WebSocket and gRPC, the OAuth 2.0 authorization flow, and npm libraries inside scripts (`require`).
+
+Fonts: Geist and Geist Mono (SIL Open Font License, `fonts/OFL.txt`). Editor: CodeMirror 5 (MIT, `vendor/CODEMIRROR-LICENSE`). Both are bundled, so ApiMan never loads anything from a CDN.

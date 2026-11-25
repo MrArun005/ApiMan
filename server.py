@@ -35,7 +35,9 @@ CA_FILE = None  # extra trusted CA bundle (PEM), set by --ca-file
 STATIC = {"/": ("index.html", "text/html"), "/index.html": ("index.html", "text/html"),
           "/app.js": ("app.js", "text/javascript"), "/app.css": ("app.css", "text/css"),
           "/fonts/Geist-Variable.woff2": ("fonts/Geist-Variable.woff2", "font/woff2"),
-          "/fonts/GeistMono-Variable.woff2": ("fonts/GeistMono-Variable.woff2", "font/woff2")}
+          "/fonts/GeistMono-Variable.woff2": ("fonts/GeistMono-Variable.woff2", "font/woff2"),
+          "/vendor/codemirror.js": ("vendor/codemirror.js", "text/javascript"),
+          "/vendor/codemirror.css": ("vendor/codemirror.css", "text/css")}
 
 
 def validate_collection(data):
@@ -85,15 +87,27 @@ class Store:
         p = self.path(doc_id)
         # Atomic write: a crash mid-save never leaves a half-written file.
         fd, tmp = tempfile.mkstemp(dir=self.root, suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, p)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            # mkstemp creates 0600; keep the existing file's mode (or a normal 0644 for new files)
+            os.chmod(tmp, p.stat().st_mode & 0o777 if p.exists() else 0o644)
+            os.replace(tmp, p)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+            raise
 
     def create(self, data):
         self.validate(data)
-        base = re.sub(r"[^A-Za-z0-9._-]+", "-", self.name_of(data)).strip("-.")[:80] or "untitled"
+        base = re.sub(r"[^A-Za-z0-9._-]+", "-", self.name_of(data)).strip("-._")[:80] or "untitled"
+        if base.lower() == "globals":
+            base = "globals-env"  # globals.json is the Globals document, never a normal environment
+        existing = {q.name.lower() for q in self.root.glob("*.json")}  # case-insensitive, like macOS/Windows
         doc_id, n = f"{base}.json", 2
-        while (self.root / doc_id).exists():
+        while doc_id.lower() in existing:
             doc_id, n = f"{base}-{n}.json", n + 1
         self.put(doc_id, data)
         return doc_id
@@ -131,6 +145,8 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
         return u.scheme, u.hostname, u.port or (443 if u.scheme == "https" else 80)
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme.lower() not in ("http", "https"):
+            raise RedirectRefused(f"Refused redirect to a non-HTTP URL: {newurl}")
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new is None:
             return None
@@ -154,6 +170,11 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def send(spec):
     """Execute one HTTP request exactly as described by the UI (variables, auth and scripts already applied)."""
+    if not isinstance(spec, dict):
+        return {"error": "Invalid request"}
+    headers_in = spec.get("headers") or []
+    if not isinstance(headers_in, list) or not all(isinstance(h, list) and len(h) == 2 for h in headers_in):
+        return {"error": "Invalid headers"}
     method = str(spec.get("method", "GET")).upper()
     url = str(spec.get("url", "")).strip()
     if not METHOD_RE.match(method):
@@ -173,7 +194,7 @@ def send(spec):
         data = b""  # send Content-Length: 0 instead of no length (some servers answer 411)
 
     req = urllib.request.Request(url, data=data, method=method)
-    for key, value in spec.get("headers", []):
+    for key, value in headers_in:
         req.add_header(str(key), str(value))
     if not req.has_header("User-agent"):
         req.add_header("User-Agent", "ApiMan/1.0")
@@ -190,7 +211,8 @@ def send(spec):
 
     start = time.perf_counter()
     try:
-        resp = opener.open(req, timeout=max(1.0, min(float(spec.get("timeout", 60)), 600.0)))
+        timeout = max(1.0, min(float(spec.get("timeout", 60) or 60), 600.0))
+        resp = opener.open(req, timeout=timeout)
     except urllib.error.HTTPError as e:   # 4xx/5xx (and unfollowed 3xx) still have a useful response
         resp = e
     except RedirectRefused as e:
@@ -200,8 +222,14 @@ def send(spec):
     except Exception as e:  # timeouts, bad TLS, etc.
         return {"error": f"{type(e).__name__}: {e}"}
 
-    with resp:
-        raw = resp.read(MAX_RESPONSE + 1)
+    try:
+        with resp:
+            raw = resp.read(MAX_RESPONSE + 1)
+    except Exception as e:  # read timeout, connection reset, IncompleteRead
+        return {"error": f"The response broke off while downloading: {type(e).__name__}: {e}"}
+    promised = resp.headers.get("Content-Length")
+    if promised and promised.isdigit() and len(raw) < min(int(promised), MAX_RESPONSE + 1):
+        return {"error": f"The response broke off while downloading: received {len(raw)} of {promised} bytes."}
     elapsed_ms = round((time.perf_counter() - start) * 1000)
     truncated = len(raw) > MAX_RESPONSE
     raw = raw[:MAX_RESPONSE]
@@ -256,6 +284,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200, store.list())
                 if doc_id is None and method == "POST":
                     body = self.read_json()
+                    if not isinstance(body, dict):
+                        raise ValueError("Invalid request body")
                     data = body.get("collection") or body.get("document") or {
                         "info": {"name": body.get("name") or "New collection", "schema": SCHEMA_V21}, "item": []}
                     return self.reply(201, {"id": store.create(data)})
@@ -272,6 +302,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(404, {"error": "Not found"})
         except (ValueError, json.JSONDecodeError) as e:
             return self.reply(400, {"error": str(e)})
+        except (TypeError, AttributeError, KeyError):
+            return self.reply(400, {"error": "Invalid request body"})
 
     def do_GET(self): self.route("GET")
     def do_POST(self): self.route("POST")
@@ -279,7 +311,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self): self.route("DELETE")
 
     def read_json(self):
-        length = int(self.headers.get("Content-Length") or 0)
+        length = max(0, int(self.headers.get("Content-Length") or 0))
         if length > MAX_REQUEST:
             raise ValueError("Request too large")
         return json.loads(self.rfile.read(length) or b"{}")
