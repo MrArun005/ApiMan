@@ -47,6 +47,9 @@ const ICONS = {
   x: '<path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
   trash: '<path d="M4 6h12M8 6V4h4v2M6 6l.8 10h6.4L14 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>',
   play: '<path d="M6 4l10 6-10 6Z" fill="currentColor"/>',
+  search: '<circle cx="8.5" cy="8.5" r="5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12.5 12.5L17 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  copy: '<rect x="7" y="7" width="10" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M13 7V4.5A1.5 1.5 0 0 0 11.5 3h-7A1.5 1.5 0 0 0 3 4.5v7A1.5 1.5 0 0 0 4.5 13H7" fill="none" stroke="currentColor" stroke-width="1.5"/>',
+  download: '<path d="M10 3v10M5.5 8.5L10 13l4.5-4.5M4 16.5h12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>',
 };
 function icon(name) {
   const s = document.createElementNS(SVGNS, 'svg');
@@ -1930,7 +1933,7 @@ function renderTabs() {
         h('span', { class: `dot ${t.dirty ? '' : 'off'}`, role: t.dirty ? 'img' : null, 'aria-label': t.dirty ? 'Unsaved changes' : null, title: t.dirty ? 'Unsaved changes' : null }),
         h('button', { class: 'x', title: 'Close tab', 'aria-label': `Close ${t.ed.name}`, onclick: (e) => { e.stopPropagation(); closeTab(i); } }, icon('x')));
     }),
-    h('button', { class: 'newtab', title: 'New request tab', 'aria-label': 'New request tab', onclick: () => openTab(newTab()) }, icon('plus')));
+    h('button', { class: 'newtab', title: 'New request tab', 'aria-label': 'New request tab', onclick: () => { openTab(newTab()); $('#url').focus(); } }, icon('plus')));
   const on = strip.querySelector('.rtab.on');
   if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
@@ -2502,7 +2505,7 @@ function openFind() {
   if ($('#findInput').value) runFind(0);
 }
 function clearFind() { find.marks.forEach((m) => m.clear()); if (find.current) find.current.clear(); find.current = null; find.marks = []; find.hits = []; find.i = -1; }
-function closeFind() { clearFind(); $('#findBar').hidden = true; $('#findCount').textContent = ''; const cm = findCm(); if (cm) { refreshEditors($('#pane-rbody')); cm.focus(); } }
+function closeFind() { clearFind(); $('#findBar').hidden = true; $('#findCount').textContent = ''; const cm = findCm(); if (cm) refreshEditors($('#pane-rbody')); $('#btnFindBody').focus(); } // focus goes back to the opener
 function runFind(start) {
   clearFind();
   const cm = findCm();
@@ -2545,7 +2548,7 @@ function bodyView(res, view) {
   }
   if (res.binary) {
     return h('div', { class: 'drop' }, h('p', null, `Binary response (${ct || 'unknown type'}, ${fmtSize(res.size)}).`),
-      h('button', { class: 'btn', onclick: saveBody }, 'Save to file'));
+      h('button', { class: 'btn', onclick: saveBody }, 'Download'));
   }
   const text = res.body ?? '';
   if (!text) return h('p', { class: 'hint' }, 'The response body is empty.');
@@ -3788,7 +3791,7 @@ function initResizers() {
     root.style.setProperty(stacked() ? '--req-h' : '--req-w', `${pct}%`);
     split.dataset.now = pct;
     split.setAttribute('aria-orientation', stacked() ? 'horizontal' : 'vertical');
-    split.setAttribute('aria-valuenow', String(Math.round(pct))); split.setAttribute('aria-valuemin', '15'); split.setAttribute('aria-valuemax', '85');
+    split.setAttribute('aria-valuenow', String(Math.round(pct))); split.setAttribute('aria-valuemin', String(Math.ceil(lo))); split.setAttribute('aria-valuemax', String(Math.floor(hi))); // the real limits
     if (persist) save(key, pct);
   };
   setSideW(layout.side || 288, false);
@@ -3831,12 +3834,14 @@ function initResizers() {
     showTip(e, `${stacked() ? 'Request height' : 'Request width'} ${reqPx} px (${Math.round(split.dataset.now)}%)`);
   });
   side.addEventListener('keydown', (e) => {
+    if (e.key === 'Home' || e.key === 'End') { e.preventDefault(); setSideW(e.key === 'Home' ? 0 : 640); return; } // clamped to the limits
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     e.preventDefault();
     setSideW(Number(side.dataset.now) + (e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 16 : 1));
   });
   split.addEventListener('keydown', (e) => {
     const [less, more] = stacked() ? ['ArrowUp', 'ArrowDown'] : ['ArrowLeft', 'ArrowRight'];
+    if (e.key === 'Home' || e.key === 'End') { e.preventDefault(); setSplit(e.key === 'Home' ? 0 : 100); return; }
     if (e.key !== less && e.key !== more) return;
     e.preventDefault();
     setSplit(Number(split.dataset.now) + (e.key === more ? 1 : -1) * (e.shiftKey ? 5 : 0.5));
@@ -3894,29 +3899,31 @@ async function start() {
   // The response row measures itself: if tabs + status + button don't fit, the status gets its own line, so no tab is hidden.
   const respRow = $('#respTabs');
   const fitResp = () => {
-    // Degrade in a fixed order so both tab rows keep one height: hide size, then time (both stay in the
-    // status tooltip), and only as a last resort give the status its own line.
-    const steps = ['hide-reason', 'tight-tabs', 'hide-size', 'hide-time', 'meta-below'];
-    respRow.classList.remove(...steps);
+    // Both tab rows keep one height and one tab padding. What the response row can't fit (reason, then size,
+    // then time, then the whole status) moves to the toolbar below, so nothing is lost; that toolbar wraps
+    // only when even it runs out of room.
+    const steps = ['hide-reason', 'hide-size', 'hide-time', 'meta-out'];
     const seg = respRow.querySelector('.seg'), meta = $('#respStatus'), max = respRow.querySelector('.pane-max');
-    $('#respMetaAlt').replaceChildren();
-    if (!meta.textContent.trim()) return;
-    const fits = () => seg.scrollWidth + meta.scrollWidth + max.offsetWidth + 2 * 8 + 2 * 20 <= respRow.clientWidth;
-    for (const step of steps) {
-      if (fits()) break;
-      if (step === 'meta-below') respRow.classList.remove('hide-size', 'hide-time', 'hide-reason');
-      respRow.classList.add(step);
-    }
-    // Whatever the tab row couldn't fit (time, size) is shown in the toolbar below instead, never lost.
-    const moved = [respRow.classList.contains('hide-time') && meta.querySelector('.m-time'), respRow.classList.contains('hide-size') && meta.querySelector('.m-size')].filter(Boolean);
     const alt = $('#respMetaAlt'), tools = $('#respTools');
-    alt.replaceChildren(...moved.map((el) => { const c = el.cloneNode(true); c.style.display = 'inline'; return c; }));
-    if (moved.length && tools.scrollWidth > tools.clientWidth) { // no room there either: wrap the status under the tabs
-      alt.replaceChildren();
-      respRow.classList.remove('hide-size', 'hide-time', 'hide-reason');
-      respRow.classList.add('meta-below');
-    }
+    respRow.classList.remove(...steps);
+    tools.classList.remove('wrap', 'icons');
+    alt.replaceChildren();
+    if (!meta.textContent.trim() || matchMedia('(max-width: 820px)').matches) return; // phones give the status its own line
+    const fits = () => seg.scrollWidth <= seg.clientWidth + 1 && respRow.scrollWidth <= respRow.clientWidth + 1; // real clipping, measured
+    for (const step of steps) { if (fits()) break; respRow.classList.add(step); }
+    const has = (c) => respRow.classList.contains(c);
+    const moved = has('meta-out') ? [...meta.children] : [has('hide-time') && meta.querySelector('.m-time'), has('hide-size') && meta.querySelector('.m-size')].filter(Boolean);
+    alt.replaceChildren(...moved.map((el) => { const c = el.cloneNode(true); c.querySelector('.m-reason')?.remove(); return c; })); // the code's colour + tooltip carry the reason
+    // Still short of room: the actions become icon buttons, and only then does the toolbar wrap.
+    if (tools.scrollWidth > tools.clientWidth) tools.classList.add('icons');
+    if (tools.scrollWidth > tools.clientWidth) tools.classList.add('wrap');
   };
+  // Toolbar actions carry an icon and a label; the label is also their accessible name when only the icon shows.
+  [['#btnFindBody', 'search'], ['#btnCopyBody', 'copy'], ['#btnSaveBody', 'download']].forEach(([sel, name]) => {
+    const b = $(sel), text = b.textContent.trim();
+    b.setAttribute('aria-label', text);
+    b.replaceChildren(icon(name), h('span', { class: 'lbl' }, text));
+  });
   new ResizeObserver(fitResp).observe(respRow);
   new MutationObserver(fitResp).observe($('#respStatus'), { childList: true, subtree: true, characterData: true });
   // Tab rows that don't fit fade at whichever edge has more tabs (and scroll), so no tab is ever silently cut off.
@@ -3987,6 +3994,13 @@ async function start() {
   });
   new MutationObserver(rovingTabs).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['aria-selected', 'aria-checked'], childList: true });
   rovingTabs();
+  // Phones: Escape closes the open sidebar drawer.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || $('#dlg').open || !$('#popover').hidden || !$('.app').classList.contains('side-open')) return;
+    setSide(false); $('#btnSide').focus();
+  });
+  // The active request tab stays in view when the strip or the text size changes.
+  new ResizeObserver(() => { const on = $('#tabstrip .rtab.on'); if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }).observe($('#tabstrip'));
   // Maximised pane: Escape restores both panes.
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || $('#dlg').open || !$('.split').dataset.max) return;
