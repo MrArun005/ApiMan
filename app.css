@@ -877,3 +877,12 @@ h1.wordmark { font: inherit; margin: 0; }
   .reqbar select { padding-left: var(--s3); }
   #url { min-width: 0; }
 }
+/* round 18 */
+.req-col .pane { padding-top: var(--s2); } /* request sub-toolbars line up with the response bar's second row */
+.req-col .pane-tools { align-items: flex-start; min-height: calc(var(--h-sm) + 2 * var(--s2) - var(--s2)); }
+#btnCopyBody.done { color: var(--ok, #2f9e6b); }
+:root.drawer-open .reqbar .send { width: auto; padding: 0 var(--s3); } /* beside the drawer the URL keeps its room */
+:root.drawer-open .reqbar select { padding-left: var(--s3); }
+@media (max-width: 600px) { .titlebar .name-input { field-sizing: content; flex: 0 1 auto; max-width: 70%; } } /* the unsaved dot stays by the name */
+.tabstrip { background: var(--seg-track); } /* the active document tab stands out in light theme too */
+.tabstrip .newtab { background: var(--seg-track); }

@@ -1653,7 +1653,7 @@ function renderHistoryList() {
   if (!state.settings.history) return [h('div', { class: 'empty-side' }, 'History is turned off in Settings.')];
   const f = state.filter;
   const list = state.history.filter((e) => !f || `${e.method} ${e.url} ${e.name}`.toLowerCase().includes(f));
-  const out = [h('div', { class: 'side-section' }, `${state.history.length} requests`,
+  const out = [h('div', { class: 'side-section' }, f ? `${list.length} of ${state.history.length} requests` : `${state.history.length} requests`,
     state.history.length ? h('button', { class: 'btn small ghost', onclick: clearHistory }, 'Clear') : null)];
   if (!list.length) out.push(h('div', { class: 'empty-side' }, state.history.length ? 'Nothing matches.' : 'Requests you send appear here.'));
   let day = '';
@@ -1719,7 +1719,7 @@ function showMenu(anchor, items) {
   anchor.setAttribute('aria-expanded', 'true');
   showMenu.anchor = anchor;
   if (row) { row.classList.add('menu-open'); pop.dataset.row = '1'; showMenu.row = row; }
-  const first = pop.querySelector('button');
+  const first = pop.querySelector('.mi.cur') || pop.querySelector('button');
   if (first) first.focus();
 }
 /** Hide the tabs of a segmented row that don't fit (never the active one) and list them in a "More tabs" menu. */
@@ -3728,8 +3728,12 @@ function bindEditor() {
     const res = cur() && cur().out && cur().out.res;
     if (!res || res.binary) return;
     let text = res.body;
-    try { text = JSON.stringify(JSON.parse(text), null, 2); } catch { /* raw */ }
-    navigator.clipboard.writeText(text).then(() => toast('Response copied'), () => toast('Copy failed'));
+    try { JSON.parse(text); text = prettyJson(text, Number(state.settings.tabSize) || 2); } catch { /* raw */ }
+    const btn = $('#btnCopyBody'), lbl = btn.querySelector('.lbl');
+    navigator.clipboard.writeText(text).then(() => { // confirm where you clicked
+      btn.classList.add('done'); if (lbl) lbl.textContent = 'Copied'; btn.setAttribute('aria-label', 'Copied');
+      clearTimeout(btn.doneTimer); btn.doneTimer = setTimeout(() => { btn.classList.remove('done'); if (lbl) lbl.textContent = 'Copy'; btn.setAttribute('aria-label', 'Copy'); }, 1500);
+    }, () => toast('Copy failed'));
   });
   $('#btnSaveBody').addEventListener('click', saveBody);
   $('#btnFindBody').addEventListener('click', () => openFind());
@@ -3857,6 +3861,7 @@ async function pickFolder() {
 function initResizers() {
   const root = document.documentElement;
   const layout = ls.get('apiman:layout', {});
+  if (!layout.v2) { if (!layout.reqH || layout.reqH === 50) layout.reqH = 35; layout.v2 = true; ls.set('apiman:layout', layout); }
   const save = (k, v) => { layout[k] = v; ls.set('apiman:layout', layout); };
   const stacked = () => document.documentElement.dataset.layout === 'stacked' || document.documentElement.dataset.autoStack === 'true' || matchMedia('(max-width: 600px)').matches;
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -3897,6 +3902,7 @@ function initResizers() {
     split.setAttribute('aria-orientation', stacked() ? 'horizontal' : 'vertical');
     split.setAttribute('aria-valuenow', String(Math.round(pct))); split.setAttribute('aria-valuetext', `${Math.round(pct)} percent`); split.setAttribute('aria-valuemin', String(Math.round(lo))); split.setAttribute('aria-valuemax', String(Math.round(hi))); // the real limits
     if (persist) save(key, pct);
+    requestAnimationFrame(() => requestAnimationFrame(() => fitTabs.resp && fitTabs.resp())); // re-fold for the new width
   };
   setSideW(layout.side || 288, false);
   setSplit((stacked() ? layout.reqH || 35 : layout.req || 50), false);
@@ -4130,6 +4136,7 @@ async function start() {
     if (!btn) return;
     e.preventDefault();
     btn.click(); // same menu as the row's More actions button
+    showMenu.anchor = e.target.closest('.row'); // Escape returns focus to the row, not the hidden button
   });
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || $('#findBar').hidden || $('#dlg').open || !$('#popover').hidden || e.defaultPrevented) return;
