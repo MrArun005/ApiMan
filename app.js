@@ -174,6 +174,7 @@ function applyAppearance(s = state.settings) {
   if (initResizers.autoStack) initResizers.autoStack();
   if (initResizers.refresh) initResizers.refresh();
   if (typeof updateDock === 'function') requestAnimationFrame(updateDock); // text size changes the drawer's width
+  if (initResizers.setSide) initResizers.setSide(ls.get('apiman:layout', {}).side || 288); // re-derive from the stored width
   if (!isPhone()) { $('#btnSide')?.setAttribute('aria-expanded', String(!s.sideHidden)); $('#btnSide')?.setAttribute('aria-label', s.sideHidden ? 'Show sidebar' : 'Hide sidebar'); }
 }
 
@@ -1712,7 +1713,7 @@ function showMenu(anchor, items) {
   const pop = $('#popover');
   const row = anchor.closest('.row');
   pop.setAttribute('role', 'menu');
-  const name = anchor.getAttribute('aria-label') || anchor.textContent.trim();
+  const name = anchor.getAttribute('aria-label') || (anchor.innerText || anchor.textContent).replace(/\s+/g, ' ').trim();
   if (name) pop.setAttribute('aria-label', name); else pop.removeAttribute('aria-label');
   pop.replaceChildren(...items.map((it) => (it === '-' ? h('div', { class: 'sep', role: 'separator' })
     : h('button', { class: `mi ${it.danger ? 'danger' : ''} ${it.current ? 'cur' : ''}`, role: 'menuitem', 'aria-current': it.current ? 'true' : null, onclick: () => { hideMenu(); it.onClick(); } }, it.label))));
@@ -2049,7 +2050,25 @@ function renderCrumb() {
   crumb.textContent = [col.info.name, ...(loc ? loc.parents.map((f) => f.name) : [])].join(' / ') + ' /';
 }
 
+/** Colour {{variables}} in the URL field: defined ones in the accent, undefined ones red with a wavy underline. */
+function renderUrlHl() {
+  const hl = $('#urlHl'), inp = $('#url');
+  if (!hl) return;
+  const t = cur(), text = inp.value, parts = [];
+  const vars = t && text.includes('{{') ? merged(scopesFor(t.cid)) : {};
+  let last = 0;
+  for (const m of text.matchAll(VAR_RE)) {
+    parts.push(text.slice(last, m.index));
+    const ok = Object.hasOwn(vars, m[1]) || dynamicVar(m[1]) !== undefined;
+    parts.push(h('span', { class: ok ? 'v' : 'v bad' }, m[0]));
+    last = m.index + m[0].length;
+  }
+  parts.push(text.slice(last), ' ');
+  hl.replaceChildren(...parts);
+  hl.scrollLeft = inp.scrollLeft;
+}
 function renderResolved() {
+  renderUrlHl();
   const t = cur();
   const el = $('#resolved');
   // The line always keeps its height, so the panes below never jump while you type.
@@ -2402,12 +2421,17 @@ const SNIPPETS = {
 function renderResponse() {
   const t = cur();
   const status = $('#respStatus');
-  const out = t.out;
+  const stale = !!(t.sending && !t.out && t.prevOut && t.prevOut.res); // keep the last response visible while sending
+  const out = t.out || (stale ? t.prevOut : null);
+  queueMicrotask(() => {
+    $('#respBody').classList.toggle('stale', stale);
+    if (stale) status.replaceChildren(h('span', { class: 'sending' }, 'Sending… ', h('b', { class: 'elapsed' }, '0.0 s')));
+  });
   $('#btnSend').textContent = t.sending ? 'Cancel' : 'Send';
   $('#btnSend').classList.toggle('busy', !!t.sending);
   const clearCounts = () => { for (const id of ['#cntRHeaders', '#cntRCookies', '#cntRTests', '#cntRConsole']) $(id).textContent = ''; };
-  if (t.sending || !out) {
-    status.replaceChildren(t.sending ? h('span', null, 'Sending…') : '');
+  if ((t.sending && !stale) || !out) {
+    status.replaceChildren(t.sending ? h('span', { class: 'sending' }, 'Sending… ', h('b', { class: 'elapsed' }, '0.0 s')) : '');
     clearCounts();
     t.respTab = 'rbody';
     switchPane('#respTabs', 'rbody');
@@ -2702,8 +2726,14 @@ async function send() {
   }
   const ctrl = new AbortController();
   t.sending = ctrl;
+  t.prevOut = t.out && t.out.res ? t.out : null;
   t.out = null;
   renderResponse();
+  const started = performance.now();
+  const ticker = setInterval(() => { // elapsed time while waiting
+    if (t.sending !== ctrl) { clearInterval(ticker); return; }
+    if (cur() === t) $$('.elapsed').forEach((el) => { el.textContent = `${((performance.now() - started) / 1000).toFixed(1)} s`; });
+  }, 100);
   const out = await execute({ ed: t.ed, cid: t.cid, itemId: t.itemId, signal: ctrl.signal, ask: (m) => ask({ title: 'Review this script change', message: m, ok: 'Allow', danger: true, pre: true }) });
   if (t.sending !== ctrl) return; // superseded
   t.sending = null;
@@ -2798,7 +2828,7 @@ function openDialog(opts) {
   renderDialog(opts);
 }
 /** Settings docks beside the app only while the app keeps at least 1000px; otherwise it overlays. */
-function canDock() { return innerWidth - Math.min(400 * cssScale(), innerWidth) >= 1000; }
+function canDock() { const side = $('.side')?.offsetWidth || 0; return innerWidth > 900 && innerWidth - 440 >= side + 480 * cssScale(); }
 function updateDock() {
   const dlg = $('#dlg');
   if (!dlg.open || !dlg.classList.contains('drawer')) return;
@@ -3439,6 +3469,7 @@ function openCode() {
   draw();
   openDialog({
     title: 'Generate code',
+    cancel: 'Close',
     focus: '#dlgFoot .btn.primary',
     wide: true,
     body: [tabsBar, viewer,
@@ -3735,6 +3766,7 @@ function bindEditor() {
     renderCounts();
     markDirty();
   });
+  ['scroll', 'keyup', 'click', 'select', 'focus', 'input'].forEach((ev) => $('#url').addEventListener(ev, () => { $('#urlHl').scrollLeft = $('#url').scrollLeft; }));
   $('#url').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); send(); } }); // Cmd/Ctrl+Enter is the global shortcut
   $('#url').addEventListener('paste', (e) => {
     const text = e.clipboardData.getData('text');

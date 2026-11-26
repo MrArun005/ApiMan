@@ -915,3 +915,23 @@ table.kv .act { width: 1%; white-space: nowrap; } /* the delete column is as wid
 table.kv tr > :nth-child(2) { width: 38%; }
 .req-col .pane-tools { align-items: center; } /* one vertical centre for every control in the row */
 @media (max-width: 600px) { #btnCode { margin-left: auto; } dialog.drawer, dialog.drawer:has(.dlg-body.tall) { width: 100vw; max-width: 100vw; } }
+/* round 23 */
+.url-wrap { flex: 1; min-width: 0; position: relative; display: flex; }
+.url-wrap #url { position: relative; z-index: 1; color: transparent; caret-color: var(--ink); background: transparent; }
+.url-wrap #url::placeholder { color: var(--muted); }
+.url-wrap #url::selection { color: transparent; background: color-mix(in srgb, var(--focus) 30%, transparent); }
+.url-hl { position: absolute; inset: 0; display: flex; align-items: center; overflow: hidden; white-space: pre; pointer-events: none;
+  font: calc(var(--fs-code) + 2px) var(--font-code); padding: 0 var(--s4); color: var(--ink); font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
+.url-hl .v { color: var(--focus); }
+.url-hl .v.bad { color: var(--delete); text-decoration: underline wavy color-mix(in srgb, var(--delete) 70%, transparent); text-underline-offset: 3px; }
+@media (max-width: 600px) { .url-hl { padding: 0 var(--s2); } }
+@media (min-width: 601px) and (max-width: 900px) { #url { min-width: 0; } }
+#respBody.stale { opacity: 0.45; pointer-events: none; transition: opacity .15s; } /* last response, while the new one is on its way */
+.resp-meta-alt .sending .elapsed, .resp-meta .sending .elapsed { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+@media (min-width: 901px) { :root { --drawer-w: 440px; } } /* a fixed-width drawer: docks down to ~1280 */
+/* on non-Body tabs the view toggle and actions leave, so the status has its full room ("OK" included) */
+.resp-col:has(#tab-rbody[aria-selected="false"]) #respTools > .seg, .resp-col:has(#tab-rbody[aria-selected="false"]) #respTools .tool-group > .btn,
+.resp-col:has(#tab-rbody[aria-selected="false"]) #respTools .seg-more { display: none !important; }
+.top-end { display: flex; align-items: center; gap: var(--s2); flex: none; }
+:root[data-side="right"] .top-end { order: 6; }
+.env-dot { width: 0.6em; height: 0.6em; }
