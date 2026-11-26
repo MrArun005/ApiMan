@@ -557,5 +557,240 @@ class NestedFoldersTest(unittest.TestCase):
             server.resolve_run_file("Orders API", "collections", data)            # ambiguous name: refused, not guessed
 
 
+class RunDataAndReportsTest(unittest.TestCase):
+    """`server.py run`: iteration data (-d), the RUN_JOB seam, the report event and the reports, without a browser."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def file(self, name, content):
+        p = self.dir / name
+        p.write_bytes(content if isinstance(content, bytes) else content.encode("utf-8"))
+        return str(p)
+
+    def refused(self, name, content, *words):
+        with self.assertRaises(SystemExit) as cm:
+            server.load_iteration_data(self.file(name, content))
+        msg = str(cm.exception.code)
+        self.assertTrue(msg.startswith("error: "), msg)
+        for w in words:
+            self.assertIn(w, msg)
+        return msg
+
+    @staticmethod
+    def args(argv):
+        return server.run_parser().parse_args(argv)
+
+    # ---------- CSV ----------
+
+    def test_csv_quotes_embedded_commas_newlines_and_bom(self):
+        text = '﻿id,name , note\r\n1,"Smith, Jane","line one\nline two"\r\n2,"say ""hi""",\r\n\r\n'
+        rows = server.load_iteration_data(self.file("rows.csv", text.encode("utf-8")))
+        self.assertEqual(rows, [{"id": "1", "name": "Smith, Jane", "note": "line one\nline two"},
+                                {"id": "2", "name": 'say "hi"', "note": ""}])
+        self.assertEqual(list(rows[0]), ["id", "name", "note"])               # BOM gone, header names trimmed
+        self.assertEqual(server.load_iteration_data(self.file("unix.csv", "a\nx\ny")), [{"a": "x"}, {"a": "y"}])  # no final newline
+        self.assertEqual(server.load_iteration_data(self.file("data.txt", "a,b\n1,2\n")), [{"a": "1", "b": "2"}])  # unknown extension: CSV
+
+    def test_csv_mistakes_are_refused_clearly(self):
+        self.refused("ragged.csv", "a,b\n1,2\n3\n", "row 2", "line 3", "1 value", "2 columns")
+        self.refused("long.csv", "a,b\n1,2,3\n", "row 1", "3 values")
+        self.refused("empty.csv", "", "empty")
+        self.refused("blank.csv", "\n\n  \n", "empty")
+        self.refused("header.csv", "a,b\n", "no data rows", "header")
+        self.refused("noname.csv", "a,,c\n1,2,3\n", "column 2", "no name")
+        self.refused("dup.csv", "a,b,a\n1,2,3\n", '"a" twice')
+        self.refused("badquote.csv", 'a,b\n"1"x,2\n', "isn't valid CSV")
+        self.refused("latin1.csv", "name\nCaf\xe9\n".encode("latin-1"), "UTF-8")
+        with self.assertRaises(SystemExit) as cm:
+            server.load_iteration_data(str(self.dir / "nope.csv"))
+        self.assertIn("not found", str(cm.exception.code))
+
+    def test_limits_rows_and_size(self):
+        old_rows, old_size = server.MAX_DATA_ROWS, server.MAX_DATA_FILE
+        server.MAX_DATA_ROWS = 3
+        try:
+            self.assertEqual(len(server.load_iteration_data(self.file("ok.csv", "a\n1\n2\n3\n"))), 3)
+            self.refused("many.csv", "a\n1\n2\n3\n4\n", "more than 3 rows")
+            self.refused("many.json", "[{}, {}, {}, {}]", "4 rows", "limit is 3")
+        finally:
+            server.MAX_DATA_ROWS = old_rows
+        self.assertEqual(server.MAX_DATA_ROWS, 100_000)
+        self.assertEqual(server.MAX_DATA_FILE, 20 * 1024 * 1024)
+        server.MAX_DATA_FILE = 10
+        try:
+            self.refused("big.csv", "a\n1234567890\n", "too large")
+        finally:
+            server.MAX_DATA_FILE = old_size
+
+    # ---------- JSON ----------
+
+    def test_json_rows_become_strings_like_postman(self):
+        rows = server.load_iteration_data(self.file("rows.json", '﻿[{"id": 1, "price": 2.5, "ok": true, "none": null, "name": "Zoë"}, {"id": 2}]'))
+        self.assertEqual(rows, [{"id": "1", "price": "2.5", "ok": "true", "none": "", "name": "Zoë"}, {"id": "2"}])
+        self.assertEqual(server.load_iteration_data(self.file("data", ' [{"a": "x"}]')), [{"a": "x"}])  # sniffed by its "["
+
+    def test_json_that_isnt_an_array_of_flat_objects_is_refused(self):
+        self.refused("obj.json", '{"id": 1}', "array of objects")
+        self.refused("scalars.json", "[1, 2]", "row 1", "isn't an object")
+        self.refused("nested.json", '[{"id": 1}, {"user": {"id": 2}}]', "row 2", '"user"', "nested")
+        self.refused("list.json", '[{"ids": [1, 2]}]', "row 1", "nested")
+        self.refused("empty.json", "[]", "no data rows")
+        self.refused("blank.json", "   ", "empty")
+        self.refused("broken.json", "[{", "isn't valid JSON")
+
+    # ---------- iterations and the RUN_JOB seam ----------
+
+    def test_iterations_follow_the_data_and_n_caps_them(self):
+        rows = [{"a": str(i)} for i in range(5)]
+        self.assertEqual(server.run_iterations(None, None), 1)
+        self.assertEqual(server.run_iterations(3, None), 3)
+        self.assertEqual(server.run_iterations(None, rows), 5)       # data, no -n: one per row
+        self.assertEqual(server.run_iterations(2, rows), 2)          # -n caps it
+        self.assertEqual(server.run_iterations(9, rows), 5)          # ...but never past the rows
+
+    def test_run_job_carries_data_and_report_options(self):
+        rows = [{"id": "1"}, {"id": "2"}, {"id": "3"}]
+        a = self.args(["c.json", "-d", "rows.csv", "--html", "r.html", "--report-bodies", "--folder", "Smoke", "--delay", "5", "--bail"])
+        self.assertEqual(a.iteration_data, "rows.csv")
+        self.assertIsNone(a.iterations)
+        self.assertEqual(server.build_run_job(a, True, rows), {
+            "cid": "collection.json", "envId": "env.json", "folder": "Smoke", "iterations": 3, "delay": 5, "bail": True,
+            "iterationData": rows, "report": {"html": True, "bodies": True}})
+        job = server.build_run_job(self.args(["c.json", "--iteration-data", "x.json", "-n", "2"]), False, rows)
+        self.assertEqual((job["envId"], job["iterations"], job["iterationData"]), ("", 2, rows[:2]))
+        self.assertEqual(job["report"], {"html": False, "bodies": False})
+        job = server.build_run_job(self.args(["c.json", "-n", "4", "--report-bodies"]), False, None)
+        self.assertEqual((job["iterations"], job["iterationData"], job["report"]), (4, None, {"html": False, "bodies": False}))
+        json.dumps(job)  # served as-is in /api/info
+
+    def test_bad_data_fails_before_a_browser_is_looked_for(self):
+        old = server.find_browser
+        server.find_browser = lambda *a: self.fail("looked for a browser")
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                server.run_main(["c.json", "-d", self.file("bad.csv", "a,b\n1\n")])
+            self.assertIn("row 1", str(cm.exception.code))
+            with self.assertRaises(SystemExit) as cm:
+                server.run_main(["c.json", "-n", "0"])
+            self.assertIn("1 or more", str(cm.exception.code))
+        finally:
+            server.find_browser = old
+
+    # ---------- run events, the HTML report and the reports ----------
+
+    @staticmethod
+    def result(it, row, passed=True, error=""):
+        return {"iteration": it, "dataRow": row, "name": "Get order", "path": ["Orders"], "method": "GET", "url": "https://api.test/o/1",
+                "status": None if error else 200, "reason": "" if error else "OK", "timeMs": None if error else 12, "size": 10,
+                "error": error, "warnings": [], "logs": [], "tests": [{"name": "status is 200", "passed": passed, "error": "" if passed else "expected 500"}]}
+
+    def queue_of(self, *events):
+        q = server.queue.Queue()
+        for e in events:
+            q.put(e)
+        return q
+
+    def test_report_event_is_written_to_the_html_file(self):
+        html = "<!doctype html><title>Run</title><p>Zoë ✓</p>"
+        shown = []
+        results, outcome, report = server.consume_run_events(self.queue_of(
+            {"type": "result", "result": self.result(1, 1)}, {"type": "report", "html": html}, {"type": "done", "totals": {}}),
+            lambda: None, shown.append)
+        self.assertEqual((len(results), len(shown), outcome, report), (1, 1, {"type": "done"}, html))
+        out = self.dir / "report.html"
+        self.assertIsNone(server.write_html_report(report, str(out)))
+        self.assertEqual(out.read_text("utf-8"), html)
+
+    def test_no_report_means_no_file_and_a_warning(self):
+        results, outcome, report = server.consume_run_events(self.queue_of({"type": "fatal", "error": "No folder named x"}), lambda: None)
+        self.assertEqual((results, outcome, report), ([], {"type": "fatal", "error": "No folder named x"}, None))
+        out = self.dir / "report.html"
+        self.assertIn("wasn't written", server.write_html_report(report, str(out)))
+        self.assertFalse(out.exists())
+        old = server.MAX_REPORT
+        server.MAX_REPORT = 10
+        try:
+            _, _, report = server.consume_run_events(self.queue_of({"type": "report", "html": "<!doctype html>" + "x" * 20}, {"type": "done"}), lambda: None)
+        finally:
+            server.MAX_REPORT = old
+        self.assertIn("larger than", server.write_html_report(report, str(out)))
+        self.assertFalse(out.exists())
+        _, outcome, _ = server.consume_run_events(server.queue.Queue(), lambda: "the browser exited unexpectedly (code 1).")
+        self.assertEqual(outcome, {"type": "fatal", "error": "the browser exited unexpectedly (code 1)."})
+
+    def test_results_without_iteration_fields_still_work(self):
+        r = self.result(1, None)
+        del r["iteration"], r["dataRow"]
+        results, _, _ = server.consume_run_events(self.queue_of({"type": "result", "result": r}, {"type": "done"}), lambda: None)
+        self.assertEqual((results[0]["iteration"], results[0]["dataRow"]), (1, None))
+
+    def test_junit_names_and_properties_carry_iteration_and_data_row(self):
+        import xml.etree.ElementTree as ET
+        path = self.dir / "junit.xml"
+        server.junit_report([self.result(1, 1), self.result(2, 2, passed=False), self.result(3, 3, error="connection refused")],
+                            "Orders API", str(path), 3, True)
+        root = ET.parse(path).getroot()
+        self.assertEqual((root.get("tests"), root.get("failures"), root.get("errors")), ("4", "1", "1"))
+        suites = root.findall("testsuite")
+        self.assertEqual([s.get("name") for s in suites], ["Orders / Get order (iteration 1, data row 1)",
+                                                           "Orders / Get order (iteration 2, data row 2)",
+                                                           "Orders / Get order (iteration 3, data row 3)"])
+        self.assertEqual({p.get("name"): p.get("value") for p in suites[1].find("properties")}, {"iteration": "2", "dataRow": "2"})
+        self.assertEqual(suites[1].find("testcase").get("name"), "status is 200 [iteration 2, data row 2]")
+        self.assertIsNotNone(suites[1].find("testcase/failure"))
+        self.assertEqual(suites[2].find("testcase").get("name"), "GET request [iteration 3, data row 3]")
+        # one plain iteration, no data: names stay as they were
+        server.junit_report([self.result(1, None)], "Orders API", str(path))
+        suite = ET.parse(path).getroot().find("testsuite")
+        self.assertEqual((suite.get("name"), suite.find("properties"), suite.find("testcase").get("name")),
+                         ("Orders / Get order", None, "status is 200"))
+
+    def test_console_label(self):
+        self.assertEqual(server.iteration_label({"iteration": 1, "dataRow": None}, 1, False), "")
+        self.assertEqual(server.iteration_label({"iteration": 2, "dataRow": None}, 3, False), "iteration 2")
+        self.assertEqual(server.iteration_label({"iteration": 1, "dataRow": 1}, 1, True), "iteration 1, data row 1")
+
+    # ---------- the run-event endpoint ----------
+
+    def test_run_event_endpoint_only_during_a_run_and_with_the_token(self):
+        handler = type("RunHandler", (server.Handler,), {})
+        handler.stores = server.make_stores(self.tmp.name)
+        srv = start(handler)
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+        def post(body, token=server.SESSION_TOKEN):
+            req = urllib.request.Request(base + "/api/run-event", method="POST", data=json.dumps(body).encode(),
+                                         headers={server.TOKEN_HEADER: token} if token else {})
+            try:
+                with urllib.request.urlopen(req) as r:
+                    return r.status
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code
+        old, old_max = server.RUN_EVENTS, server.MAX_REQUEST
+        try:
+            server.RUN_EVENTS = None
+            self.assertEqual(post({"type": "report", "html": "<!doctype html>"}), 404)   # no run: no endpoint
+            server.RUN_EVENTS = server.queue.Queue()
+            self.assertEqual(post({"type": "report", "html": "<!doctype html>"}, token=None), 403)
+            self.assertEqual(post({"type": "report", "html": "<!doctype html>"}, token="wrong"), 403)
+            self.assertEqual(post(["not", "an", "event"]), 400)
+            self.assertTrue(server.RUN_EVENTS.empty())
+            server.MAX_REQUEST = 1024 * 1024                                             # a report may exceed a plain request's limit
+            big = "<!doctype html>" + "é" * (1024 * 1024)
+            self.assertEqual(post({"type": "report", "html": big}), 200)
+            self.assertEqual(server.RUN_EVENTS.get_nowait()["html"], big)
+        finally:
+            server.MAX_REQUEST = old_max
+            server.RUN_EVENTS = old
+            srv.shutdown()
+            srv.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()

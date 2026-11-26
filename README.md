@@ -30,9 +30,15 @@ You only need Python 3. There's nothing to install.
 python3 server.py run orders.json -e staging.json            # live results; exit code 1 if a test fails or a request can't be sent
 python3 server.py run orders.json -e staging.json --var token=$API_TOKEN --junit report.xml --json report.json
 python3 server.py run orders.json --folder Smoke -n 3 --delay 200 --bail
+python3 server.py run orders.json -e staging.json -d customers.csv --html report.html   # once per data row, with an HTML report
 ```
 
-`--junit` writes a JUnit XML report that GitHub Actions, GitLab and Jenkins show as test results. `--var KEY=VALUE` sets environment variables, handy for secrets from the CI's environment. `--browser` (or `APIMAN_BROWSER`) points at a browser if it isn't found automatically. Requests that need an OAuth sign-in window can't run headless; use client credentials there.
+- `--junit FILE` writes a JUnit XML report that GitHub Actions, GitLab and Jenkins show as test results; `--json FILE` writes the same results as JSON.
+- `--html FILE` writes one self-contained HTML report (summary, then each request with its tests). It leaves out request and response headers and bodies unless you add `--report-bodies`, and even then masks Authorization, Cookie and token, secret, password and API-key headers.
+- `-d`/`--iteration-data FILE` runs the collection once per row: a CSV with a header row (UTF-8, quoted values may hold commas and line breaks), or a JSON array of flat objects. Each column is a `{{column}}` variable for that iteration, and scripts read it with `pm.iterationData.get('column')`. `-n` caps the number of rows run. Up to 100 000 rows and 20 MB. The console and every report say which iteration and data row each result came from.
+- `--var KEY=VALUE` sets environment variables, handy for secrets from the CI's environment. `--browser` (or `APIMAN_BROWSER`) points at a browser if it isn't found automatically.
+
+Requests that need an OAuth sign-in window can't run headless; use client credentials there. For GitHub Actions, copy [`docs/ci/github-actions.yml`](docs/ci/github-actions.yml): it runs a collection with a secret token and a data file and keeps the JUnit and HTML reports as artifacts, even when tests fail.
 
 ## Features
 

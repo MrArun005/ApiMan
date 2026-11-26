@@ -1,0 +1,61 @@
+# Example GitHub Actions workflow: run an ApiMan collection on every push and pull request.
+#
+# Copy it to .github/workflows/api-tests.yml in the repository that holds your collection, then change the
+# paths below. It needs nothing beyond Python and a Chrome, Chromium or Edge, which ubuntu-latest already has.
+#
+# Keep secrets out of collection and environment files: store them under Settings → Secrets and variables →
+# Actions (here API_TOKEN) and pass them with --var, which sets an environment variable for the run.
+
+name: API tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:            # lets you start a run by hand from the Actions tab
+
+permissions:
+  contents: read
+
+jobs:
+  api-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # ApiMan itself. If ApiMan is vendored into your repository, one checkout is enough.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Google Chrome is preinstalled on GitHub's ubuntu-latest runners, and `server.py run` finds it on its own.
+      # On a self-hosted runner without one, install Chrome or Chromium here, or pass --browser /path/to/chrome.
+      - name: Show the browser the run will use
+        run: google-chrome --version
+
+      # The step fails (non-zero exit) when a test fails, a request can't be sent or the run itself can't finish.
+      # -d runs the collection once per row of data.csv (its columns are {{column}} variables); add -n 5 to cap it.
+      # The HTML report leaves out headers and bodies unless you add --report-bodies (credentials are masked then too).
+      # The secret goes through an environment variable rather than ${{ secrets.API_TOKEN }} inside the command,
+      # so its value is never pasted into the shell script itself.
+      - name: Run the collection
+        env:
+          API_TOKEN: ${{ secrets.API_TOKEN }}
+        run: >
+          python3 server.py run api-tests/orders.postman_collection.json
+          -e api-tests/staging.postman_environment.json
+          --var "token=$API_TOKEN"
+          -d api-tests/data.csv
+          --junit report.xml
+          --html report.html
+
+      # if: always() keeps the reports when tests fail, which is when you need them.
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-test-reports
+          path: |
+            report.xml
+            report.html
+          if-no-files-found: warn
