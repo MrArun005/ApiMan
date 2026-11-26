@@ -69,7 +69,7 @@
 
   /* resizable layout (set by the drag handles, remembered per browser) */
   --side-w: 288px;
-  --side-eff: max(var(--side-w), calc(280px * var(--text-scale))); /* labels always fit, at any text size */
+  --side-eff: max(var(--side-w), calc(260px * var(--text-scale))); /* labels always fit, at any text size */
   --req-w: 50%;
 }
 
@@ -782,7 +782,7 @@ dialog.drawer::backdrop { background: transparent; }
 dialog.drawer .grid-2, dialog.drawer .grid-3 { grid-template-columns: minmax(0, 1fr); }
 @media (min-width: 821px) { :root.drawer-open .app { width: calc(100vw - var(--drawer-w)); } }
 /* accent tint for the active tab (Settings > Active tab) */
-:root[data-tab-style="accent"] { --seg-on: linear-gradient(180deg, color-mix(in srgb, var(--focus) 30%, var(--panel)) 0%, color-mix(in srgb, var(--focus) 16%, var(--panel)) 100%); }
+:root[data-tab-style="accent"] { --seg-on: linear-gradient(180deg, color-mix(in srgb, var(--focus) 40%, var(--panel)) 0%, color-mix(in srgb, var(--focus) 12%, var(--panel)) 100%); }
 /* request bar: show exactly which of method / URL / Send has focus */
 .reqbar:focus-within { box-shadow: none; }
 .reqbar:has(#url:focus) { box-shadow: 0 0 0 2px var(--focus), 0 0 0 5px color-mix(in srgb, var(--focus) 22%, transparent); }
@@ -793,3 +793,16 @@ dialog.drawer .grid-2, dialog.drawer .grid-3 { grid-template-columns: minmax(0, 
 .tabs .tab, .seg-btn { min-height: max(26px, var(--h-sm)); }
 dialog:has(.dlg-body .import-panes), dialog:has(.drop) { min-height: min(480px, calc(100dvh - 32px)); }
 #respTabs .pane-max { margin-left: auto; } /* flush right now the status lives in the response bar */
+/* round 11 */
+.resp-meta-alt { margin-right: var(--s3); } /* the status is first in the bar: same place on every response tab */
+#respTools.short .resp-meta-alt .m-reason { display: none; }
+#respTools.squeeze > .seg { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+#respTools.wrap { row-gap: var(--s2); }
+#dlgFoot { flex-wrap: wrap; row-gap: var(--s2); } /* never clip the footer at large text on phones */
+.slider-row .unit { font-size: var(--fs-sm); }
+dialog.drawer .field-row { flex-wrap: wrap; } dialog.drawer .field-row .hint { flex-basis: 100%; }
+#respHeaders th { height: var(--row-h); background: var(--hover); vertical-align: middle; padding-top: 0; padding-bottom: 0; }
+.side .seg.block .seg-btn { padding-left: var(--s1); padding-right: var(--s1); min-width: 0; }
+.tabstrip .newtab { position: sticky; right: var(--h-bar); z-index: 1; box-shadow: -8px 0 8px -6px rgb(0 0 0 / 0.25); }
+.tabstrip .alltabs { right: 0; box-shadow: none; }
+.tabstrip .alltabs svg { transform: rotate(90deg); }

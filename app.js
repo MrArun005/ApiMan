@@ -1731,7 +1731,7 @@ function fitTabs(seg) {
     more.addEventListener('click', () => showMenu(more, btns.filter((b) => b.classList.contains('ovf')).map((b) => {
       const name = [...b.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim() || b.textContent.trim();
       const count = b.querySelector('.count:not(.dot)')?.textContent.trim();
-      return { label: count ? `${name} (${count})` : name, onClick: () => { b.click(); b.focus(); } };
+      return { label: count ? `${name} (${count})` : name, onClick: () => { b.click(); requestAnimationFrame(() => requestAnimationFrame(() => b.focus())); } };
     })));
     seg.after(more);
   }
@@ -1956,7 +1956,12 @@ function renderTabs() {
         h('span', { class: `dot ${t.dirty ? '' : 'off'}`, role: t.dirty ? 'img' : null, 'aria-label': t.dirty ? 'Unsaved changes' : null, title: t.dirty ? 'Unsaved changes' : null }),
         h('button', { class: 'x', title: 'Close tab', 'aria-label': `Close ${t.ed.name}`, tabindex: i === state.active ? '0' : '-1', onclick: (e) => { e.stopPropagation(); closeTab(i); } }, icon('x')));
     }),
-    h('button', { class: 'newtab', title: 'New request tab', 'aria-label': 'New request tab', onclick: () => { openTab(newTab()); $('#url').focus(); } }, icon('plus')));
+    h('button', { class: 'newtab', title: 'New request tab', 'aria-label': 'New request tab', onclick: () => { openTab(newTab()); $('#url').focus(); } }, icon('plus')),
+    h('button', { class: 'newtab alltabs', title: 'All open tabs', 'aria-label': 'All open tabs', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
+      onclick: (e) => showMenu(e.currentTarget, state.tabs.map((t, i) => ({
+        label: `${t.ed.method}  ${t.ed.name}${t.dirty ? '  •' : ''}${i === state.active ? '  (current)' : ''}`,
+        onClick: () => { state.active = i; persistTabs(); renderAll(); requestAnimationFrame(() => $('#tabstrip .rtab.on')?.focus()); },
+      }))) }, icon('chevron')));
   const on = strip.querySelector('.rtab.on');
   if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
@@ -3386,7 +3391,6 @@ async function openRunner(cid, folderId) {
   openDialog({
     title: 'Collection runner',
     cancel: 'Close',
-    wide: true,
     body: [
       h('div', { class: 'grid-2' }, h('div', { class: 'field' }, h('label', null, 'Collection'), colSel), h('div', { class: 'field' }, h('label', null, 'Folder'), folderSel)),
       h('div', { class: 'grid-2' }, h('div', { class: 'field' }, h('label', null, 'Iterations'), iterIn), h('div', { class: 'field' }, h('label', null, 'Delay between requests (ms)'), delayIn)),
@@ -3593,7 +3597,7 @@ function openSettings(initial = null, layoutSnap = null) {
   ];
   openDialog({
     title: 'Settings',
-    tall: true, drawer: true,
+    tall: true, drawer: true, focus: '#dlgBody .dlg-tabs .on',
     body: dlgTabs([{ key: 'appearance', label: 'Appearance', content: appearance }, { key: 'requests', label: 'Requests', content: requests }]),
     onClose: () => { if (!saved && !reopening) { applyTheme(); applyAppearance(); initResizers.restore(snap); } }, // Cancel undoes everything, panel sizes included
     buttons: [
@@ -3821,7 +3825,7 @@ function initResizers() {
   const stacked = () => document.documentElement.dataset.layout === 'stacked' || document.documentElement.dataset.autoStack === 'true' || matchMedia('(max-width: 1180px)').matches;
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const side = $('#sideResizer'), split = $('#splitResizer');
-  const sideMin = () => Math.ceil(280 * cssScale()); // matches --side-eff in app.css
+  const sideMin = () => Math.ceil(260 * cssScale()); // matches --side-eff in app.css
   // Width each pane needs side by side: its full tab row (tabs + maximise + padding), never less than 320px.
   // Each pane can shrink to 320px (x text size); tabs that don't fit then move into a "More tabs" menu.
   const paneNeeds = () => [320 * cssScale(), 320 * cssScale()];
@@ -3853,7 +3857,7 @@ function initResizers() {
     root.style.setProperty(stacked() ? '--req-h' : '--req-w', `${pct}%`);
     split.dataset.now = pct;
     split.setAttribute('aria-orientation', stacked() ? 'horizontal' : 'vertical');
-    split.setAttribute('aria-valuenow', String(Math.round(pct))); split.setAttribute('aria-valuemin', String(Math.ceil(lo))); split.setAttribute('aria-valuemax', String(Math.floor(hi))); // the real limits
+    split.setAttribute('aria-valuenow', String(Math.round(pct))); split.setAttribute('aria-valuemin', String(Math.floor(lo))); split.setAttribute('aria-valuemax', String(Math.ceil(hi))); // the real limits
     if (persist) save(key, pct);
   };
   setSideW(layout.side || 288, false);
@@ -3963,13 +3967,18 @@ async function start() {
   // The response row measures itself: if tabs + status + button don't fit, the status gets its own line, so no tab is hidden.
   const respRow = $('#respTabs');
   const fitResp = () => {
-    // The status always lives in the response bar under the tabs, as one unit and in one place, so the body never
-    // jumps. Short of room, the actions become icons, then the bar wraps; tabs that don't fit go into More.
+    // One row, degrading in a fixed order: drop the reason text ("OK"), then actions become icons, then the
+    // view toggle keeps only the active view (others in its More menu). Only then does the bar wrap.
     const seg = respRow.querySelector('.seg'), meta = $('#respStatus'), alt = $('#respMetaAlt'), tools = $('#respTools');
+    const view = tools.querySelector(':scope > .seg');
     alt.replaceChildren(...[...meta.children].map((el) => el.cloneNode(true)));
-    tools.classList.remove('wrap', 'icons');
-    if (tools.scrollWidth > tools.clientWidth) tools.classList.add('icons');
-    if (tools.scrollWidth > tools.clientWidth) tools.classList.add('wrap');
+    tools.classList.remove('wrap', 'icons', 'short', 'squeeze');
+    view.querySelectorAll('.ovf').forEach((b) => b.classList.remove('ovf'));
+    const over = () => tools.scrollWidth > tools.clientWidth + 1;
+    for (const step of ['short', 'icons']) if (over()) tools.classList.add(step);
+    if (over()) { tools.classList.add('squeeze'); fitTabs(view); tools.classList.remove('squeeze'); } // hide extra views, then keep the rest whole
+    else fitTabs(view);
+    if (over()) tools.classList.add('wrap');
     fitTabs(seg);
   };
   // Toolbar actions carry an icon and a label; the label is also their accessible name when only the icon shows.
@@ -3991,7 +4000,7 @@ async function start() {
     el.addEventListener('scroll', update, { passive: true });
     update();
   };
-  ['#reqTabs > .seg', '#respTabs > .seg', '.side .seg.block', '#tabstrip'].forEach((sel) => watchOverflow($(sel)));
+  ['#reqTabs > .seg', '#respTabs > .seg', '.side .seg.block'].forEach((sel) => watchOverflow($(sel)));
   // Request tab row and the request sub-tab rows (body type, auth type...) collapse into a More menu.
   [$('#reqTabs > .seg'), ...$$('.req-col .pane-tools > .seg')].forEach((seg) => {
     const run = () => requestAnimationFrame(() => fitTabs(seg));
