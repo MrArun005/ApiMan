@@ -3338,7 +3338,7 @@ const GENERATORS = {
   } },
   httpie: { label: 'HTTPie', gen(w) {
     const flags = w.body.kind === 'text' ? `--raw ${sq(w.body.text)} ` : w.body.kind === 'formdata' ? '--form ' : '';
-    const lines = [`http ${flags}${sq(w.method)} ${sq(w.url)}`];
+    const lines = [`http ${flags}-- ${sq(w.method)} ${sq(w.url)}`]; // "--": nothing after it is read as an option (a header named "-o..." stays a header)
     for (const [k, v] of w.headers) lines.push(`  ${sq(`${hie(k)}:${hie(v)}`)}`);
     if (w.body.kind === 'formdata') for (const f of w.body.fields) lines.push(f.file ? `  ${sq(`${hie(f.key)}@${f.file.name}`)}` : `  ${sq(`${hie(f.key)}=${hie(f.value)}`)}`);
     if (w.body.kind === 'file') lines.push(`  < ${sq(w.body.file.name)}`);
