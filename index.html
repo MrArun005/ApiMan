@@ -23,6 +23,7 @@
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
+<a class="skip-link" href="#url">Skip to the request</a>
 <div class="app">
   <header class="top">
     <button id="btnSide" class="btn icon" aria-label="Show sidebar" aria-expanded="false" aria-controls="side" title="Collections, environments, history">
@@ -56,10 +57,12 @@
   </header>
 
   <aside class="side" id="side">
-    <div class="seg block" role="tablist" aria-label="Sidebar">
-      <button role="tab" class="seg-btn on" data-view="collections" aria-selected="true">Collections</button>
-      <button role="tab" class="seg-btn" data-view="environments" aria-selected="false">Environments</button>
-      <button role="tab" class="seg-btn" data-view="history" aria-selected="false">History</button>
+    <div class="side-tabs">
+      <div class="seg block" role="tablist" aria-label="Sidebar">
+        <button role="tab" class="seg-btn on" data-view="collections" aria-selected="true">Collections</button>
+        <button role="tab" class="seg-btn" data-view="environments" aria-selected="false">Environments</button>
+        <button role="tab" class="seg-btn" data-view="history" aria-selected="false">History</button>
+      </div>
     </div>
     <div class="side-search">
       <input id="search" type="search" placeholder="Filter requests  /" aria-label="Filter" spellcheck="false" autocomplete="off">

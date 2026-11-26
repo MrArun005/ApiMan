@@ -67,7 +67,7 @@ function toast(msg) {
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => t.classList.remove('show'), 3600);
+  toast.timer = setTimeout(() => t.classList.remove('show'), 2200);
 }
 
 const ls = {
@@ -1742,6 +1742,11 @@ function fitTabs(seg) {
   more.hidden = false;
   const active = btns.find((b) => b.classList.contains('on'));
   for (let i = btns.length - 1; i >= 0 && seg.scrollWidth > seg.clientWidth + 1; i--) if (btns[i] !== active) btns[i].classList.add('ovf');
+  const hidden = btns.filter((b) => b.classList.contains('ovf'));
+  if (hidden.length === 1) { // maybe it fits where the More button sits
+    more.hidden = true; hidden[0].classList.remove('ovf');
+    if (seg.scrollWidth > seg.clientWidth + 1) { hidden[0].classList.add('ovf'); more.hidden = false; }
+  }
 }
 function placePopover(pop, anchor) {
   pop.hidden = false;
@@ -2541,7 +2546,7 @@ const find = { marks: [], hits: [], i: -1 };
 const findCm = () => { const el = $('#respBody .CodeMirror'); return el && el.CodeMirror; };
 function openFind() {
   const t = cur();
-  if (t && t.bodyView === 'preview' && !$('#respTools').classList.contains('no-body')) { // search the source instead
+  if ($('#respTools .seg-btn.on')?.dataset.view === 'preview' && !$('#respTools').classList.contains('no-body')) { // search the source instead
     $('#respTools [data-view="raw"]').click();
     find.restoreView = 'preview'; // undone when Find closes: the user never chose Raw
     setTimeout(openFind, 0);
@@ -3852,7 +3857,7 @@ function initResizers() {
   const stacked = () => document.documentElement.dataset.layout === 'stacked' || document.documentElement.dataset.autoStack === 'true' || matchMedia('(max-width: 1180px)').matches;
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const side = $('#sideResizer'), split = $('#splitResizer');
-  const sideMin = () => Math.ceil(260 * cssScale()); // matches --side-eff in app.css
+  const sideMin = () => Math.ceil(Math.min(260 * cssScale(), innerWidth <= 900 ? innerWidth * 0.35 : Infinity)); // matches --side-eff in app.css
   // Width each pane needs side by side: its full tab row (tabs + maximise + padding), never less than 320px.
   // Each pane can shrink to 320px (x text size); tabs that don't fit then move into a "More tabs" menu.
   const paneNeeds = () => [320 * cssScale(), 320 * cssScale()];
@@ -3886,7 +3891,7 @@ function initResizers() {
     root.style.setProperty(stacked() ? '--req-h' : '--req-w', `${pct}%`);
     split.dataset.now = pct;
     split.setAttribute('aria-orientation', stacked() ? 'horizontal' : 'vertical');
-    split.setAttribute('aria-valuenow', String(Math.round(pct))); split.setAttribute('aria-valuetext', `${Math.round(pct)} percent`); split.setAttribute('aria-valuemin', String(Math.floor(lo))); split.setAttribute('aria-valuemax', String(Math.ceil(hi))); // the real limits
+    split.setAttribute('aria-valuenow', String(Math.round(pct))); split.setAttribute('aria-valuetext', `${Math.round(pct)} percent`); split.setAttribute('aria-valuemin', String(Math.round(lo))); split.setAttribute('aria-valuemax', String(Math.round(hi))); // the real limits
     if (persist) save(key, pct);
   };
   setSideW(layout.side || 288, false);
@@ -4042,6 +4047,8 @@ async function start() {
     update();
   };
   ['#reqTabs > .seg', '#respTabs > .seg', '.side .seg.block'].forEach((sel) => watchOverflow($(sel)));
+  { const sideSeg = $('.side .seg.block'); const run = () => requestAnimationFrame(() => fitTabs(sideSeg));
+    new ResizeObserver(run).observe(sideSeg.parentElement); new MutationObserver(run).observe(sideSeg, { subtree: true, attributes: true, attributeFilter: ['aria-selected'] }); }
   // Request tab row and the request sub-tab rows (body type, auth type...) collapse into a More menu.
   [$('#reqTabs > .seg'), ...$$('.req-col .pane-tools > .seg')].forEach((seg) => {
     const run = () => requestAnimationFrame(() => fitTabs(seg));
@@ -4119,7 +4126,12 @@ async function start() {
     if (e.key !== 'Escape' || $('#dlg').open || !$('#popover').hidden || !$('.app').classList.contains('side-open')) return;
     setSide(false); $('#btnSide').focus();
   });
-  { const strip = $('#tabstrip'), upd = () => strip.classList.toggle('fade-left', strip.scrollLeft > 1);
+  { const strip = $('#tabstrip'), upd = () => {
+      strip.classList.toggle('fade-left', strip.scrollLeft > 1);
+      const sr = strip.getBoundingClientRect(), pinned = [...strip.querySelectorAll('.newtab')].reduce((w, b) => w + b.offsetWidth, 0);
+      strip.querySelectorAll('.rtab').forEach((t) => { const r = t.getBoundingClientRect(); t.classList.toggle('clipped', r.left < sr.left - 1 || r.right > sr.right - pinned + 1); });
+    };
+    new MutationObserver(upd).observe(strip, { childList: true });
     strip.addEventListener('scroll', upd, { passive: true }); new ResizeObserver(upd).observe(strip); }
   // The active request tab stays in view when the strip or the text size changes.
   new ResizeObserver(() => { const on = $('#tabstrip .rtab.on'); if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }).observe($('#tabstrip'));

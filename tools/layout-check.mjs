@@ -11,7 +11,7 @@ const APP = process.env.APP || 'http://127.0.0.1:5577/';
 const BIG_URL = process.env.BIG_URL || 'http://127.0.0.1:18765/big.json';
 const ONLY = process.env.ONLY; // e.g. ONLY=1280 to run one width
 
-const WIDTHS = [[1440, 900], [1366, 768], [1280, 800], [1024, 768], [768, 800], [720, 900], [390, 844]].filter(([w]) => !ONLY || String(w) === ONLY);
+const WIDTHS = [[1440, 900], [1366, 768], [1280, 800], [1024, 768], [768, 800], [720, 900], [640, 800], [601, 800], [390, 844]].filter(([w]) => !ONLY || String(w) === ONLY);
 const SIDES = ['left', 'right'];
 const LAYOUTS = ['auto', 'stacked'];
 const SCALES = [[1, 1], [0.8, 0.75], [1.5, 1.4], [1.5, 0.75], [0.8, 1.4]]; // [text, density] at the Settings extremes

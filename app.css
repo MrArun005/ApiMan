@@ -853,3 +853,19 @@ h1.wordmark { font: inherit; margin: 0; }
   .titlebar .name-input { flex: 1; min-width: 0; max-width: none; }
 }
 @media (min-width: 601px) and (max-width: 900px) { .top .env-picker { flex: 1 1 120px; max-width: 260px; } } /* shrinks before the header wraps */
+/* round 16 */
+@media (max-width: 900px) { :root { --side-eff: min(max(var(--side-w), calc(260px * var(--text-scale))), 35vw); } } /* small windows: the sidebar never crowds the editor */
+@media (max-width: 760px) and (min-width: 601px) { .brand .wordmark, .brand .pill { display: none; } } /* logo only, so the header keeps one row */
+@media (max-width: 900px) { :root.drawer-open .app { width: 100vw; } dialog.drawer::backdrop { background: rgb(10 14 18 / 0.35); } } /* Settings overlays on small windows */
+:root.drawer-open .top { height: auto; min-height: calc(var(--h) + 20px); flex-wrap: wrap; row-gap: var(--s2); align-content: center; }
+.top .env-picker { min-width: calc(120px * var(--text-scale)); }
+.toast { top: auto; bottom: var(--s4); left: var(--s4); transform: translateY(8px); } .toast.show { transform: none; } /* bottom-left, over the sidebar */
+@media (max-width: 600px) { .toast { left: var(--s3); right: var(--s3); } }
+.rtab.clipped .x { visibility: hidden; }
+.tabstrip .newtab:not(.alltabs)::before { content: ""; position: absolute; right: 100%; top: 0; bottom: 0; width: 24px; pointer-events: none; background: linear-gradient(90deg, transparent, var(--panel)); }
+.skip-link { position: absolute; left: var(--s3); top: -48px; z-index: 100; padding: var(--s2) var(--s3); background: var(--panel); color: var(--ink); border: 1px solid var(--focus); border-radius: var(--r); }
+.skip-link:focus { top: var(--s2); }
+.side .seg.block .seg-btn { min-width: max-content; } /* labels never shrink; extra sections fold into More */
+@media (max-width: 900px) { :root { --drawer-w: min(calc(400px * var(--text-scale)), 100vw); } } /* overlaying here, so it may use the window */
+.side-tabs { display: flex; align-items: center; gap: var(--s1); margin: var(--s3) var(--side-gutter) var(--s2); min-width: 0; }
+.side-tabs > .seg { flex: 1 1 auto; min-width: 0; margin: 0; }
