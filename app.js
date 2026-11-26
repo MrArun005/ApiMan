@@ -1747,6 +1747,8 @@ function fitTabs(seg) {
     more.hidden = true; hidden[0].classList.remove('ovf');
     if (seg.scrollWidth > seg.clientWidth + 1) { hidden[0].classList.add('ovf'); more.hidden = false; }
   }
+  // a More menu holding only unavailable options (e.g. Preview for JSON) is noise: hide it
+  if (btns.every((b) => !b.classList.contains('ovf') || b.disabled || b.getAttribute('aria-disabled') === 'true')) more.hidden = true;
 }
 function placePopover(pop, anchor) {
   pop.hidden = false;
@@ -2549,11 +2551,13 @@ function openFind() {
   if ($('#respTools .seg-btn.on')?.dataset.view === 'preview' && !$('#respTools').classList.contains('no-body')) { // search the source instead
     $('#respTools [data-view="raw"]').click();
     find.restoreView = 'preview'; // undone when Find closes: the user never chose Raw
+    toast('Searching the Raw view; Preview comes back when you close Find.');
     setTimeout(openFind, 0);
     return;
   }
   if (!findCm()) { toast(t && t.out && t.out.res ? 'This response has no text to search.' : 'Send the request first: Find searches the response body.'); return; }
   $('#findBar').hidden = false;
+  $('#btnFindBody').setAttribute('aria-pressed', 'true');
   refreshEditors($('#pane-rbody'));
   $('#findInput').focus();
   $('#findInput').select();
@@ -2561,7 +2565,7 @@ function openFind() {
 }
 function clearFind() { find.marks.forEach((m) => m.clear()); if (find.current) find.current.clear(); find.current = null; find.marks = []; find.hits = []; find.i = -1; }
 function closeFind() {
-  clearFind(); $('#findBar').hidden = true; $('#findCount').textContent = '';
+  clearFind(); $('#findBar').hidden = true; $('#findCount').textContent = ''; $('#btnFindBody').setAttribute('aria-pressed', 'false');
   const cm = findCm(); if (cm) refreshEditors($('#pane-rbody'));
   if (find.restoreView) { const v = find.restoreView; find.restoreView = null; $(`#respTools [data-view="${v}"]`)?.click(); }
   $('#btnFindBody').focus(); // focus goes back to the opener
@@ -3339,7 +3343,7 @@ const GENERATORS = {
       args += ', data=data, files=files';
     }
     if (w.body.kind === 'file') { lines.push(`with open(${dq(w.body.file.name)}, "rb") as f:`, '    payload = f.read()'); args += ', data=payload'; }
-    lines.push('', `response = requests.request(${dq(w.method)}, url, ${args}, timeout=30)`, 'print(response.status_code)', 'print(response.text)');
+    lines.push('', `response = requests.request(${dq(w.method)}, url, ${args}, timeout=${Number(state.settings.timeout) || 60})`, 'print(response.status_code)', 'print(response.text)');
     return lines.join('\n');
   } },
   java: { label: 'Java HttpClient', gen(w) {
@@ -3854,7 +3858,7 @@ function initResizers() {
   const root = document.documentElement;
   const layout = ls.get('apiman:layout', {});
   const save = (k, v) => { layout[k] = v; ls.set('apiman:layout', layout); };
-  const stacked = () => document.documentElement.dataset.layout === 'stacked' || document.documentElement.dataset.autoStack === 'true' || matchMedia('(max-width: 1180px)').matches;
+  const stacked = () => document.documentElement.dataset.layout === 'stacked' || document.documentElement.dataset.autoStack === 'true' || matchMedia('(max-width: 600px)').matches;
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const side = $('#sideResizer'), split = $('#splitResizer');
   const sideMin = () => Math.ceil(Math.min(260 * cssScale(), innerWidth <= 900 ? innerWidth * 0.35 : Infinity)); // matches --side-eff in app.css
@@ -3878,7 +3882,7 @@ function initResizers() {
     // request bars + a few rows, the response bars + 120px of body.
     const body = $('#respBody'), col = $('.resp-col');
     const respBars = body && body.offsetHeight ? col.offsetHeight - body.offsetHeight : $('#respTabs').offsetHeight + 40 * cssScale();
-    const [reqMin, respMin] = stacked() ? [120 * cssScale(), respBars + 180] : paneNeeds(); // stacked: response keeps 180px of body
+    const [reqMin, respMin] = stacked() ? [120 * cssScale(), respBars + 128] : paneNeeds(); // stacked: each side keeps a usable area
     const lo = Math.max(15, (reqMin / total) * 100), hi = Math.min(85, 100 - (respMin / total) * 100);
     if (lo <= hi) return [lo, hi];
     const give = Math.max(15, 100 - (respMin / total) * 100); // both minimums can't fit: the request gives way, the response keeps its room
@@ -3898,7 +3902,7 @@ function initResizers() {
   setSplit((stacked() ? layout.reqH || 35 : layout.req || 50), false);
   if (layout.req) root.style.setProperty('--req-w', `${layout.req}%`);
   if (layout.reqH) root.style.setProperty('--req-h', `${layout.reqH}%`);
-  matchMedia('(max-width: 1180px)').addEventListener('change', () => setSplit((stacked() ? layout.reqH || 35 : layout.req || 50), false));
+  matchMedia('(max-width: 600px)').addEventListener('change', () => setSplit((stacked() ? layout.reqH || 35 : layout.req || 50), false));
   window.addEventListener('resize', () => requestAnimationFrame(() => setSplit(Number(split.dataset.now) || 50, false))); // re-clamp to the new window
 
   const drag = (el, onMove) => el.addEventListener('pointerdown', (e) => {
@@ -4120,6 +4124,17 @@ async function start() {
     e.preventDefault();
     if ($('.resp-col .tab.on')?.dataset.tab !== 'rbody') $('#tab-rbody').click();
     openFind();
+  });
+  $('#sideBody').addEventListener('contextmenu', (e) => {
+    const btn = e.target.closest('.row')?.querySelector('.acts button[aria-label="More actions"]');
+    if (!btn) return;
+    e.preventDefault();
+    btn.click(); // same menu as the row's More actions button
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || $('#findBar').hidden || $('#dlg').open || !$('#popover').hidden || e.defaultPrevented) return;
+    if (!e.target.closest || !e.target.closest('.resp-col')) return;
+    e.preventDefault(); closeFind();
   });
   // Phones: Escape closes the open sidebar drawer.
   document.addEventListener('keydown', (e) => {

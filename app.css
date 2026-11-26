@@ -263,7 +263,7 @@ input[type="number"] { font-variant-numeric: tabular-nums; }
 /* ===================================================================================== tabs strip */
 .work { display: flex; flex-direction: column; min-width: 0; min-height: 0; container: work / inline-size; }
 /* auto-stack (set by JS when side-by-side panes would be narrower than their content needs) */
-:root[data-auto-stack="true"] .split:not([data-max]) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 35%)) 1px minmax(200px, 1fr); }
+:root[data-auto-stack="true"] .split:not([data-max]) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(80px, var(--req-h, 35%)) 1px minmax(120px, 1fr); }
 :root[data-auto-stack="true"] .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
 :root[data-auto-stack="true"] .split > .resizer::after { inset: -1px 0; }
 .tabstrip { scroll-padding-inline-end: calc(2 * var(--h-bar) + 8px); display: flex; align-items: stretch; height: var(--h-bar); background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; flex: none; } /* scrolls by wheel/trackpad; the active tab is kept in view */
@@ -603,11 +603,11 @@ table.grid .tight { width: 1%; white-space: nowrap; }
 .runner-fail { display: flex; gap: var(--s2); align-items: baseline; margin-top: var(--s1); font-size: var(--fs-xs); color: var(--muted); font-weight: 400; white-space: normal; }
 
 /* ===================================================================================== responsive */
-:root[data-layout="stacked"] .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 35%)) 1px minmax(200px, 1fr); }
+:root[data-layout="stacked"] .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(80px, var(--req-h, 35%)) 1px minmax(120px, 1fr); }
 :root[data-layout="stacked"] .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
 :root[data-layout="stacked"] .split > .resizer::after { inset: -1px 0; }
-@media (max-width: 1180px) {
-  .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 35%)) 1px minmax(200px, 1fr); }
+@media (max-width: 600px) {
+  .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(80px, var(--req-h, 35%)) 1px minmax(120px, 1fr); }
   .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
   .split > .resizer::after { inset: -1px 0; }
 }
@@ -714,7 +714,7 @@ mark { background: color-mix(in srgb, var(--post) 30%, transparent); color: inhe
 /* 6: in stacked layouts, editors flex to their pane instead of forcing their own minimum */
 :root[data-auto-stack="true"] .split .code-editor, :root[data-layout="stacked"] .split .code-editor,
 :root[data-auto-stack="true"] .split textarea.prose, :root[data-layout="stacked"] .split textarea.prose { min-height: 0; }
-@media (max-width: 1180px) and (min-width: 601px) { .split .code-editor, .split textarea.prose { min-height: 0; } }
+@media (min-width: 601px) { :root[data-auto-stack="true"] .split .code-editor, .split textarea.prose { min-height: 0; } }
 /* 8: no ligatures in any code face (the font shorthand elsewhere would reset them) */
 table.kv input[type="text"], table.kv input[type="password"], .resolved, pre, pre.hint-code, code, kbd, .status-code,
 .find-bar input, .mono, .CodeMirror, .reqbar input, textarea.code { font-variant-ligatures: none !important; font-feature-settings: "liga" 0, "calt" 0 !important; }
@@ -863,9 +863,17 @@ h1.wordmark { font: inherit; margin: 0; }
 @media (max-width: 600px) { .toast { left: var(--s3); right: var(--s3); } }
 .rtab.clipped .x { visibility: hidden; }
 .tabstrip .newtab:not(.alltabs)::before { content: ""; position: absolute; right: 100%; top: 0; bottom: 0; width: 24px; pointer-events: none; background: linear-gradient(90deg, transparent, var(--panel)); }
-.skip-link { position: absolute; left: var(--s3); top: -48px; z-index: 100; padding: var(--s2) var(--s3); background: var(--panel); color: var(--ink); border: 1px solid var(--focus); border-radius: var(--r); }
-.skip-link:focus { top: var(--s2); }
+.skip-link { position: absolute; left: var(--s3); top: 0; transform: translateY(-200%); z-index: 100; padding: var(--s2) var(--s3); background: var(--panel); color: var(--ink); border: 1px solid var(--focus); border-radius: var(--r); }
+.skip-link:focus { transform: translateY(var(--s2)); }
 .side .seg.block .seg-btn { min-width: max-content; } /* labels never shrink; extra sections fold into More */
 @media (max-width: 900px) { :root { --drawer-w: min(calc(400px * var(--text-scale)), 100vw); } } /* overlaying here, so it may use the window */
 .side-tabs { display: flex; align-items: center; gap: var(--s1); margin: var(--s3) var(--side-gutter) var(--s2); min-width: 0; }
 .side-tabs > .seg { flex: 1 1 auto; min-width: 0; margin: 0; }
+/* round 17 */
+.side-body .row { user-select: none; -webkit-user-select: none; } /* right-click opens the row menu, not a text selection */
+#btnFindBody[aria-pressed="true"] { background: var(--hover); color: var(--ink); }
+@media (min-width: 601px) and (max-width: 900px) { /* small windows: Send and the method shrink first, the URL keeps its room */
+  .reqbar .send { width: auto; padding: 0 var(--s3); }
+  .reqbar select { padding-left: var(--s3); }
+  #url { min-width: 0; }
+}
