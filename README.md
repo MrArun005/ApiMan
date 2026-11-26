@@ -7,6 +7,8 @@ A private, local API client in the spirit of Postman. You don't need an account,
 
 **Where your data lives.** In the data folder, collections are `*.json`, environments are `environments/*.json`, and your workspace (settings, open tabs, history, layout) is `.apiman/state.json`. The browser only keeps a cache of it, so clearing browser storage loses nothing. OAuth tokens and kept responses are never written to the folder: they last only as long as the browser tab.
 
+**Folders become categories.** Organise the data folder in any tree of folders (`payments/v2/Refunds.json`, `team/staging.postman_environment.json`, …): ApiMan finds every collection and environment in it, up to 8 levels deep, by what the file contains rather than its name or place, so Postman exports work as they are. Other JSON files are left alone, and so are hidden folders (`.git`, `.apiman`) and `node_modules`. The sidebar shows each folder as a category you can open and close, collections and environments save back to their own file, and a category's menu creates or imports straight into that folder. The environment picker shows a folder in front of the name (`payments / Staging`). The same works in website mode with a folder; data kept only in the browser has no folders.
+
 ```bash
 git clone https://github.com/MrArun005/ApiMan.git && cd ApiMan
 python3 server.py                     # opens http://127.0.0.1:5577

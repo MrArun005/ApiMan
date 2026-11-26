@@ -478,7 +478,7 @@ function serverStore(kind) {
     get: (id) => api('GET', `${base}/${encodeURIComponent(id)}`),
     // If-Match: refuse to overwrite a file another window changed since we loaded it
     put: (id, d) => { const p = `${base}/${encodeURIComponent(id)}`; return api('PUT', p, d, undefined, versions.has(p) ? { 'If-Match': versions.get(p) } : {}); },
-    create: async (d) => (await api('POST', base, { document: d })).id,
+    create: async (d, folder = '') => (await api('POST', base, { document: d, ...(folder ? { folder } : {}) })).id,
     remove: (id) => api('DELETE', `${base}/${encodeURIComponent(id)}`),
   };
 }
@@ -492,7 +492,7 @@ function browserStore(kind) {
     if (!ls.set(key, all)) throw new Error('Browser storage is full or blocked. Use a folder (Chrome/Edge) or run ApiMan locally.');
   };
   return {
-    async list() { return Object.entries(read()).map(([id, d]) => ({ id, name: nameOf(d) })).sort((a, b) => a.name.localeCompare(b.name)); },
+    async list() { return Object.entries(read()).map(([id, d]) => ({ id, name: nameOf(d), folder: '' })).sort((a, b) => a.name.localeCompare(b.name)); }, // flat: no folders here
     async get(id) { const d = read()[id]; if (!d) throw new Error('Not found'); seen.set(id, JSON.stringify(d)); return d; },
     async put(id, d) {
       validate(d);
@@ -507,33 +507,116 @@ function browserStore(kind) {
   };
 }
 
+// Data-folder discovery (contract: nested folders). The same rules as server.py: walk the folder, skip dot folders and
+// node_modules, at most 8 folder levels, 5000 .json files, 20 MB a file; a file is a collection or an environment by
+// its content, never by its name or place (Postman's X.postman_collection.json exports just work).
+// Names as server.py accepts them: a letter or digit first (any script), then letters, digits, marks and _ .()+,&@'!#[]~-
+// ("Équipe (2024)/Orders (v2).json", "R&D + QA [old].json").
+const DOC_FILE_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}_ .()+,&@'!#[\]~-]{0,120}\.json$/u;
+const DIR_SEG_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}_ .()+,&@'!#[\]~-]{0,120}$/u;
+const SCAN = { depth: 8, files: 5000, bytes: 20 * 1024 * 1024 };
+function classifyDoc(d) {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return null;
+  if (d.info && typeof d.info === 'object' && !Array.isArray(d.info) && Array.isArray(d.item)) return 'collections';
+  if (Array.isArray(d.values) && !('item' in d)) return 'environments';
+  return null;
+}
+/** "payments/v2/Refunds.json" -> "payments/v2"; an environment's bare id ("Staging.json") or "./Local.json" -> "". */
+function folderOfId(id) { const s = String(id).replace(/^\.\//, ''); const i = s.lastIndexOf('/'); return i === -1 ? '' : s.slice(0, i); }
+const entryFolder = (e) => (typeof e.folder === 'string' ? e.folder : folderOfId(e.id));
+/** A folder path ("" or "a/b"): every segment a valid file-system name, at most 8 levels. Returns its segments. */
+function cleanFolder(folder) {
+  const segs = String(folder || '').split('/').filter(Boolean);
+  if (segs.length > SCAN.depth || segs.some((s) => !DIR_SEG_RE.test(s))) throw new Error(`Not a usable folder: ${folder}`);
+  return segs;
+}
+const folderScans = new WeakMap(); // root handle -> Map(path -> { modified, size, kind, name }): files are parsed again only when they change
+async function scanFolder(rootDir) {
+  if (!folderScans.has(rootDir)) folderScans.set(rootDir, new Map());
+  const cache = folderScans.get(rootDir);
+  const found = [];
+  let files = 0;
+  const walk = async (dir, segs) => {
+    const entries = [];
+    for await (const [name, handle] of dir.entries()) entries.push([name, handle]);
+    entries.sort((a, b) => a[0].localeCompare(b[0]));
+    for (const [name, handle] of entries) {
+      if (files >= SCAN.files) return;
+      if (handle.kind === 'directory') {
+        if (name.startsWith('.') || name === 'node_modules' || !DIR_SEG_RE.test(name) || segs.length >= SCAN.depth) continue;
+        await walk(handle, [...segs, name]);
+      } else if (DOC_FILE_RE.test(name)) {
+        files++;
+        const path = [...segs, name].join('/');
+        try {
+          const f = await handle.getFile();
+          if (f.size > SCAN.bytes) continue;
+          let hit = cache.get(path);
+          if (!hit || hit.modified !== f.lastModified || hit.size !== f.size) {
+            let kind = null, label = '';
+            try {
+              const d = JSON.parse(await f.text());
+              kind = classifyDoc(d);
+              const n = kind === 'collections' ? d.info.name : kind === 'environments' ? d.name : '';
+              label = typeof n === 'string' && n.trim() ? n : name.replace(/\.json$/, '');
+            } catch { /* not JSON: not ours */ }
+            hit = { modified: f.lastModified, size: f.size, kind, name: label };
+            cache.set(path, hit);
+          }
+          if (hit.kind) found.push({ segs, file: name, kind: hit.kind, name: hit.name });
+        } catch { /* unreadable: skipped */ }
+      }
+    }
+  };
+  await walk(rootDir, []);
+  return found;
+}
+
+/** Website mode with a folder: the same ids as server.py (collections: path in the folder; environments: a bare name
+ *  directly in environments/, otherwise the path, "./" in front when it has no "/"). */
 function folderStore(rootDir, kind) {
   const { validate, nameOf } = KINDS[kind];
-  const dirP = kind === 'collections' ? Promise.resolve(rootDir) : rootDir.getDirectoryHandle('environments', { create: true });
-  const files = async () => {
-    const dir = await dirP;
-    const out = [];
-    for await (const [name, handle] of dir.entries()) if (handle.kind === 'file' && name.endsWith('.json')) out.push(name);
-    return out;
+  const envs = kind === 'environments';
+  const idOf = (segs, file) => (envs && segs.length === 1 && segs[0] === 'environments' ? file
+    : segs.length ? [...segs, file].join('/') : envs ? `./${file}` : file);
+  const where = (id) => { // id -> [folder segments, file name]
+    const s = String(id);
+    const parts = envs && !s.includes('/') ? ['environments', s] : s.replace(/^\.\//, '').split('/');
+    const file = parts.pop();
+    if (!DOC_FILE_RE.test(file)) throw new Error('Invalid id');
+    return [cleanFolder(parts.join('/')), file];
   };
-  const read = async (id) => JSON.parse(await (await (await (await dirP).getFileHandle(id)).getFile()).text());
-  const write = async (id, d) => {
-    const w = await (await (await dirP).getFileHandle(id, { create: true })).createWritable();
+  const dirOf = async (segs, create = false) => { let d = rootDir; for (const s of segs) d = await d.getDirectoryHandle(s, { create }); return d; };
+  const namesIn = async (dir) => { const out = []; for await (const [n] of dir.entries()) out.push(n); return out; };
+  const read = async (id) => { const [segs, file] = where(id); return JSON.parse(await (await (await (await dirOf(segs)).getFileHandle(file)).getFile()).text()); };
+  const write = async (segs, file, d) => {
+    const dir = await dirOf(segs, true);
+    const clash = (await namesIn(dir)).find((n) => n !== file && n.toLowerCase() === file.toLowerCase()); // macOS/Windows ignore case
+    if (clash) throw new Error(`Invalid id: ${clash} already exists`);
+    const w = await (await dir.getFileHandle(file, { create: true })).createWritable(); // an existing file is written in place
     await w.write(JSON.stringify(d, null, 2));
     await w.close();
   };
   return {
     async list() {
-      const out = [];
-      for (const id of await files()) {
-        try { out.push({ id, name: nameOf(await read(id)) }); } catch { out.push({ id, name: `${id} (unreadable)` }); }
-      }
-      return out.sort((a, b) => a.name.localeCompare(b.name));
+      return (await scanFolder(rootDir)).filter((f) => f.kind === kind).map((f) => {
+        const id = idOf(f.segs, f.file);
+        return { id, name: f.name, folder: folderOfId(id) };
+      }).sort((a, b) => a.folder.localeCompare(b.folder) || a.name.localeCompare(b.name));
     },
     get: read,
-    async put(id, d) { validate(d); await write(id, d); },
-    async create(d) { validate(d); const names = new Set((await files()).map((f) => f.toLowerCase())); const id = newDocId(nameOf(d), (x) => names.has(x)); await write(id, d); return id; },
-    remove: async (id) => (await dirP).removeEntry(id),
+    async put(id, d) { validate(d); const [segs, file] = where(id); await write(segs, file, d); },
+    async create(d, folder = '') {
+      validate(d);
+      let segs = cleanFolder(folder);
+      if (envs && !segs.length) segs = ['environments']; // environments go to environments/ unless a folder is chosen
+      let names = [];
+      try { names = (await namesIn(await dirOf(segs))).map((n) => n.toLowerCase()); } catch { /* a new folder */ }
+      const file = newDocId(nameOf(d), (x) => names.includes(x));
+      await write(segs, file, d);
+      return idOf(segs, file);
+    },
+    async remove(id) { const [segs, file] = where(id); await (await dirOf(segs)).removeEntry(file); },
   };
 }
 
@@ -2288,7 +2371,7 @@ function renderSidebar() {
   $$('.side .seg-btn').forEach((b) => { const on = b.dataset.view === state.view; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
   $('#search').placeholder = state.view === 'history' ? 'Filter history  /' : state.view === 'environments' ? 'Filter environments  /' : 'Filter requests  /';
   const body = $('#sideBody');
-  body.setAttribute('role', state.view === 'collections' ? 'tree' : 'list');
+  body.setAttribute('role', state.view === 'collections' || (state.view === 'environments' && envsAsTree()) ? 'tree' : 'list');
   body.setAttribute('aria-label', { collections: 'Collections', environments: 'Environments', history: 'History' }[state.view]);
   if (state.view === 'environments') body.replaceChildren(...renderEnvList());
   else if (state.view === 'history') body.replaceChildren(...renderHistoryList());
@@ -2302,7 +2385,9 @@ function renderSidebar() {
   if (state.refocus && current) current.focus();
   state.refocus = null;
 }
-const indent = (depth) => `padding-left: calc(var(--s2) + ${depth} * 20px)`; // 20px = caret + gap, so children sit under their parent's name
+// 20px = caret + gap, so children sit under their parent's name. Deep folder trees stop indenting at 40% of the sidebar, so a
+// name always keeps room to be read (its level is still in aria-level, its path in the title).
+const indent = (depth) => `padding-left: calc(var(--s2) + min(${depth} * 20px, 40%))`;
 
 function rowActs(...btns) { return h('span', { class: 'acts' }, ...btns); }
 /** Tree row action: an icon Button whose click doesn't also open the row. */
@@ -2322,6 +2407,62 @@ const matches = (it) => {
   return urlIn(it.request && it.request.url).raw.toLowerCase().includes(f);
 };
 
+// ---------- categories: the data folder's own folders, one TreeRow per level ----------
+/** List entries ({ id, name, folder }) as a tree of folders: { path, name, dirs: Map, items, total }. */
+function categoryTree(list) {
+  const root = { path: '', name: '', dirs: new Map(), items: [], total: 0 };
+  for (const e of list) {
+    let node = root;
+    node.total++;
+    for (const seg of entryFolder(e).split('/').filter(Boolean)) {
+      if (!node.dirs.has(seg)) node.dirs.set(seg, { path: node.path ? `${node.path}/${seg}` : seg, name: seg, dirs: new Map(), items: [], total: 0 });
+      node = node.dirs.get(seg);
+      node.total++;
+    }
+    node.items.push(e);
+  }
+  return root;
+}
+/** A folder's own entries first (by name), then its sub-folders, each a collapsible category row (state.open "dir:<path>").
+ *  While filtering every category is open, and one is shown when its name or anything inside it matches. */
+function categoryNodes(node, depth, force, { entry, add, menu }) {
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const nodes = [];
+  for (const e of [...node.items].sort(byName)) nodes.push(...entry(e, depth, force));
+  for (const d of [...node.dirs.values()].sort(byName)) {
+    const key = `dir:${d.path}`;
+    const hit = !!state.filter && d.name.toLowerCase().includes(state.filter);
+    const open = state.filter ? true : state.open.has(key);
+    const kids = open ? categoryNodes(d, depth + 1, force || hit, { entry, add, menu }) : [];
+    if (state.filter && !kids.length && !hit && !force) continue;
+    const toggle = () => { state.refocus = `d:${d.path}`; toggleOpen(key); renderSidebar(); };
+    nodes.push(h('div', {
+      class: 'row', style: indent(depth), tabindex: '0', role: 'treeitem', 'aria-level': String(depth + 1), 'aria-expanded': String(open),
+      'data-key': `d:${d.path}`, title: d.path, onclick: toggle, onkeydown: (e) => { if (e.key === 'Enter') toggle(); },
+    },
+      h('span', { class: `caret ${open ? 'open' : ''}` }, icon('chevron')),
+      h('span', { class: 'folder-ico' }, icon('folder')),
+      h('span', { class: 'name' }, ...markMatch(d.name)),
+      h('span', { class: 'sub' }, String(d.total)),
+      rowActs(
+        iconBtn('plus', add.label, () => add.onClick(d.path)),
+        iconBtn('dots', 'More actions', (e) => menu(e.currentTarget, d.path)))), ...kids);
+  }
+  return nodes;
+}
+/** Opens the category rows down to a folder, so what was just made or revealed there is in view. */
+function openCategory(folder) {
+  const segs = String(folder || '').split('/').filter(Boolean);
+  segs.forEach((_, i) => state.open.add(`dir:${segs.slice(0, i + 1).join('/')}`));
+  saveOpen();
+}
+/** "payments / Staging": a collection or environment name with its folder in front when it isn't at the top. */
+const labelWithFolder = (e) => (entryFolder(e) ? `${entryFolder(e)} / ${e.name}` : e.name);
+/** The folder a listed collection or environment is in ("" when unknown). */
+const folderOf = (list, id) => { const e = list.find((x) => x.id === id); return e ? entryFolder(e) : ''; };
+/** "payments/v2/Refunds.json" -> "Refunds.json" (download names can't hold a "/"). */
+const baseName = (id) => String(id).split('/').pop();
+
 function renderCollectionTree() {
   if (!state.colList.length) {
     return [ui.empty(
@@ -2330,14 +2471,23 @@ function renderCollectionTree() {
       ui.actions(ui.button({ label: 'New collection', size: 'small', onClick: () => newCollection() }), ui.button({ label: 'Import', size: 'small', onClick: () => openImport() })))];
   }
   const t = cur();
-  const out = [];
-  for (const c of state.colList) {
+  const out = categoryNodes(categoryTree(state.colList), 0, false, {
+    entry: collectionNodes,
+    add: { label: 'New collection here', onClick: (path) => newCollection(path) },
+    menu: (anchor, path) => showMenu(anchor, [
+      { label: 'New collection here', onClick: () => newCollection(path) },
+      { label: 'Import here', onClick: () => openImport('file', path) },
+    ]),
+  });
+  if (!out.length) out.push(ui.empty(h('p', null, `Nothing matches "${state.filter}".`)));
+  return out;
+  function collectionNodes(c, depth, force) {
     const col = state.cols[c.id];
     const open = state.filter ? true : state.open.has(c.id);
-    const kids = open && col ? itemsNodes(c.id, col.item, 1) : [];
-    if (state.filter && !kids.length && !c.name.toLowerCase().includes(state.filter)) continue;
-    out.push(h('div', {
-      class: 'row collection', tabindex: '0', title: c.id, role: 'treeitem', 'aria-level': '1', 'aria-expanded': String(open), 'data-key': `c:${c.id}`,
+    const kids = open && col ? itemsNodes(c.id, col.item, depth + 1) : [];
+    if (state.filter && !kids.length && !force && !c.name.toLowerCase().includes(state.filter)) return [];
+    return [h('div', {
+      class: 'row collection', style: indent(depth), tabindex: '0', title: c.id, role: 'treeitem', 'aria-level': String(depth + 1), 'aria-expanded': String(open), 'data-key': `c:${c.id}`,
       onclick: () => toggleCollection(c.id), onkeydown: (e) => { if (e.key === 'Enter') toggleCollection(c.id); },
     },
       h('span', { class: `caret ${open ? 'open' : ''}` }, icon('chevron')),
@@ -2345,11 +2495,8 @@ function renderCollectionTree() {
       col ? h('span', { class: 'sub' }, state.filter ? `${countMatches(col.item)} / ${countRequests(col.item)}` : String(countRequests(col.item))) : null,
       rowActs(
         iconBtn('plus', 'Add request', () => addRequest(c.id, null)),
-        iconBtn('dots', 'More actions', (e) => collectionMenu(e.currentTarget, c.id)))));
-    out.push(...kids);
+        iconBtn('dots', 'More actions', (e) => collectionMenu(e.currentTarget, c.id)))), ...kids];
   }
-  if (!out.length) out.push(ui.empty(h('p', null, `Nothing matches "${state.filter}".`)));
-  return out;
   function itemsNodes(cid, items, depth) {
     const nodes = [];
     for (const it of items) {
@@ -2395,26 +2542,39 @@ async function toggleCollection(id) {
   renderSidebar();
 }
 
+/** Environments in folders show as a tree (category rows); all at the top, as a plain list. */
+const envsAsTree = () => state.envList.some((e) => entryFolder(e));
 function renderEnvList() {
   const f = state.filter;
   const rows = [h('div', { class: 'side-section' }, 'Environments', ui.button({ label: '+ New', variant: 'ghost', size: 'small', onClick: () => editEnvironment(null) }))];
   const g = state.envs[GLOBALS_ID];
+  const tree = envsAsTree();
+  const role = tree ? 'treeitem' : 'button';
+  const level = tree ? { 'aria-level': '1' } : {};
   if (!f || 'globals'.includes(f)) {
-    rows.push(h('div', { class: 'row', tabindex: '0', role: 'button', 'data-key': 'e:globals', onclick: () => editEnvironment(GLOBALS_ID), onkeydown: (e) => { if (e.key === 'Enter') editEnvironment(GLOBALS_ID); } },
+    rows.push(h('div', { class: 'row', tabindex: '0', role, ...level, 'data-key': 'e:globals', onclick: () => editEnvironment(GLOBALS_ID), onkeydown: (e) => { if (e.key === 'Enter') editEnvironment(GLOBALS_ID); } },
       h('span', { class: 'caret' }),
       h('span', { class: 'name' }, 'Globals'),
       h('span', { class: 'sub' }, `${g ? g.values.length : 0} vars`)));
   }
-  for (const e of state.envList) {
-    if (f && !e.name.toLowerCase().includes(f)) continue;
+  const envRow = (e, depth, force) => {
+    if (f && !force && !e.name.toLowerCase().includes(f)) return [];
     const doc = state.envs[e.id];
     const active = e.id === state.activeEnv;
-    rows.push(h('div', { class: cx('row', active && 'on'), tabindex: '0', role: 'button', 'data-key': `e:${e.id}`, 'aria-label': `${e.name}${active ? ' (active)' : ''}`, onclick: () => editEnvironment(e.id), onkeydown: (ev) => { if (ev.key === 'Enter') editEnvironment(e.id); } },
+    return [h('div', { class: cx('row', active && 'on'), style: indent(depth), tabindex: '0', role, ...(tree ? { 'aria-level': String(depth + 1) } : {}), 'data-key': `e:${e.id}`, title: e.id, 'aria-label': `${e.name}${active ? ' (active)' : ''}`, onclick: () => editEnvironment(e.id), onkeydown: (ev) => { if (ev.key === 'Enter') editEnvironment(e.id); } },
       h('span', { class: 'caret' }, ui.dot({ tone: active ? 'ok' : '', label: active ? 'Active' : null })),
       h('span', { class: 'name' }, e.name),
       h('span', { class: 'sub' }, `${doc ? doc.values.length : 0} vars`),
-      rowActs(iconBtn('dots', 'More actions', (ev) => envMenu(ev.currentTarget, e.id)))));
-  }
+      rowActs(iconBtn('dots', 'More actions', (ev) => envMenu(ev.currentTarget, e.id))))];
+  };
+  rows.push(...categoryNodes(categoryTree(state.envList), 0, false, {
+    entry: envRow,
+    add: { label: 'New environment here', onClick: (path) => editEnvironment(null, path) },
+    menu: (anchor, path) => showMenu(anchor, [
+      { label: 'New environment here', onClick: () => editEnvironment(null, path) },
+      { label: 'Import here', onClick: () => openImport('file', path) },
+    ]),
+  }));
   if (!state.envList.length) {
     rows.push(ui.empty(h('p', null, 'Environments hold values that change between setups, like baseUrl and token for local, staging and production.')));
   }
@@ -2578,7 +2738,7 @@ function envMenu(anchor, id) {
     { label: id === state.activeEnv ? 'Deactivate' : 'Set as active', onClick: () => { setActiveEnv(id === state.activeEnv ? '' : id); renderSidebar(); } },
     { label: 'Edit', onClick: () => editEnvironment(id) },
     { label: 'Duplicate', onClick: () => duplicateEnvironment(id) },
-    { label: 'Export', onClick: () => download(id, JSON.stringify(state.envs[id], null, 2)) },
+    { label: 'Export', onClick: () => download(baseName(id), JSON.stringify(state.envs[id], null, 2)) },
     '-',
     { label: 'Delete', danger: true, onClick: () => deleteEnvironment(id) },
   ]);
@@ -2673,13 +2833,13 @@ async function deleteItem(cid, id) {
   renderAll();
 }
 
-async function newCollection() {
-  const name = await ask({ title: 'New collection', input: { label: 'Collection name', placeholder: 'e.g. Payments API' }, ok: 'Create collection' });
+async function newCollection(folder = '') {
+  const name = await ask({ title: folder ? `New collection in ${folder}` : 'New collection', input: { label: 'Collection name', placeholder: 'e.g. Payments API' }, ok: 'Create collection' });
   if (!name) return;
   const doc = { info: { name, schema: SCHEMA_V21, _postman_id: uid() }, item: [] };
-  const id = await backend.collections.create(doc);
+  const id = await backend.collections.create(doc, folder);
   state.open.add(id);
-  saveOpen();
+  openCategory(folder);
   await refreshCollections();
   state.view = 'collections';
   renderSidebar();
@@ -2692,7 +2852,7 @@ async function duplicateCollection(cid) {
   col.info._postman_id = uid();
   const reid = (it) => { it.id = uid(); if (Array.isArray(it.item)) it.item.forEach(reid); };
   col.item.forEach(reid);
-  await backend.collections.create(col);
+  await backend.collections.create(col, folderOf(state.colList, cid)); // the copy sits next to the original
   await refreshCollections();
   renderSidebar();
 }
@@ -2710,7 +2870,7 @@ async function deleteCollection(cid, name) {
 
 async function exportCollection(cid) {
   const col = await withCol(cid);
-  download(cid, JSON.stringify(col, null, 2));
+  download(baseName(cid), JSON.stringify(col, null, 2));
 }
 
 // =====================================================================================================
@@ -2762,12 +2922,12 @@ function renderWelcome() {
   }
   if (state.colList.length) {
     cols.push(h('section', null, h('span', { class: 'label' }, 'Collections'), ...state.colList.map((c) => h('div', {
-      class: 'row', tabindex: '0', role: 'button',
-      onclick: () => { state.view = 'collections'; setSide(true); if (!state.open.has(c.id)) toggleCollection(c.id); else renderSidebar(); },
+      class: 'row', tabindex: '0', role: 'button', title: c.id,
+      onclick: () => { state.view = 'collections'; setSide(true); openCategory(entryFolder(c)); if (!state.open.has(c.id)) toggleCollection(c.id); else renderSidebar(); },
       onkeydown: (e) => { if (e.key === 'Enter') e.currentTarget.click(); },
     },
       h('span', { class: 'folder-ico' }, icon('folder')),
-      h('span', { class: 'name' }, c.name),
+      h('span', { class: 'name' }, labelWithFolder(c)),
       state.cols[c.id] ? h('span', { class: 'sub' }, `${countRequests(state.cols[c.id].item)} requests`) : null))));
   }
   $('#welcomeInner').replaceChildren(
@@ -3738,7 +3898,7 @@ function renderDiff() {
   const picker = ui.select([
     ['prev', 'vs previous response'],
     ['pinned', t.pinned ? `vs pinned (${t.pinned.res.status}, ${new Date(t.pinned.pinnedAt).toLocaleTimeString([], { hour12: false })})` : 'vs pinned (pin one first)', t.pinned ? {} : { disabled: true }],
-    ...(envChoices.length ? [{ group: `Send again with another environment (now: ${activeName})`, options: envChoices.map((e) => [`env:${e.id}`, `vs ${e.name}`]) }] : []),
+    ...(envChoices.length ? [{ group: `Send again with another environment (now: ${activeName})`, options: envChoices.map((e) => [`env:${e.id}`, `vs ${e.id ? labelWithFolder(e) : e.name}`]) }] : []),
   ], { size: 'small', 'aria-label': 'Compare the latest response with', title: 'Compare the latest response with…', onChange: (e) => { t.diffWith = e.target.value; renderDiff(); } });
   picker.value = t.diffWith || 'prev';
   if (picker.value !== (t.diffWith || 'prev')) { t.diffWith = 'prev'; picker.value = 'prev'; }
@@ -4036,8 +4196,8 @@ async function saveAs() {
   for (const c of state.colList) {
     const col = state.cols[c.id];
     if (!col) continue;
-    targets.push({ label: c.name, cid: c.id, folderId: null });
-    const walk = (items, depth) => { for (const it of items) if (isFolder(it)) { targets.push({ label: `${'  '.repeat(depth)}${c.name} / ${it.name}`, cid: c.id, folderId: it.id }); walk(it.item, depth + 1); } };
+    targets.push({ label: labelWithFolder(c), cid: c.id, folderId: null });
+    const walk = (items, depth) => { for (const it of items) if (isFolder(it)) { targets.push({ label: `${'  '.repeat(depth)}${labelWithFolder(c)} / ${it.name}`, cid: c.id, folderId: it.id }); walk(it.item, depth + 1); } };
     walk(col.item, 1);
   }
   const sel = ui.select(targets.map((x, i) => [String(i), x.label]), { value: String(Math.max(0, targets.findIndex((x) => t.cid === x.cid && !x.folderId))) });
@@ -4247,7 +4407,7 @@ async function editContainer(cid, folderId) {
   });
 }
 
-async function editEnvironment(id) {
+async function editEnvironment(id, folder = '') {
   const isGlobals = id === GLOBALS_ID;
   const doc = id ? (isGlobals ? await ensureGlobals() : state.envs[id]) : { name: '', values: [], _postman_variable_scope: 'environment' };
   if (!doc) return;
@@ -4259,7 +4419,7 @@ async function editEnvironment(id) {
   const activateCheck = ui.check({ label: 'Use this environment', checked: !id || id === state.activeEnv });
   const activate = activateCheck.input;
   openDialog({
-    title: isGlobals ? 'Globals' : id ? 'Edit environment' : 'New environment',
+    title: isGlobals ? 'Globals' : id ? 'Edit environment' : folder ? `New environment in ${folder}` : 'New environment',
     wide: true,
     body: [
       isGlobals ? ui.hint('Globals apply everywhere, with the lowest priority: environment and collection values win.') : ui.field('Name', nameIn),
@@ -4284,7 +4444,7 @@ async function editEnvironment(id) {
             return true;
           });
         }
-        else { doc.name = name; doc.values = values; envId = await backend.environments.create(doc); }
+        else { doc.name = name; doc.values = values; envId = await backend.environments.create(doc, folder); openCategory(folder); }
         await refreshEnvironments();
         if (!isGlobals) setActiveEnv(activate.checked ? envId : (state.activeEnv === envId ? '' : state.activeEnv));
         renderSidebar();
@@ -4299,7 +4459,7 @@ async function editEnvironment(id) {
 async function duplicateEnvironment(id) {
   const copy = JSON.parse(JSON.stringify(state.envs[id]));
   copy.name = `${copy.name} copy`;
-  await backend.environments.create(copy);
+  await backend.environments.create(copy, folderOf(state.envList, id));
   await refreshEnvironments();
   renderSidebar();
   renderEnvPicker();
@@ -4318,7 +4478,7 @@ async function deleteEnvironment(id) {
 function renderEnvPicker() {
   const sel = $('#envSelect');
   sel.replaceChildren(h('option', { value: '' }, 'No environment'),
-    ...state.envList.map((e) => h('option', { value: e.id, ...(e.id === state.activeEnv ? { selected: true } : {}) }, e.name)),
+    ...state.envList.map((e) => h('option', { value: e.id, ...(e.id === state.activeEnv ? { selected: true } : {}) }, labelWithFolder(e))),
     h('option', { value: '__new' }, '+ New environment…'));
   sel.value = state.activeEnv || '';
   $('#envDot').classList.toggle('ok', !!state.activeEnv); // Dot: live when an environment is active
@@ -4359,12 +4519,13 @@ function peekVariables(anchor) {
 }
 
 // ---------- import ----------
-function openImport(start = 'file') {
-  const fileIn = ui.input({ type: 'file', 'aria-label': 'Files to import', accept: '.json,.yaml,.yml,application/json,application/yaml', multiple: true, hidden: true, onchange: (e) => importFiles([...e.target.files]) });
+/** folder: import into that folder of the data folder ("Import here" on a category row). */
+function openImport(start = 'file', folder = '') {
+  const fileIn = ui.input({ type: 'file', 'aria-label': 'Files to import', accept: '.json,.yaml,.yml,application/json,application/yaml', multiple: true, hidden: true, onchange: (e) => importFiles([...e.target.files], folder) });
   const drop = h('div', {
     class: 'empty-state drop',
     ondragover: (e) => { e.preventDefault(); },
-    ondrop: (e) => { e.preventDefault(); importFiles([...e.dataTransfer.files]); },
+    ondrop: (e) => { e.preventDefault(); importFiles([...e.dataTransfer.files], folder); },
   }, h('p', null, 'Drop Postman collections or environments (v2.1 JSON), or OpenAPI / Swagger specs (JSON or YAML), here.'),
     ui.button({ label: 'Choose files', size: 'small', onClick: () => fileIn.click() }), fileIn);
   const curlIn = ui.textarea({ code: true, 'aria-label': 'cURL command', rows: 10, placeholder: "curl -X POST 'https://api.example.com/items' \\\n  -H 'Authorization: Bearer …' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '{\"name\":\"x\"}'" });
@@ -4377,7 +4538,7 @@ function openImport(start = 'file') {
   const run = {
     file: () => fileIn.click(),
     curl: () => { try { const ed = parseCurl(curlIn.value); closeDialog(); openTab(newTab({ ed, dirty: true })); toast('Imported from cURL'); } catch (e) { toast(e.message, 'err'); } },
-    paste: async () => { try { await importJson(parseSpecText(pasteIn.value), 'The pasted text'); closeDialog(); } catch (e) { toast(e.message, 'err'); } },
+    paste: async () => { try { await importJson(parseSpecText(pasteIn.value), 'The pasted text', folder); closeDialog(); } catch (e) { toast(e.message, 'err'); } },
   };
   let activeKey = 'file';
   const updateImport = () => {
@@ -4391,25 +4552,25 @@ function openImport(start = 'file') {
   pasteIn.addEventListener('input', updateImport);
   const tabsAndPanes = dlgTabs(defs, (k) => { activeKey = k; updateImport(); });
   openDialog({
-    title: 'Import', body: tabsAndPanes, onOpen: updateImport, focus: '#dlgBody .dlg-tabs .on',
+    title: folder ? `Import into ${folder}` : 'Import', body: tabsAndPanes, onOpen: updateImport, focus: '#dlgBody .dlg-tabs .on',
     buttons: [{ label: 'Import', primary: true, onClick: () => { run[activeKey](); return false; } }],
   });
   if (start !== 'file') $$('#dlgBody .dlg-tabs .seg-btn')[start === 'curl' ? 1 : 2].click();
   setTimeout(() => { if (start === 'curl') curlIn.focus(); }, 50);
 }
 
-async function importFiles(files) {
+async function importFiles(files, folder = '') {
   let ok = 0;
   for (const f of files) {
-    try { await importJson(parseSpecText(await f.text()), f.name); ok++; } catch (e) { toast(`${f.name}: ${e.message}`, 'err'); }
+    try { await importJson(parseSpecText(await f.text()), f.name, folder); ok++; } catch (e) { toast(`${f.name}: ${e.message}`, 'err'); }
   }
   if (ok) closeDialog();
 }
 
-async function importJson(data, label) {
+async function importJson(data, label, folder = '') {
   if (isOpenApi(data)) {
     const col = openApiToCollection(data);
-    await importJson(col, label);
+    await importJson(col, label, folder);
     const creds = col.variable.filter((v) => v.key !== 'baseUrl').map((v) => v.key);
     toast(`Imported ${countRequests(col.item)} requests from "${col.info.name}".${creds.length ? ` Set ${creds.join(', ')} in its variables.` : ''}`);
     return;
@@ -4417,9 +4578,9 @@ async function importJson(data, label) {
   if (data && data.info && Array.isArray(data.item)) {
     ensureIds(data.item);
     data.info.schema = data.info.schema || SCHEMA_V21;
-    const id = await backend.collections.create(data);
+    const id = await backend.collections.create(data, folder);
     state.open.add(id);
-    saveOpen();
+    openCategory(folder);
     await refreshCollections();
     state.view = 'collections';
     renderSidebar();
@@ -4439,7 +4600,8 @@ async function importJson(data, label) {
       await refreshEnvironments();
       toast('Imported globals');
     } else {
-      const id = await backend.environments.create(data);
+      const id = await backend.environments.create(data, folder);
+      openCategory(folder);
       await refreshEnvironments();
       if (!state.activeEnv) setActiveEnv(id);
       renderEnvPicker();
@@ -5204,7 +5366,7 @@ function openCode() {
 async function openRunner(cid, folderId) {
   if (!state.colList.length) { toast('Create or import a collection first.', 'warn'); return; }
   await Promise.all(state.colList.map((c) => withCol(c.id).catch(() => {})));
-  const colSel = ui.select(state.colList.map((c) => [c.id, c.name]), { value: cid || (cur() && cur().cid) || state.colList[0].id });
+  const colSel = ui.select(state.colList.map((c) => [c.id, labelWithFolder(c)]), { value: cid || (cur() && cur().cid) || state.colList[0].id });
   const folderSel = ui.select([]);
   const iterIn = ui.input({ type: 'number', num: true, min: '1', max: '1000', value: '1' });
   const delayIn = ui.input({ type: 'number', num: true, min: '0', max: '60000', value: '0' });
@@ -6093,7 +6255,7 @@ async function start() {
     const i = [...$$('#tabstrip .rtab')].indexOf(tab);
     showMenu(tab, [
       { label: 'Duplicate tab', onClick: () => { const t = state.tabs[i]; openTab(newTab({ ed: { ...JSON.parse(JSON.stringify(t.ed)), name: `${t.ed.name} copy` }, dirty: true })); } },
-      ...(state.tabs[i].cid ? [{ label: 'Reveal in sidebar', onClick: () => { const t = state.tabs[i]; state.view = 'collections'; state.open.add(t.cid); renderSidebar(); requestAnimationFrame(() => { const row = $(`#sideBody [data-key="r:${t.cid}:${t.itemId}"]`) || $$('#sideBody .row.on')[0]; if (row) { row.scrollIntoView({ block: 'nearest' }); row.focus(); } }); } }] : []),
+      ...(state.tabs[i].cid ? [{ label: 'Reveal in sidebar', onClick: () => { const t = state.tabs[i]; state.view = 'collections'; state.open.add(t.cid); openCategory(folderOf(state.colList, t.cid)); renderSidebar(); requestAnimationFrame(() => { const row = $(`#sideBody [data-key="r:${t.cid}:${t.itemId}"]`) || $$('#sideBody .row.on')[0]; if (row) { row.scrollIntoView({ block: 'nearest' }); row.focus(); } }); } }] : []),
       '-',
       { label: 'Close tab', onClick: () => closeTab(i) },
       { label: 'Close other tabs', onClick: async () => { const keep = state.tabs[i]; for (let j = state.tabs.length - 1; j >= 0; j--) if (state.tabs[j] !== keep) await closeTab(j); } },
