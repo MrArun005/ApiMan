@@ -2745,6 +2745,8 @@ function renderDialog({ title, body, buttons = [], wide = false, confirm = false
   if (focus) ($(focus) || dlg).focus();
   else if (first) first.focus();
   else ($('#dlgFoot .btn.primary') || $('#dlgFoot .btn:last-child') || dlg).focus();
+  // Never leave focus on the page behind: fall back to the first visible control in the dialog.
+  if (!dlg.contains(document.activeElement)) [...dlg.querySelectorAll('button, input, select, textarea, [tabindex="0"]')].find((el) => el.getClientRects().length && !el.disabled)?.focus();
   if (onOpen) onOpen();
 }
 function closeDialog() { $('#dlg').close(); }
@@ -2972,7 +2974,7 @@ function peekVariables(anchor) {
   }
   peek.append(h('div', { class: 'actions' },
     h('button', { class: 'btn small', onclick: () => { hideMenu(); if (state.activeEnv) editEnvironment(state.activeEnv); else editEnvironment(null); } }, state.activeEnv ? 'Edit environment' : 'New environment'),
-    h('button', { class: 'btn small ghost', onclick: () => { hideMenu(); editEnvironment(GLOBALS_ID); } }, 'Edit Globals')));
+    h('button', { class: 'btn small', onclick: () => { hideMenu(); editEnvironment(GLOBALS_ID); } }, 'Edit globals')));
   pop.replaceChildren(peek);
   placePopover(pop, anchor);
 }
@@ -3767,7 +3769,15 @@ function initResizers() {
   const stacked = () => document.documentElement.dataset.layout === 'stacked' || document.documentElement.dataset.autoStack === 'true' || matchMedia('(max-width: 1180px)').matches;
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const side = $('#sideResizer'), split = $('#splitResizer');
-  const sideMin = () => Math.ceil(262 * cssScale()); // matches --side-eff in app.css
+  const sideMin = () => Math.ceil(280 * cssScale()); // matches --side-eff in app.css
+  // Width each pane needs side by side: its full tab row (tabs + maximise + padding), never less than 320px.
+  const paneNeeds = () => ['#reqTabs', '#respTabs'].map((id) => {
+    const row = $(id), seg = row && row.querySelector('.seg');
+    if (!seg) return 320 * cssScale();
+    const cs = getComputedStyle(row), max = row.querySelector('.pane-max');
+    const chrome = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + (max ? max.offsetWidth : 0) + 2 * (parseFloat(cs.columnGap) || 8) + 2;
+    return Math.max(320 * cssScale(), seg.scrollWidth + chrome); // measured, so any text size / density combination fits
+  });
   const setSideW = (px, persist = true) => {
     px = clamp(Math.round(px), sideMin(), 640);
     root.style.setProperty('--side-w', `${px}px`);
@@ -3780,9 +3790,14 @@ function initResizers() {
   const splitBounds = () => {
     const r = $('.split').getBoundingClientRect();
     const total = stacked() ? r.height : r.width;
-    const minPx = stacked() ? 260 : 320 * cssScale();
-    const lo = total > 0 ? Math.max(15, (minPx / total) * 100) : 15;
-    return [Math.min(lo, 50), Math.max(100 - lo, 50) > 85 ? 85 : Math.max(100 - lo, 50)];
+    if (!(total > 0)) return [15, 85];
+    // Each pane's minimum is what its own content needs: side by side, the whole tab row; stacked, the
+    // request bars + a few rows, the response bars + 120px of body.
+    const body = $('#respBody'), col = $('.resp-col');
+    const respBars = body && body.offsetHeight ? col.offsetHeight - body.offsetHeight : $('#respTabs').offsetHeight + 40 * cssScale();
+    const [reqMin, respMin] = stacked() ? [120 * cssScale(), respBars + 140] : paneNeeds(); // stacked: response keeps 140px of body
+    const lo = Math.max(15, (reqMin / total) * 100), hi = Math.min(85, 100 - (respMin / total) * 100);
+    return lo <= hi ? [lo, hi] : [50, 50];
   };
   const setSplit = (pct, persist = true) => {
     const [lo, hi] = splitBounds();
@@ -3865,8 +3880,9 @@ function initResizers() {
   initResizers.isStacked = stacked;
   // #6: auto-stack whenever side-by-side panes would be narrower than their content needs (text-size aware)
   const autoStack = () => {
-    const need = 340 * cssScale(); // the drag handle's own pane minimum (320 × text size) plus breathing room
-    const on = document.documentElement.dataset.layout !== 'stacked' && ($('.work').clientWidth - 1) / 2 < need && !matchMedia('(max-width: 820px)').matches;
+    // Stack before any tab would be cut off: both panes' needs must fit side by side.
+    const [a, b] = paneNeeds();
+    const on = document.documentElement.dataset.layout !== 'stacked' && $('.work').clientWidth - 1 < a + b && !matchMedia('(max-width: 820px)').matches;
     if ((document.documentElement.dataset.autoStack === 'true') !== on) {
       if (on) document.documentElement.dataset.autoStack = 'true'; else delete document.documentElement.dataset.autoStack;
       setSplit((stacked() ? layout.reqH : layout.req) || 50, false);
@@ -3902,7 +3918,7 @@ async function start() {
     // Both tab rows keep one height and one tab padding. What the response row can't fit (reason, then size,
     // then time, then the whole status) moves to the toolbar below, so nothing is lost; that toolbar wraps
     // only when even it runs out of room.
-    const steps = ['hide-reason', 'hide-size', 'hide-time', 'meta-out'];
+    const steps = ['hide-reason', 'meta-out']; // the status moves as one unit, never piecemeal
     const seg = respRow.querySelector('.seg'), meta = $('#respStatus'), max = respRow.querySelector('.pane-max');
     const alt = $('#respMetaAlt'), tools = $('#respTools');
     respRow.classList.remove(...steps);
@@ -3913,7 +3929,7 @@ async function start() {
     const fits = () => seg.scrollWidth <= seg.clientWidth + 1 && respRow.scrollWidth <= respRow.clientWidth + 1; // real clipping, measured
     if (!phone) for (const step of steps) { if (fits()) break; respRow.classList.add(step); }
     const has = (c) => respRow.classList.contains(c);
-    const moved = has('meta-out') ? [...meta.children] : [has('hide-time') && meta.querySelector('.m-time'), has('hide-size') && meta.querySelector('.m-size')].filter(Boolean);
+    const moved = has('meta-out') ? [...meta.children] : []; // shown in a line under the tabs, on every response tab
     alt.replaceChildren(...moved.map((el) => { const c = el.cloneNode(true); c.querySelector('.m-reason')?.remove(); return c; })); // the code's colour + tooltip carry the reason
     // Still short of room: the actions become icon buttons, and only then does the toolbar wrap.
     if (tools.scrollWidth > tools.clientWidth) tools.classList.add('icons');

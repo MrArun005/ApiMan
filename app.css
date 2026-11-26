@@ -69,7 +69,7 @@
 
   /* resizable layout (set by the drag handles, remembered per browser) */
   --side-w: 288px;
-  --side-eff: max(var(--side-w), calc(262px * var(--text-scale))); /* labels always fit, at any text size */
+  --side-eff: max(var(--side-w), calc(280px * var(--text-scale))); /* labels always fit, at any text size */
   --req-w: 50%;
 }
 
@@ -263,7 +263,7 @@ input[type="number"] { font-variant-numeric: tabular-nums; }
 /* ===================================================================================== tabs strip */
 .work { display: flex; flex-direction: column; min-width: 0; min-height: 0; container: work / inline-size; }
 /* auto-stack (set by JS when side-by-side panes would be narrower than their content needs) */
-:root[data-auto-stack="true"] .split:not([data-max]) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(260px, var(--req-h, 50%)) 1px minmax(260px, 1fr); }
+:root[data-auto-stack="true"] .split:not([data-max]) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 50%)) 1px minmax(200px, 1fr); }
 :root[data-auto-stack="true"] .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
 :root[data-auto-stack="true"] .split > .resizer::after { inset: -1px 0; }
 .tabstrip { scroll-padding-inline-end: var(--h-bar); display: flex; align-items: stretch; height: var(--h-bar); background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; flex: none; } /* scrolls by wheel/trackpad; the active tab is kept in view */
@@ -397,7 +397,7 @@ body.resizing iframe { pointer-events: none; }
 
 /* ===================================================================================== tables */
 table.kv { width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; background: var(--panel); }
-table.kv th { text-align: left; height: var(--row-h); padding: 0 var(--s3); background: var(--hover); border-bottom: 1px solid var(--line); }
+table.kv th { text-align: left; height: var(--row-h); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 var(--s3); background: var(--hover); border-bottom: 1px solid var(--line); }
 table.kv td { border-bottom: 1px solid var(--line); padding: 0; height: calc(var(--h) + 2px); vertical-align: middle; }
 table.kv td + td, table.kv th + th { border-left: 1px solid var(--line); }
 table.kv tr:last-child td { border-bottom: 0; }
@@ -540,10 +540,11 @@ img.preview { max-width: 100%; border-radius: var(--r-lg); border: 1px solid var
 dialog {
   border: 1px solid var(--line); border-radius: var(--r-xl); padding: 0; background: var(--panel); color: var(--ink);
   width: min(760px, calc(100vw - 32px)); max-height: calc(100dvh - 8vh - 16px); box-shadow: var(--shadow);
-  margin: 8vh auto auto;
+  margin: auto; /* centred */
 }
+dialog:has(> .dlg-body.tall), dialog:has(.dlg-body.tall) { height: min(760px, calc(100dvh - 32px)); } /* tabbed dialogs keep one height */
 dialog.confirm { width: min(460px, calc(100vw - 32px)); }
-.dlg-body.tall { min-height: min(560px, 100%); }
+.dlg-body.tall { flex: 1; min-height: 0; overflow: auto; }
 dialog.wide { width: min(1120px, calc(100vw - 32px)); }
 dialog::backdrop { background: rgb(10 14 18 / 0.45); }
 dialog[open] { display: flex; flex-direction: column; overflow: hidden; }
@@ -602,11 +603,11 @@ table.grid .tight { width: 1%; white-space: nowrap; }
 .runner-fail { display: flex; gap: var(--s2); align-items: baseline; margin-top: var(--s1); font-size: var(--fs-xs); color: var(--muted); font-weight: 400; white-space: normal; }
 
 /* ===================================================================================== responsive */
-:root[data-layout="stacked"] .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(260px, var(--req-h, 50%)) 1px minmax(260px, 1fr); }
+:root[data-layout="stacked"] .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 50%)) 1px minmax(200px, 1fr); }
 :root[data-layout="stacked"] .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
 :root[data-layout="stacked"] .split > .resizer::after { inset: -1px 0; }
 @media (max-width: 1180px) {
-  .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(260px, var(--req-h, 50%)) 1px minmax(260px, 1fr); }
+  .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 50%)) 1px minmax(200px, 1fr); }
   .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
   .split > .resizer::after { inset: -1px 0; }
 }
@@ -725,15 +726,28 @@ table.kv input[type="text"], table.kv input[type="password"], .resolved, pre, pr
 .count.dot.off { display: none; } /* empty tabs get no reserved gap: every tab has the same padding */
 /* search inputs: no browser clear button */
 input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
-.resp-meta-alt { display: flex; gap: var(--s3); color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; margin-right: var(--s2); }
-.resp-meta-alt b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
-.resp-meta-alt:empty { display: none; }
+.resp-status-line { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) var(--gutter); border-bottom: 1px solid var(--line); color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; flex: none; }
+.resp-status-line:empty { display: none; }
+.resp-status-line b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
 table.kv input[type="text"], table.kv input[type="password"] { text-overflow: ellipsis; }
 .tool-group { display: flex; align-items: center; gap: var(--s2); flex: none; margin-left: auto; } /* metrics + actions wrap as one block */
 #respTools .tool-group .btn svg { display: none; width: 15px; height: 15px; }
 #respTools.icons .tool-group .btn svg { display: block; }
 #respTools.icons .tool-group .btn .lbl { display: none; }
 #respTools.icons .tool-group .btn { width: var(--h-sm); padding: 0; justify-content: center; }
-@media (max-width: 820px) { .resp-body { max-height: 70vh; overflow: auto; } } /* phones: the response scrolls in its own panel too */
+@media (max-width: 820px) { .resp-body { max-height: 70vh; overflow: auto; } #respBody .CodeMirror-scroll { max-height: 68vh; } } /* phones: the editor itself scrolls (an auto-height editor would be clipped) */
 .tabs .tab, .seg-btn { min-height: max(24px, calc(var(--h-sm) * 0.85)); } /* compact extremes stay clickable */
 @media (max-width: 820px) { .tabs .tab { padding: 0 var(--s2); } } /* phones: all six tabs fit at 390px */
+/* 24px minimum target for every clickable control, at any density */
+.btn.small, .btn.icon.small, .rtab .x, .tabs .tab, .seg-btn { min-height: 24px; }
+.btn.icon.small, .rtab .x { min-width: 24px; }
+.rtab .x { width: 24px; height: 24px; }
+input[type="range"] { min-height: 24px; }
+/* sidebar on the right: brand stays first, the sidebar toggle sits at the right edge next to the sidebar */
+@media (min-width: 821px) {
+  :root[data-side="right"] .brand { order: 0; margin-left: 0; }
+  :root[data-side="right"] .top-actions { order: 1; }
+  :root[data-side="right"] #btnSide { order: 8; }
+}
+@media (max-width: 820px) { .tabs > .seg { flex-wrap: wrap; } .tabs { height: auto; min-height: var(--h-bar); } } /* phones at large text: tabs take a second line rather than hide */
+#btnEnvPeek { min-width: 24px; min-height: 24px; }
