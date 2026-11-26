@@ -1668,7 +1668,7 @@ function renderHistoryList() {
 /** One history entry: method, path (the base URL is the same everywhere, so it's left out), time, status. */
 function historyRow(e) {
   const url = e.url || '';
-  const path = url.replace(/^\s*{{[^{}]+}}/, '').replace(/^[a-z][\w+.-]*:\/\/[^/]*/i, '') || url || e.name;
+  const path = url.replace(/^\s*{{[^{}]+}}/, '').replace(/^[a-z][\w+.-]*:\/\//i, '') || url || e.name; // a {{baseUrl}} is dropped, a literal host is kept
   const mins = Math.round((Date.now() - e.at) / 60000);
   const time = mins < 1 ? 'now' : mins < 60 ? `${mins}m` : mins < 1440 ? `${Math.floor(mins / 60)}h` : new Date(e.at).toLocaleDateString([], { month: 'short', day: 'numeric' });
   return h('div', {
@@ -1715,6 +1715,26 @@ function showMenu(anchor, items) {
   if (row) { row.classList.add('menu-open'); pop.dataset.row = '1'; showMenu.row = row; }
   const first = pop.querySelector('button');
   if (first) first.focus();
+}
+/** Hide the tabs of a segmented row that don't fit (never the active one) and list them in a "More tabs" menu. */
+function fitTabs(seg) {
+  if (!seg || !seg.isConnected) return;
+  const btns = [...seg.children].filter((b) => b.matches('.tab, .seg-btn'));
+  btns.forEach((b) => b.classList.remove('ovf'));
+  let more = seg.nextElementSibling?.classList.contains('seg-more') ? seg.nextElementSibling : null;
+  if (!seg.getClientRects().length || seg.scrollWidth <= seg.clientWidth + 1) { if (more) more.hidden = true; return; }
+  if (!more) {
+    more = h('button', { type: 'button', class: 'btn icon small seg-more', title: 'More tabs', 'aria-label': 'More tabs', 'aria-haspopup': 'menu', 'aria-expanded': 'false' }, icon('dots'));
+    more.addEventListener('click', () => showMenu(more, btns.filter((b) => b.classList.contains('ovf')).map((b) => {
+      const name = [...b.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim() || b.textContent.trim();
+      const count = b.querySelector('.count:not(.dot)')?.textContent.trim();
+      return { label: count ? `${name} (${count})` : name, onClick: () => { b.click(); b.focus(); } };
+    })));
+    seg.after(more);
+  }
+  more.hidden = false;
+  const active = btns.find((b) => b.classList.contains('on'));
+  for (let i = btns.length - 1; i >= 0 && seg.scrollWidth > seg.clientWidth + 1; i--) if (btns[i] !== active) btns[i].classList.add('ovf');
 }
 function placePopover(pop, anchor) {
   pop.hidden = false;
@@ -2288,8 +2308,9 @@ function codeEditor({ value = '', mode = 'text', readOnly = false, onChange, pla
     styleActiveLine: !readOnly, foldGutter: fold, gutters: fold ? ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'] : ['CodeMirror-linenumbers'],
     placeholder, viewportMargin: 30, screenReaderLabel: label, cursorBlinkRate: readOnly ? -1 : 530,
     extraKeys: {
-      Tab: (c) => (c.somethingSelected() ? c.indentSelection('add') : c.replaceSelection(' '.repeat(c.getOption('indentUnit')), 'end')),
-      'Shift-Tab': (c) => c.indentSelection('subtract'),
+      // Read-only viewers let Tab move on to the next control instead of trapping keyboard focus.
+      Tab: readOnly ? false : (c) => (c.somethingSelected() ? c.indentSelection('add') : c.replaceSelection(' '.repeat(c.getOption('indentUnit')), 'end')),
+      'Shift-Tab': readOnly ? false : (c) => c.indentSelection('subtract'),
       'Cmd-F': cls.includes('fill') ? () => openFind() : 'findPersistent', 'Ctrl-F': cls.includes('fill') ? () => openFind() : 'findPersistent',
       Esc: (c) => { const d = host.closest('dialog'); c.getInputField().blur(); (d || document.body).focus(); },
     },
@@ -2556,7 +2577,8 @@ function bodyView(res, view) {
   const langOf = () => (/json/.test(ct) ? 'json' : /html/.test(ct) ? 'html' : /xml|svg/.test(ct) ? 'xml' : /javascript/.test(ct) ? 'javascript' : 'text');
   if (view === 'pretty') {
     try {
-      const pretty = JSON.stringify(JSON.parse(text), null, Number(state.settings.tabSize) || 2);
+      JSON.parse(text); // valid JSON only
+      const pretty = prettyJson(text, Number(state.settings.tabSize) || 2);
       if (pretty.length > 2_000_000) return h('pre', { class: 'out' }, pretty); // keep very large bodies fast
       return codeEditor({ value: pretty, mode: 'json', readOnly: true, fold: true, wrap, label: 'Response body', cls: 'fill' });
     } catch { /* not JSON: show as-is below */ }
@@ -2565,6 +2587,23 @@ function bodyView(res, view) {
   return codeEditor({ value: text, mode: view === 'pretty' ? langOf() : 'text', readOnly: true, fold: view === 'pretty', wrap, label: 'Response body', cls: 'fill' });
 }
 
+/** Re-indent JSON text without parsing values, so 0.0, 1e3 and long integers stay exactly as the server sent them. */
+function prettyJson(text, indent) {
+  let out = '', depth = 0, inStr = false;
+  const nl = () => '\n' + ' '.repeat(depth * indent);
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) { out += c; if (c === '\\') out += text[++i] ?? ''; else if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; out += c; } else if (c === '{' || c === '[') {
+      let j = i + 1; while (/\s/.test(text[j] || '')) j++;
+      if (text[j] === (c === '{' ? '}' : ']')) { out += c + text[j]; i = j; continue; } // {} and [] stay on one line
+      depth++; out += c + nl();
+    } else if (c === '}' || c === ']') { depth--; out += nl() + c; } else if (c === ',') out += ',' + nl();
+    else if (c === ':') out += ': ';
+    else if (!/\s/.test(c)) out += c;
+  }
+  return out;
+}
 function escapeHtml(s) { return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function highlightJson(json) {
   return escapeHtml(json).replace(/(&quot;(?:\\.|(?!&quot;)[^\\])*?&quot;)(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g, (m, str, colon, lit) => {
@@ -2714,11 +2753,12 @@ function openDialog(opts) {
   if ($('#dlg').open) { dialogQueue.push(opts); return; }
   renderDialog(opts);
 }
-function renderDialog({ title, body, buttons = [], wide = false, confirm = false, tall = false, cancel = 'Cancel', onClose, focus, onOpen }) {
+function renderDialog({ title, body, buttons = [], wide = false, confirm = false, tall = false, drawer = false, cancel = 'Cancel', onClose, focus, onOpen }) {
   const dlg = $('#dlg');
   dlg.classList.toggle('wide', wide);
   dlg.classList.toggle('confirm', confirm);
   $('#dlgBody').classList.toggle('tall', tall); // dialogs with tabs keep one height, so nothing jumps under the cursor
+  $('#dlg').classList.toggle('drawer', drawer); // docked at the side: live previews stay visible
   // Every dialog gets the same footer: [destructive/left actions]  ...  Cancel  Primary
   if (cancel && !buttons.some((b) => b.label === 'Cancel')) {
     const at = buttons.findIndex((b) => b.primary || b.solid);
@@ -2740,6 +2780,7 @@ function renderDialog({ title, body, buttons = [], wide = false, confirm = false
   dialogSeq += 1;
   dialogCloses.set(dialogSeq, onClose || null);
   if (!dlg.open) dlg.showModal();
+  if (onOpen) onOpen(); // before focus: it may enable/disable buttons
   // Start on the first field, not on the close button (or on what the dialog asks for).
   const first = [...$('#dlgBody').querySelectorAll('input:not([type=checkbox]):not([type=file]):not([type=range]):not([type=color]):not([disabled]):not([readonly]), select, textarea')].find((el) => el.getClientRects().length); // first visible field
   if (focus) ($(focus) || dlg).focus();
@@ -2747,7 +2788,6 @@ function renderDialog({ title, body, buttons = [], wide = false, confirm = false
   else ($('#dlgFoot .btn.primary') || $('#dlgFoot .btn:last-child') || dlg).focus();
   // Never leave focus on the page behind: fall back to the first visible control in the dialog.
   if (!dlg.contains(document.activeElement)) [...dlg.querySelectorAll('button, input, select, textarea, [tabindex="0"]')].find((el) => el.getClientRects().length && !el.disabled)?.focus();
-  if (onOpen) onOpen();
 }
 function closeDialog() { $('#dlg').close(); }
 
@@ -3011,7 +3051,7 @@ function openImport(start = 'file') {
   pasteIn.addEventListener('input', updateImport);
   const tabsAndPanes = dlgTabs(defs, (k) => { activeKey = k; updateImport(); });
   openDialog({
-    title: 'Import', body: tabsAndPanes, onOpen: updateImport,
+    title: 'Import', body: tabsAndPanes, onOpen: updateImport, tall: true,
     buttons: [{ label: 'Import', primary: true, onClick: () => {
       const active = [...tabsAndPanes[0].children].findIndex((b) => b.classList.contains('on'));
       if (active === 0) fileIn.click();
@@ -3289,7 +3329,7 @@ function openCode() {
   const tabsBar = h('div', { class: 'seg dlg-tabs', role: 'tablist' });
   const draw = () => {
     tabsBar.replaceChildren(...Object.entries(GENERATORS).map(([k, g]) => h('button', {
-      type: 'button', class: `seg-btn ${k === lang ? 'on' : ''}`, role: 'tab', 'aria-selected': String(k === lang), onclick: () => { lang = k; ls.set('apiman:codeLang', k); draw(); },
+      type: 'button', class: `seg-btn ${k === lang ? 'on' : ''}`, role: 'tab', 'aria-selected': String(k === lang), onclick: () => { lang = k; ls.set('apiman:codeLang', k); draw(); tabsBar.querySelector('.on')?.focus(); },
     }, g.label)));
     const r = codeWire(mask.checked);
     pre.textContent = r.error ? `// ${r.error}` : GENERATORS[lang].gen(r.wire);
@@ -3439,7 +3479,7 @@ function openSettings(initial = null, layoutSnap = null) {
     const bar = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': label });
     const draw = () => bar.replaceChildren(...options.map(([v, l]) => h('button', {
       type: 'button', class: `seg-btn ${draft[key] === v ? 'on' : ''}`, role: 'radio', 'aria-checked': String(draft[key] === v),
-      onclick: () => { draft[key] = v; draw(); if (key === 'theme') previewTheme(); else preview(); },
+      onclick: () => { draft[key] = v; draw(); bar.querySelector('[aria-checked="true"]')?.focus(); if (key === 'theme') previewTheme(); else preview(); },
     }, l)));
     draw();
     return bar;
@@ -3541,7 +3581,7 @@ function openSettings(initial = null, layoutSnap = null) {
   ];
   openDialog({
     title: 'Settings',
-    tall: true, wide: true,
+    tall: true, drawer: true,
     body: dlgTabs([{ key: 'appearance', label: 'Appearance', content: appearance }, { key: 'requests', label: 'Requests', content: requests }]),
     onClose: () => { if (!saved && !reopening) { applyTheme(); applyAppearance(); initResizers.restore(snap); } }, // Cancel undoes everything, panel sizes included
     buttons: [
@@ -3771,13 +3811,8 @@ function initResizers() {
   const side = $('#sideResizer'), split = $('#splitResizer');
   const sideMin = () => Math.ceil(280 * cssScale()); // matches --side-eff in app.css
   // Width each pane needs side by side: its full tab row (tabs + maximise + padding), never less than 320px.
-  const paneNeeds = () => ['#reqTabs', '#respTabs'].map((id) => {
-    const row = $(id), seg = row && row.querySelector('.seg');
-    if (!seg) return 320 * cssScale();
-    const cs = getComputedStyle(row), max = row.querySelector('.pane-max');
-    const chrome = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + (max ? max.offsetWidth : 0) + 2 * (parseFloat(cs.columnGap) || 8) + 2;
-    return Math.max(320 * cssScale(), seg.scrollWidth + chrome); // measured, so any text size / density combination fits
-  });
+  // Each pane can shrink to 320px (x text size); tabs that don't fit then move into a "More tabs" menu.
+  const paneNeeds = () => [320 * cssScale(), 320 * cssScale()];
   const setSideW = (px, persist = true) => {
     px = clamp(Math.round(px), sideMin(), 640);
     root.style.setProperty('--side-w', `${px}px`);
@@ -3810,10 +3845,10 @@ function initResizers() {
     if (persist) save(key, pct);
   };
   setSideW(layout.side || 288, false);
-  setSplit((stacked() ? layout.reqH : layout.req) || 50, false);
+  setSplit((stacked() ? layout.reqH || 40 : layout.req || 50), false);
   if (layout.req) root.style.setProperty('--req-w', `${layout.req}%`);
   if (layout.reqH) root.style.setProperty('--req-h', `${layout.reqH}%`);
-  matchMedia('(max-width: 1180px)').addEventListener('change', () => setSplit((stacked() ? layout.reqH : layout.req) || 50, false));
+  matchMedia('(max-width: 1180px)').addEventListener('change', () => setSplit((stacked() ? layout.reqH || 40 : layout.req || 50), false));
 
   const drag = (el, onMove) => el.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
@@ -3862,9 +3897,9 @@ function initResizers() {
     setSplit(Number(split.dataset.now) + (e.key === more ? 1 : -1) * (e.shiftKey ? 5 : 0.5));
   });
   side.addEventListener('dblclick', () => setSideW(288));   // double-click resets
-  split.addEventListener('dblclick', () => setSplit(50));
+  split.addEventListener('dblclick', () => setSplit(stacked() ? 40 : 50));
   side.title = split.title = 'Drag to resize, double-click to reset';
-  initResizers.refresh = () => setSplit((stacked() ? layout.reqH : layout.req) || 50, false);
+  initResizers.refresh = () => setSplit((stacked() ? layout.reqH || 40 : layout.req || 50), false);
   initResizers.setSide = (px) => setSideW(px);
   initResizers.snapshot = () => ({ ...ls.get('apiman:layout', {}) });
   initResizers.restore = (snap) => {
@@ -3872,7 +3907,7 @@ function initResizers() {
     ls.set('apiman:layout', layout);
     setSideW(snap.side || 288, false);
     root.style.setProperty('--req-w', `${snap.req || 50}%`);
-    root.style.setProperty('--req-h', `${snap.reqH || 50}%`);
+    root.style.setProperty('--req-h', `${snap.reqH || 40}%`);
     initResizers.refresh();
   };
   initResizers.paneSize = () => { const r = $('.req-col').getBoundingClientRect(); return stacked() ? r.height : r.width; };
@@ -3885,7 +3920,8 @@ function initResizers() {
     const on = document.documentElement.dataset.layout !== 'stacked' && $('.work').clientWidth - 1 < a + b && !matchMedia('(max-width: 820px)').matches;
     if ((document.documentElement.dataset.autoStack === 'true') !== on) {
       if (on) document.documentElement.dataset.autoStack = 'true'; else delete document.documentElement.dataset.autoStack;
-      setSplit((stacked() ? layout.reqH : layout.req) || 50, false);
+      if ($('#autoStackNote')) $('#autoStackNote').hidden = !on;
+      setSplit((stacked() ? layout.reqH || 40 : layout.req || 50), false);
       refreshEditors(document);
     }
   };
@@ -3895,7 +3931,7 @@ function initResizers() {
   initResizers.autoStack = autoStack;
   initResizers.setSplit = (pct) => setSplit(pct);
   initResizers.sizes = () => ({ side: Number(side.dataset.now), split: Number(split.dataset.now) });
-  initResizers.reset = () => { setSideW(288); layout.req = 50; layout.reqH = 50; ls.set('apiman:layout', layout); root.style.setProperty('--req-w', '50%'); root.style.setProperty('--req-h', '50%'); setSplit(50); };
+  initResizers.reset = () => { setSideW(288); layout.req = 50; layout.reqH = 40; ls.set('apiman:layout', layout); root.style.setProperty('--req-w', '50%'); root.style.setProperty('--req-h', '40%'); setSplit(stacked() ? 40 : 50); };
 }
 
 async function start() {
@@ -3920,6 +3956,9 @@ async function start() {
     // only when even it runs out of room.
     const steps = ['hide-reason', 'meta-out']; // the status moves as one unit, never piecemeal
     const seg = respRow.querySelector('.seg'), meta = $('#respStatus'), max = respRow.querySelector('.pane-max');
+    seg.querySelectorAll('.ovf').forEach((b) => b.classList.remove('ovf')); // measure the full tab row
+    const moreBtn = seg.nextElementSibling?.classList.contains('seg-more') ? seg.nextElementSibling : null;
+    if (moreBtn) moreBtn.hidden = true;
     const alt = $('#respMetaAlt'), tools = $('#respTools');
     respRow.classList.remove(...steps);
     tools.classList.remove('wrap', 'icons');
@@ -3934,6 +3973,7 @@ async function start() {
     // Still short of room: the actions become icon buttons, and only then does the toolbar wrap.
     if (tools.scrollWidth > tools.clientWidth) tools.classList.add('icons');
     if (tools.scrollWidth > tools.clientWidth) tools.classList.add('wrap');
+    fitTabs(seg); // finally, any tab that still doesn't fit goes into the More menu
   };
   // Toolbar actions carry an icon and a label; the label is also their accessible name when only the icon shows.
   [['#btnFindBody', 'search'], ['#btnCopyBody', 'copy'], ['#btnSaveBody', 'download']].forEach(([sel, name]) => {
@@ -3955,6 +3995,14 @@ async function start() {
     update();
   };
   ['#reqTabs > .seg', '#respTabs > .seg', '.side .seg.block'].forEach((sel) => watchOverflow($(sel)));
+  // Request tab row and the request sub-tab rows (body type, auth type...) collapse into a More menu.
+  [$('#reqTabs > .seg'), ...$$('.req-col .pane-tools > .seg')].forEach((seg) => {
+    const run = () => requestAnimationFrame(() => fitTabs(seg));
+    new ResizeObserver(run).observe(seg.parentElement);
+    new MutationObserver(run).observe(seg, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['aria-selected', 'aria-checked'] });
+    run();
+  });
+  new MutationObserver(() => requestAnimationFrame(fitResp)).observe($('#respTabs > .seg'), { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['aria-selected'] });
   $$('.pane-tools .seg').forEach(watchOverflow);
   // Sidebar tree keyboard: Up/Down move, Right/Left open/close, Space activates (Enter is handled per row).
   $('#sideBody').addEventListener('focusin', (e) => {
@@ -4011,6 +4059,14 @@ async function start() {
   });
   new MutationObserver(rovingTabs).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['aria-selected', 'aria-checked'], childList: true });
   rovingTabs();
+  document.addEventListener('keydown', (e) => {
+    if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'f' || e.altKey || $('#dlg').open) return;
+    if (e.target.closest && e.target.closest('.CodeMirror') && !e.target.closest('#respBody')) return; // request editors keep their own find
+    if ($('#respTools').hidden) return;
+    e.preventDefault();
+    if ($('.resp-col .tab.on')?.dataset.tab !== 'rbody') $('#tab-rbody').click();
+    openFind();
+  });
   // Phones: Escape closes the open sidebar drawer.
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || $('#dlg').open || !$('#popover').hidden || !$('.app').classList.contains('side-open')) return;

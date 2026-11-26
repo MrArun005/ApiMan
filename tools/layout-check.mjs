@@ -85,6 +85,10 @@ const measure = () => page.evaluate(() => {
   if (scroller.scrollHeight <= scroller.clientHeight && body.scrollHeight <= body.clientHeight) fails.push('large response does not scroll inside its panel');
   if (rb.height < 120) fails.push(`response body only ${Math.round(rb.height)}px tall`);
   // 7. readable text and clickable targets
+  // the divider really resizes: a sane range, never inverted
+  const sp = document.querySelector('#splitResizer'), mn = +sp.getAttribute('aria-valuemin'), mx = +sp.getAttribute('aria-valuemax');
+  if (mn > mx) fails.push(`divider range inverted ${mn}>${mx}`);
+  if (!phone && !stacked && innerWidth >= 1280 && parseFloat(getComputedStyle(de).getPropertyValue('--text-scale')) <= 1 && mx - mn < 25) fails.push(`divider range only ${mn}-${mx}%`);
   for (const el of document.querySelectorAll('.btn, .tab, .seg-btn, .rtab, button.x, .pane-max')) {
     if (!vis(el) || el.closest('dialog:not([open]), [hidden]')) continue;
     const r = R(el);

@@ -263,7 +263,7 @@ input[type="number"] { font-variant-numeric: tabular-nums; }
 /* ===================================================================================== tabs strip */
 .work { display: flex; flex-direction: column; min-width: 0; min-height: 0; container: work / inline-size; }
 /* auto-stack (set by JS when side-by-side panes would be narrower than their content needs) */
-:root[data-auto-stack="true"] .split:not([data-max]) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 50%)) 1px minmax(200px, 1fr); }
+:root[data-auto-stack="true"] .split:not([data-max]) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 40%)) 1px minmax(200px, 1fr); }
 :root[data-auto-stack="true"] .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
 :root[data-auto-stack="true"] .split > .resizer::after { inset: -1px 0; }
 .tabstrip { scroll-padding-inline-end: var(--h-bar); display: flex; align-items: stretch; height: var(--h-bar); background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; flex: none; } /* scrolls by wheel/trackpad; the active tab is kept in view */
@@ -603,11 +603,11 @@ table.grid .tight { width: 1%; white-space: nowrap; }
 .runner-fail { display: flex; gap: var(--s2); align-items: baseline; margin-top: var(--s1); font-size: var(--fs-xs); color: var(--muted); font-weight: 400; white-space: normal; }
 
 /* ===================================================================================== responsive */
-:root[data-layout="stacked"] .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 50%)) 1px minmax(200px, 1fr); }
+:root[data-layout="stacked"] .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 40%)) 1px minmax(200px, 1fr); }
 :root[data-layout="stacked"] .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
 :root[data-layout="stacked"] .split > .resizer::after { inset: -1px 0; }
 @media (max-width: 1180px) {
-  .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 50%)) 1px minmax(200px, 1fr); }
+  .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 40%)) 1px minmax(200px, 1fr); }
   .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
   .split > .resizer::after { inset: -1px 0; }
 }
@@ -704,6 +704,9 @@ mark { background: color-mix(in srgb, var(--post) 30%, transparent); color: inhe
 #respTabs.meta-out .resp-meta { display: none; }
 .slider-row .unit-select { width: auto; flex: none; }
 #respTools > .seg, .pane-tools > .seg { flex: none; flex-wrap: nowrap; } /* a toggle never breaks across lines */
+.req-col .pane-tools > .seg { flex: 0 1 auto; min-width: 0; overflow: hidden; } /* shrinks; extra options go into the More menu */
+.ovf { display: none !important; }
+.seg-more { flex: none; align-self: center; }
 #respTools > .btn { flex: none; }
 /* 11 13: body toolbar stays on one line; the segmented control scrolls with a fade instead of wrapping */
 #pane-body .pane-tools { flex-wrap: nowrap; }
@@ -751,3 +754,15 @@ input[type="range"] { min-height: 24px; }
 }
 @media (max-width: 820px) { .tabs > .seg { flex-wrap: wrap; } .tabs { height: auto; min-height: var(--h-bar); } } /* phones at large text: tabs take a second line rather than hide */
 #btnEnvPeek { min-width: 24px; min-height: 24px; }
+/* round 9 */
+.pane-tools > .hint { white-space: normal; min-width: 0; flex: 1 1 220px; } /* safety hints wrap instead of being cut */
+#respHeaders { border: 1px solid var(--line); border-radius: var(--r-lg); border-collapse: separate; border-spacing: 0; overflow: hidden; } /* boxed like Params */
+dialog.drawer, dialog.drawer:has(.dlg-body.tall) { margin: 0 0 0 auto; width: min(560px, 100vw); height: 100dvh; max-height: 100dvh; border-radius: 0; border-width: 0 0 0 1px; }
+dialog.drawer::backdrop { background: rgb(10 14 18 / 0.12); }
+dialog.drawer .grid-3 { grid-template-columns: 1fr 1fr; }
+@media (max-width: 820px) { /* phones: 36px touch targets */
+  .tabs .tab, .seg-btn, .btn.small, .btn.icon.small, .rtab .x, #btnEnvPeek { min-height: 36px; }
+  .btn.icon.small, .rtab .x, #btnEnvPeek { min-width: 36px; }
+  .rtab .x { width: 36px; height: 36px; }
+  #respTools.icons .tool-group .btn { width: 36px; height: 36px; }
+}
