@@ -1691,6 +1691,7 @@ function askSaveBeforeClose(t) {
 
 async function closeTab(i) {
   const t = state.tabs[i];
+  if (t.ws) wsDisconnect(t);
   if (t.dirty) {
     const choice = await askSaveBeforeClose(t);
     if (choice === 'cancel') return;
@@ -2338,6 +2339,7 @@ function renderUrlHl() {
 }
 function renderResolved() {
   renderUrlHl();
+  { const t0 = cur(); if (t0 && !t0.sending) $('#btnSend').textContent = (t0.ws && t0.ws.state !== 'closed') ? 'Disconnect' : isWsUrl(t0.ed.url) ? 'Connect' : 'Send'; }
   requestAnimationFrame(() => { const el = $('#resolved'); if (el) el.title = el.textContent; });
   const t = cur();
   const el = $('#resolved');
@@ -2693,13 +2695,15 @@ const SNIPPETS = {
 function renderResponse() {
   const t = cur();
   const status = $('#respStatus');
+  const wsMode = !t.sending && (t.ws || isWsUrl(t.ed.url));
+  $('#btnSend').textContent = wsMode ? (t.ws && t.ws.state !== 'closed' ? 'Disconnect' : 'Connect') : t.sending ? 'Cancel' : 'Send';
+  if (t.ws && isWsUrl(t.ed.url)) { renderWs(t); renderDiff(); return; }
   const stale = !!(t.sending && !t.out && t.prevOut && t.prevOut.res); // keep the last response visible while sending
   const out = t.out || (stale ? t.prevOut : null);
   queueMicrotask(() => {
     $('#respBody').classList.toggle('stale', stale);
     if (stale) status.replaceChildren(h('span', { class: 'sending' }, 'Sending… ', h('b', { class: 'elapsed' }, '0.0 s')));
   });
-  $('#btnSend').textContent = t.sending ? 'Cancel' : 'Send';
   $('#btnSend').classList.toggle('busy', !!t.sending);
   const clearCounts = () => { for (const id of ['#cntRHeaders', '#cntRCookies', '#cntRTests', '#cntRDiff', '#cntRConsole']) $(id).textContent = ''; };
   if ((t.sending && !stale) || !out) {
@@ -3405,9 +3409,105 @@ function saveBody() {
 // =====================================================================================================
 // Actions: send, save
 // =====================================================================================================
+// ---------- WebSocket ----------
+// A ws:// or wss:// URL turns the tab into a WebSocket client: Send becomes Connect, the response pane a live
+// message log with a composer. It uses the browser's own WebSocket (so it works in both modes, through your VPN).
+const isWsUrl = (url) => /^\s*wss?:\/\//i.test(String(url || ''));
+const WS_LOG_MAX = 2000;
+
+function wsConnect(t) {
+  const vars = merged(scopesFor(t.cid));
+  const url = resolve(t.ed.url, vars).trim();
+  const missing = unresolved([url]);
+  if (missing.length) { toast(`Unknown variable {{${missing[0]}}}. Define it in the environment, the collection, or Globals.`); return; }
+  try { new URL(url); } catch { toast(`"${url}" isn't a valid URL.`); return; }
+  const headers = t.ed.headers.filter((x) => !x.disabled && x.key);
+  const proto = headers.find((x) => /^sec-websocket-protocol$/i.test(x.key));
+  const protocols = proto ? resolve(proto.value, vars).split(',').map((s) => s.trim()).filter(Boolean) : [];
+  const ignored = headers.filter((x) => x !== proto).map((x) => x.key);
+  const ws = { url, log: [], state: 'connecting', opened: 0 };
+  t.ws = ws;
+  const add = (dir, data, extra = {}) => {
+    ws.log.push({ dir, data, at: Date.now(), ...extra });
+    if (ws.log.length > WS_LOG_MAX) ws.log.splice(0, ws.log.length - WS_LOG_MAX);
+    if (cur() === t) renderWsLog(t, dir === 'in' || dir === 'out');
+  };
+  if (ignored.length) add('info', `Browsers can't send custom headers on a WebSocket, so ${ignored.join(', ')} ${ignored.length > 1 ? 'were' : 'was'} not sent. Put tokens in a query parameter, or the Sec-WebSocket-Protocol header (sent as the subprotocol).`);
+  let sock;
+  try { sock = protocols.length ? new WebSocket(url, protocols) : new WebSocket(url); } catch (e) { ws.state = 'closed'; add('err', e.message); renderResponse(); return; }
+  sock.binaryType = 'arraybuffer';
+  ws.sock = sock;
+  add('info', `Connecting to ${url}${protocols.length ? ` (subprotocol ${protocols.join(', ')})` : ''}…`);
+  sock.onopen = () => { ws.state = 'open'; ws.opened = Date.now(); add('info', `Connected${sock.protocol ? `, subprotocol ${sock.protocol}` : ''}.`); if (cur() === t) renderResponse(); };
+  sock.onmessage = (e) => {
+    if (typeof e.data === 'string') add('in', e.data);
+    else add('in', `(binary, ${fmtSize(e.data.byteLength)}) ${bufToB64(new Uint8Array(e.data)).slice(0, 2000)}`, { binary: true });
+  };
+  sock.onerror = () => add('err', 'Connection error (the browser doesn\'t say more: check the URL, and that the server accepts WebSocket connections from this page).');
+  sock.onclose = (e) => {
+    ws.state = 'closed';
+    add('info', `Disconnected${e.code ? ` (code ${e.code}${e.reason ? `: ${e.reason}` : ''})` : ''}${ws.opened ? ` after ${fmtMs(Date.now() - ws.opened)}` : ''}.`);
+    if (cur() === t) renderResponse();
+  };
+  renderResponse();
+}
+function wsDisconnect(t) { if (t.ws && t.ws.sock && t.ws.state !== 'closed') t.ws.sock.close(1000, 'Closed in ApiMan'); }
+function wsSend(t, text) {
+  const ws = t.ws;
+  if (!ws || ws.state !== 'open') { toast('Connect first.'); return false; }
+  const msg = resolve(text, merged(scopesFor(t.cid)));
+  ws.sock.send(msg);
+  ws.log.push({ dir: 'out', data: msg, at: Date.now() });
+  renderWsLog(t, true);
+  return true;
+}
+
+function renderWs(t) {
+  const ws = t.ws;
+  const status = $('#respStatus');
+  const label = { connecting: 'Connecting…', open: 'Connected', closed: 'Disconnected' }[ws.state];
+  status.replaceChildren(h('span', { class: `status-code ${ws.state === 'open' ? 's2' : ws.state === 'closed' ? 's-err' : ''}` }, label),
+    h('span', { class: 'm-time' }, `${ws.log.filter((m) => m.dir === 'in').length} in, ${ws.log.filter((m) => m.dir === 'out').length} out`));
+  for (const id of ['#cntRHeaders', '#cntRCookies', '#cntRTests', '#cntRDiff', '#cntRConsole']) $(id).textContent = '';
+  t.respTab = 'rbody';
+  switchPane('#respTabs', 'rbody');
+  $('#respTools').hidden = true;
+  const input = h('textarea', { class: 'code', rows: 3, spellcheck: 'false', 'aria-label': 'Message to send', placeholder: ws.state === 'open' ? 'Message ({{variables}} work). Ctrl/Cmd+Enter sends.' : 'Connect to send messages.', value: t.wsDraft || '',
+    oninput: (e) => { t.wsDraft = e.target.value; },
+    onkeydown: (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); if (wsSend(t, input.value)) { input.value = ''; t.wsDraft = ''; } } } });
+  const sendBtn = h('button', { type: 'button', class: 'btn primary', disabled: ws.state !== 'open', onclick: () => { if (wsSend(t, input.value)) { input.value = ''; t.wsDraft = ''; input.focus(); } } }, 'Send message');
+  const tools = h('div', { class: 'ws-tools' },
+    h('input', { type: 'search', class: 'ws-filter', placeholder: 'Filter messages', 'aria-label': 'Filter messages', value: t.wsFilter || '', oninput: (e) => { t.wsFilter = e.target.value; renderWsLog(t, false); } }),
+    h('button', { type: 'button', class: 'btn small ghost', onclick: () => { ws.log = []; renderWsLog(t, false); } }, 'Clear'));
+  $('#respBody').replaceChildren(h('div', { class: 'ws' }, tools, h('div', { class: 'ws-log', id: 'wsLog', role: 'log', 'aria-live': 'polite' }),
+    h('div', { class: 'ws-compose' }, input, sendBtn)));
+  renderWsLog(t, true);
+}
+function renderWsLog(t, stick) {
+  const box = $('#wsLog');
+  if (!box || cur() !== t) return;
+  const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  const f = (t.wsFilter || '').toLowerCase();
+  const rows = t.ws.log.filter((m) => !f || String(m.data).toLowerCase().includes(f)).slice(-500).map((m) => {
+    let body = String(m.data);
+    if ((m.dir === 'in' || m.dir === 'out') && /^\s*[[{]/.test(body)) { try { JSON.parse(body); body = prettyJson(body, 2); } catch { /* as sent */ } }
+    return h('div', { class: `ws-msg ${m.dir}` },
+      h('span', { class: 'ws-dir', 'aria-label': { in: 'Received', out: 'Sent', info: 'Info', err: 'Error' }[m.dir] }, { in: '↓', out: '↑', info: '•', err: '!' }[m.dir]),
+      h('time', null, new Date(m.at).toLocaleTimeString([], { hour12: false }) + '.' + String(m.at % 1000).padStart(3, '0')),
+      h('pre', null, body));
+  });
+  box.replaceChildren(...(rows.length ? rows : [h('p', { class: 'hint' }, f ? 'No messages match.' : 'No messages yet.')]));
+  if (stick && atEnd) { box.scrollTop = box.scrollHeight; requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; }); } // follow new messages unless you scrolled up
+  const st = $('#respStatus .m-time');
+  if (st) st.textContent = `${t.ws.log.filter((m) => m.dir === 'in').length} in, ${t.ws.log.filter((m) => m.dir === 'out').length} out`;
+}
+
 async function send() {
   const t = cur();
   if (!t) return;
+  if (t.ws && t.ws.state !== 'closed') { wsDisconnect(t); return; }
+  if (isWsUrl(t.ed.url)) { wsConnect(t); return; }
+  if (t.ws) { t.ws = null; } // the URL is HTTP again
   if (t.sending) {
     // Cancel: show it immediately; a late answer from the server is ignored below.
     t.sending.abort();

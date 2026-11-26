@@ -38,6 +38,7 @@ python3 server.py run orders.json --folder Smoke -n 3 --delay 200 --bail
 | **Bodies** | JSON / text / XML / HTML raw, form data with file uploads, URL-encoded, binary file, GraphQL |
 | **Auth** | Bearer token, Basic, API key (header or query), **OAuth 2.0** (authorization code with PKCE, client credentials, password), inherited from folder or collection, or none. OAuth tokens are fetched when you send and refreshed automatically when they expire, no "Get token" click needed (authorization code opens a sign-in window once). Register `http://127.0.0.1:5577/oauth-callback.html` (or your site's `oauth-callback.html`) as the redirect URI |
 | **Variables** | Environments, collection variables, globals and dynamic values (`{{$guid}}`, `{{$timestamp}}`, …), with a live "Resolves to" preview under the URL |
+| **WebSocket** | Type a `ws://` or `wss://` URL and Send becomes Connect: a live, filterable message log (JSON pretty-printed, millisecond timestamps) with a composer that resolves `{{variables}}`. Uses the browser's own WebSocket, in both modes. Browsers can't send custom headers on a WebSocket, so ApiMan says which ones it couldn't send; `Sec-WebSocket-Protocol` is sent as the subprotocol |
 | **Scripts** | Pre-request and test scripts with Postman's `pm.*` commands (`pm.test`, `pm.expect`, `pm.response`, `pm.environment`, …), plus snippets |
 | **Click-to-test** | Right-click any value in a JSON response (or put the cursor on it and press the menu key or <kbd>Shift+F10</kbd>) to add a test without writing code: *equals this value*, *exists*, *is a string/number/list…*, *is not empty*, or *save it to a variable* for the next request (e.g. a login token). ApiMan writes the `pm.test` into the request's Tests script, where you can edit it |
 | **Runner** | Run a collection or folder, with iterations, delay, stop on failure, and live pass/fail results. Values scripts set carry to the next request (`/orders/{{orderId}}` chaining works), except ones that could change which server a request goes to. Also from the command line (see above) |
@@ -65,6 +66,6 @@ python3 server.py run orders.json --folder Smoke -n 3 --delay 200 --bail
 
 ## Not included (yet)
 
-Cloud and team sync, mock servers, monitors, WebSocket and gRPC, OAuth 2.0 implicit and device-code grants, and npm libraries inside scripts (`require`).
+Cloud and team sync, mock servers, monitors, gRPC, custom WebSocket headers, OAuth 2.0 implicit and device-code grants, and npm libraries inside scripts (`require`).
 
 Fonts: Geist and Geist Mono (SIL Open Font License, `fonts/OFL.txt`). Editor: CodeMirror 5 (MIT, `vendor/CODEMIRROR-LICENSE`). Both are bundled, so ApiMan never loads anything from a CDN.
