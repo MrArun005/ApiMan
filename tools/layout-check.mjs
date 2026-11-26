@@ -4,12 +4,16 @@
 //
 //   PLAYWRIGHT=/path/to/node_modules/playwright CHROMIUM=/path/to/Chromium node tools/layout-check.mjs
 //
-// Needs ApiMan running (python3 server.py) and a large JSON served somewhere (BIG_URL) to test scrolling.
+// Needs ApiMan running (python3 server.py --port 5577 --no-browser, or set APP). No other server is needed: the large
+// JSON response used to test scrolling is generated here and answered by intercepting the page's send (POST /api/send
+// in local mode, or the request itself in browser mode). Set BIG_URL to send a real request to your own server instead.
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT || 'playwright');
 const APP = process.env.APP || 'http://127.0.0.1:5577/';
-const BIG_URL = process.env.BIG_URL || 'http://127.0.0.1:18765/big.json';
+// By default BIG_URL names a host that never resolves (.invalid), so a missed interception fails loudly.
+const BIG_URL = process.env.BIG_URL || 'http://layout-check.invalid/big.json';
+const FAKE_BIG = !process.env.BIG_URL; // answered below; set BIG_URL to use a real server instead
 const ONLY = process.env.ONLY; // e.g. ONLY=1280 to run one width
 
 const WIDTHS = [[1440, 900], [1366, 768], [1280, 800], [1024, 768], [768, 800], [720, 900], [640, 800], [601, 800], [390, 844]].filter(([w]) => !ONLY || String(w) === ONLY);
@@ -18,8 +22,35 @@ const LAYOUTS = ['auto', 'stacked'];
 const SCALES = [[1, 1], [0.8, 0.75], [1.5, 1.4], [1.5, 0.75], [0.8, 1.4]]; // [text, density] at the Settings extremes
 const SPLITS = ['default', 'Home', 'End'];
 
+// Fail fast and clearly when ApiMan isn't up (rather than a Playwright navigation error).
+try {
+  await fetch(APP, { signal: AbortSignal.timeout(5000) });
+} catch {
+  const port = new URL(APP).port || 80;
+  console.error(`ApiMan isn't running at ${APP}: start it with python3 server.py --port ${port} --no-browser (or set APP)`);
+  process.exit(2);
+}
+
 const browser = await chromium.launch(process.env.CHROMIUM ? { executablePath: process.env.CHROMIUM } : {});
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+if (FAKE_BIG) {
+  // ~20,000 objects (about 1.5 MB) of JSON, answered in the shape server.py's send() returns.
+  const big = JSON.stringify(Array.from({ length: 20000 }, (_, i) => ({ id: i, name: `item ${i}`, tags: ['a', 'b'], nested: { x: i, y: [1, 2, 3] } })));
+  const size = Buffer.byteLength(big);
+  const headers = [['Content-Type', 'application/json'], ['Content-Length', String(size)]];
+  // Local mode: the page asks ApiMan's server to send (POST /api/send), so that call is answered for BIG_URL only.
+  await page.route((url) => url.pathname === '/api/send', async (route) => {
+    let spec = null;
+    try { spec = route.request().postDataJSON(); } catch { /* not JSON: let the server answer */ }
+    if (route.request().method() !== 'POST' || !spec || spec.url !== BIG_URL) return route.continue();
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      status: 200, reason: 'OK', headers, body: big, bodyBase64: null, binary: false, size, truncated: false,
+      timeMs: 12, finalUrl: BIG_URL, redirectStripped: [],
+    }) });
+  });
+  // Browser mode (no ApiMan server): the page fetches BIG_URL itself.
+  await page.route(BIG_URL, (route) => route.fulfill({ status: 200, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }, body: big }));
+}
 const pageErrors = [];
 page.on('pageerror', (e) => pageErrors.push(e.message));
 await page.goto(APP);

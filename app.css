@@ -543,7 +543,17 @@ dialog.drawer.docked { position: fixed; inset: 0 0 0 auto; margin: 0; z-index: 4
 .toast.err { border-color: color-mix(in srgb, var(--err) 40%, var(--line)); }
 .toast.err > svg { color: var(--err); }
 .toast.muted > svg { color: var(--muted); }
-@media (min-width: 901px) { :root.drawer-open .toast { right: calc(var(--drawer-w) + var(--s5)); } } /* clear of the docked Settings drawer */
+/* Always inside the work area: as wide as it allows, and clear of the sidebar (on either side) and the docked Settings drawer. */
+@media (min-width: 601px) {
+  .toast { max-width: min(400px, calc(100vw - var(--side-eff) - 2 * var(--s5))); }
+  :root[data-side="right"] .toast { right: calc(var(--side-eff) + var(--s5)); }
+  :root[data-side-hidden="true"] .toast { right: var(--s5); max-width: min(400px, calc(100vw - 2 * var(--s5))); }
+}
+@media (min-width: 901px) {
+  :root.drawer-open .toast { right: calc(var(--drawer-w) + var(--s5)); max-width: min(400px, calc(100vw - var(--drawer-w) - var(--side-eff) - 2 * var(--s5))); }
+  :root.drawer-open[data-side="right"] .toast { right: calc(var(--drawer-w) + var(--side-eff) + var(--s5)); }
+  :root.drawer-open[data-side-hidden="true"] .toast { right: calc(var(--drawer-w) + var(--s5)); max-width: min(400px, calc(100vw - var(--drawer-w) - 2 * var(--s5))); }
+}
 @media (max-width: 600px) { .toast { left: var(--s3); right: var(--s3); bottom: var(--s3); max-width: none; } }
 
 /* ===================================================================================== 21 Progress */

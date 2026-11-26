@@ -487,7 +487,7 @@ async function materializeBody(body) {
 async function serverSend(wire, signal) {
   const spec = {
     method: wire.method, url: wire.url, headers: wire.headers,
-    timeout: state.settings.timeout, followRedirects: state.settings.followRedirects, insecure: state.settings.insecure,
+    timeout: state.settings.timeout, followRedirects: wire.followRedirects ?? state.settings.followRedirects, insecure: state.settings.insecure,
   };
   const { payload, isForm } = await materializeBody(wire.body);
   if (typeof payload === 'string') spec.body = payload;
@@ -520,7 +520,7 @@ async function browserSend(wire, signal) {
     r = await fetch(wire.url, {
       method: wire.method, headers, body: noBody ? undefined : payload,
       // fetch only strips Authorization on cross-site redirects; custom headers (X-Api-Key, ...) would follow.
-      credentials: 'omit', redirect: state.settings.followRedirects && !carriesSecrets ? 'follow' : 'manual', signal: sig,
+      credentials: 'omit', redirect: (wire.followRedirects ?? state.settings.followRedirects) && !carriesSecrets ? 'follow' : 'manual', signal: sig,
     });
   } catch (e) {
     if (e.name === 'TimeoutError') return { error: `No response within ${state.settings.timeout} s.` };
@@ -529,6 +529,7 @@ async function browserSend(wire, signal) {
       + 'or it isn\'t reachable from here. Run ApiMan locally (python3 server.py) to call any API without CORS limits.' };
   }
   if (r.type === 'opaqueredirect') {
+    if (wire.followRedirects === false) return { error: 'The API answered with a redirect, which is not followed here. Browsers hide redirect details; run ApiMan locally to see them.' };
     return { error: state.settings.followRedirects
       ? 'The API answered with a redirect. ApiMan did not follow it because this request carries headers such as Authorization or API keys, which a browser could forward to another site. Run ApiMan locally to follow redirects safely.'
       : 'The API answered with a redirect, and "Follow redirects" is off in Settings. Browsers hide redirect details; run ApiMan locally to see them.' };
@@ -875,9 +876,23 @@ function unresolved(strings) {
 // =====================================================================================================
 const SCRIPT_TIMEOUT_MS = 5000;
 
+const SCRIPT_MAX_MS = 60000; // hard cap per script run, including time spent waiting for pm.sendRequest replies
+const SEND_MAX = 10; // pm.sendRequest calls per script run
+const SEND_TIMEOUT_MS = 30000; // per pm.sendRequest call
+
 const PM_WORKER = String.raw`
 'use strict';
+let started = false;
+const sendWaiters = new Map(); // pm.sendRequest id -> settle(reply)
 self.onmessage = async (e) => {
+  if (started) {
+    // later messages are pm.sendRequest replies, relayed by the sandbox frame from the app window
+    const r = e.data && e.data.sendResult;
+    const settle = r && sendWaiters.get(r.id);
+    if (settle) { sendWaiters.delete(r.id); settle(r); }
+    return;
+  }
+  started = true;
   const { code, ctx } = e.data;
   // Self-check: the CSP inherited from the sandbox frame must block loading code/data from anywhere.
   // If this browser doesn't enforce it, scripts could reach the network, so refuse to run them.
@@ -1018,6 +1033,62 @@ self.onmessage = async (e) => {
     };
   }
 
+  // ---------- pm.sendRequest ----------
+  // The worker has no network. It only describes the request; the app window decides whether and where it
+  // may go (destination, limits, no auth/cookies added) and sends it. Nothing here is a safety check.
+  let sendSeq = 0;
+  const asyncErrors = [];
+  const urlText = (u) => u == null ? '' : typeof u === 'string' ? u : typeof u.raw === 'string' ? u.raw : String(u);
+  const toSpec = (rq) => {
+    const o = typeof rq === 'string' ? { url: rq } : rq && typeof rq === 'object' ? rq : {};
+    const headers = [];
+    const hd = o.header !== undefined ? o.header : o.headers;
+    if (Array.isArray(hd)) { for (const x of hd) if (x && x.key && !x.disabled) headers.push([replaceIn(x.key), replaceIn(str(x.value))]); }
+    else if (hd && typeof hd === 'object') { for (const k of Object.keys(hd)) headers.push([replaceIn(k), replaceIn(str(hd[k]))]); }
+    const hasH = (n) => headers.some((p) => p[0].toLowerCase() === n);
+    let body = null;
+    const b = o.body;
+    if (typeof b === 'string') body = replaceIn(b);
+    else if (b && typeof b === 'object') {
+      if (b.mode === 'raw' || (b.mode == null && b.raw != null)) {
+        body = replaceIn(str(b.raw));
+        const lang = b.options && b.options.raw && String(b.options.raw.language || '').toLowerCase();
+        if (lang === 'json' && !hasH('content-type')) headers.push(['Content-Type', 'application/json']);
+      } else if (b.mode === 'urlencoded') {
+        const rows = Array.isArray(b.urlencoded) ? b.urlencoded : Object.keys(b.urlencoded || {}).map((key) => ({ key, value: b.urlencoded[key] }));
+        body = new URLSearchParams(rows.filter((x) => x && x.key && !x.disabled).map((x) => [replaceIn(x.key), replaceIn(str(x.value))])).toString();
+        if (!hasH('content-type')) headers.push(['Content-Type', 'application/x-www-form-urlencoded']);
+      } else if (b.mode) throw new Error('pm.sendRequest: body mode "' + b.mode + '" is not supported (use raw or urlencoded).');
+    }
+    return { method: String(o.method || 'GET').toUpperCase(), url: replaceIn(urlText(o.url)).trim(), headers, body };
+  };
+  const toResponse = (r) => {
+    const hs = (Array.isArray(r.headers) ? r.headers : []).map((p) => ({ key: String(p[0]), value: String(p[1]) }));
+    const find = (k) => { const f = hs.find((x) => x.key.toLowerCase() === String(k).toLowerCase()); return f ? f.value : undefined; };
+    Object.assign(hs, { get: find, has: (k) => find(k) !== undefined, toObject: () => Object.fromEntries(hs.map((x) => [x.key, x.value])), all: () => hs.slice() });
+    let parsed, parsedOk = false;
+    const body = r.body == null ? '' : String(r.body);
+    return {
+      code: r.code, status: r.status, headers: hs, responseTime: r.responseTime, responseSize: r.size,
+      text: () => body, json: () => { if (!parsedOk) { parsed = JSON.parse(body); parsedOk = true; } return parsed; },
+    };
+  };
+  function sendRequest(rq, cb) {
+    const p = new Promise((resolve, reject) => {
+      const spec = toSpec(rq); // a bad body mode rejects
+      const id = ++sendSeq;
+      sendWaiters.set(id, (m) => (m.error ? reject(new Error(String(m.error))) : resolve(toResponse(m.response || {}))));
+      postMessage({ sendRequest: { id, spec } });
+    });
+    if (typeof cb === 'function') {
+      // Postman style: callback(err, res). The script stays alive until the callback has run.
+      pending.push(p.then((res) => cb(null, res), (err) => cb(err)).catch((err) => { asyncErrors.push(err); }));
+      return undefined;
+    }
+    pending.push(p.catch(() => {})); // keep the script alive until the reply; the caller handles rejection
+    return p;
+  }
+
   const pm = {
     environment: scope(V.environment, { name: ctx.envName }),
     collectionVariables: scope(V.collection),
@@ -1037,7 +1108,7 @@ self.onmessage = async (e) => {
         else done(true);
       } catch (err) { done(false, err); }
     },
-    sendRequest: () => { throw new Error('pm.sendRequest is disabled: scripts in ApiMan cannot make network requests of their own.'); },
+    sendRequest,
   };
   pm.test.skip = (name) => tests.push({ name: String(name), passed: null, error: 'skipped' });
 
@@ -1050,11 +1121,15 @@ self.onmessage = async (e) => {
 
   let error = '';
   try {
-    const fn = new Function('pm', 'console', 'postman', 'tests', 'responseBody', 'responseCode', 'responseTime', 'require', '"use strict";\n' + code);
+    // an async function, so scripts can use top-level await (await pm.sendRequest(...)), as in Postman
+    const AsyncFunction = (async () => {}).constructor;
+    const fn = new AsyncFunction('pm', 'console', 'postman', 'tests', 'responseBody', 'responseCode', 'responseTime', 'require', '"use strict";\n' + code);
     const r = fn(pm, cons, postman, legacyTests, ctx.response ? ctx.response.body : undefined,
       ctx.response ? { code: ctx.response.code, name: ctx.response.status } : undefined, ctx.response ? ctx.response.responseTime : undefined, req2);
     if (r && typeof r.then === 'function') await r;
-    await Promise.all(pending);
+    // callbacks may start more requests or async tests, so wait until nothing is left
+    while (pending.length) await Promise.all(pending.splice(0));
+    if (asyncErrors.length) throw asyncErrors[0];
   } catch (err) {
     error = String(err && err.message || err);
   }
@@ -1065,15 +1140,30 @@ self.onmessage = async (e) => {
 const SANDBOX_FRAME = `<!doctype html><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; worker-src data:">
 <script>
+// The script's time budget runs only while no pm.sendRequest is waiting for the app window's reply.
+// (The app window separately caps each request and the whole run, so waiting can't go on forever.)
+let w = null, started = false, inflight = 0, left = 0, since = 0, timer = null, limitS = 0;
+const stop = (msg) => { clearTimeout(timer); timer = null; if (w) { w.terminate(); w = null; } if (msg) parent.postMessage(msg, '*'); };
+const pause = () => { if (timer) { clearTimeout(timer); timer = null; left -= Date.now() - since; } };
+const resume = () => { if (!timer && w) { since = Date.now(); timer = setTimeout(() => stop({ fatal: 'Script stopped after ' + limitS + ' s (possible infinite loop).' }), Math.max(0, left)); } };
 onmessage = (e) => {
   if (e.source !== parent) return;
-  const { workerSrc, code, ctx, timeoutMs } = e.data;
-  let w;
+  const d = e.data || {};
+  if (d.sendResult) { if (w) { inflight = Math.max(0, inflight - 1); w.postMessage({ sendResult: d.sendResult }); if (!inflight) resume(); } return; }
+  if (d.kill) { stop(null); return; }
+  if (started) return;
+  started = true;
+  const { workerSrc, code, ctx, timeoutMs } = d;
   try { w = new Worker('data:text/javascript,' + encodeURIComponent(workerSrc)); }
   catch (err) { parent.postMessage({ fatal: 'Could not start the script sandbox: ' + err.message }, '*'); return; }
-  const timer = setTimeout(() => { w.terminate(); parent.postMessage({ fatal: 'Script stopped after ' + (timeoutMs / 1000) + ' s (possible infinite loop).' }, '*'); }, timeoutMs);
-  w.onmessage = (m) => { clearTimeout(timer); w.terminate(); parent.postMessage(m.data, '*'); };
-  w.onerror = (m) => { clearTimeout(timer); w.terminate(); parent.postMessage({ fatal: 'Script error: ' + m.message }, '*'); m.preventDefault(); };
+  left = timeoutMs; limitS = timeoutMs / 1000;
+  resume();
+  w.onmessage = (m) => {
+    const x = m.data;
+    if (x && x.sendRequest) { inflight++; pause(); parent.postMessage({ sendRequest: x.sendRequest }, '*'); return; }
+    stop(x);
+  };
+  w.onerror = (m) => { stop({ fatal: 'Script error: ' + m.message }); m.preventDefault(); };
   w.postMessage({ code, ctx });
 };
 <\/script>`;
@@ -1082,15 +1172,56 @@ const cleanStrMap = (o) => Object.fromEntries(Object.entries(o && typeof o === '
   .filter(([k]) => typeof k === 'string' && k.length < 300).map(([k, v]) => [k, String(v ?? '').slice(0, 100000)]));
 
 /** Runs one script in the sandbox. Everything coming back is treated as untrusted data. */
-function runScript(code, ctx) {
+/** A timeout that can be paused (it only counts while running). */
+function pausableTimer(ms, fn) {
+  let left = ms, since = 0, t = null;
+  return {
+    run() { if (!t && left !== null) { since = Date.now(); t = setTimeout(fn, Math.max(0, left)); } },
+    pause() { if (t) { clearTimeout(t); t = null; left -= Date.now() - since; } },
+    stop() { clearTimeout(t); t = null; left = null; },
+  };
+}
+
+/**
+ * Runs one script in the sandbox. Everything coming back is treated as untrusted data.
+ * onSendRequest(spec, { waitForUser }) answers pm.sendRequest calls ({ response } or { error }); without it they fail.
+ * Limits enforced here, in the app window: SEND_MAX calls per run, SCRIPT_MAX_MS per run (time spent asking
+ * the user doesn't count), and the fallback timer, which like the frame's budget pauses while a request is out.
+ */
+function runScript(code, ctx, { onSendRequest = null } = {}) {
   return new Promise((resolve) => {
     const frame = h('iframe', { sandbox: 'allow-scripts', hidden: true, title: 'script sandbox' });
     frame.srcdoc = SANDBOX_FRAME;
     let done = false;
+    let sendCount = 0, inflight = 0;
+    const runCtrl = new AbortController(); // aborted when the script ends: its requests still out are cancelled
+    const fallback = pausableTimer(SCRIPT_TIMEOUT_MS + 2000, () => finish({ fatal: 'Script sandbox did not respond.' }));
+    const hardCap = pausableTimer(SCRIPT_MAX_MS, () => finish({ fatal: `Script stopped after ${SCRIPT_MAX_MS / 1000} s in total (including time waiting for pm.sendRequest).` }));
+    const waitForUser = async (fn) => { hardCap.pause(); try { return await fn(); } finally { if (!done) hardCap.run(); } };
+    const onSend = async (msg) => {
+      const id = msg && (typeof msg.id === 'number' || typeof msg.id === 'string') ? msg.id : null;
+      inflight++;
+      fallback.pause();
+      let reply;
+      try {
+        // the handler logs the call; with overLimit it must refuse without sending
+        const overLimit = ++sendCount > SEND_MAX;
+        if (!onSendRequest) reply = { error: 'pm.sendRequest is not available here.' };
+        else reply = await onSendRequest(msg && msg.spec, { waitForUser, overLimit, runSignal: runCtrl.signal });
+      } catch (e) { reply = { error: `pm.sendRequest failed: ${e.message}` }; }
+      inflight--;
+      if (done) return;
+      if (!inflight) fallback.run();
+      frame.contentWindow.postMessage({ sendResult: { id, error: reply.error ? String(reply.error) : '', response: reply.error ? null : reply.response } }, '*');
+    };
     const finish = (data) => {
       if (done) return;
       done = true;
+      fallback.stop();
+      hardCap.stop();
+      runCtrl.abort();
       window.removeEventListener('message', onMsg);
+      try { frame.contentWindow.postMessage({ kill: true }, '*'); } catch { /* already gone */ }
       frame.remove();
       if (!data || data.fatal) {
         resolve({ vars: ctx.vars, request: ctx.request, tests: [], logs: [], error: (data && String(data.fatal)) || 'Script sandbox failed.' });
@@ -1115,10 +1246,15 @@ function runScript(code, ctx) {
         error: String(data.error || ''),
       });
     };
-    const onMsg = (e) => { if (e.source === frame.contentWindow) finish(e.data); };
+    const onMsg = (e) => {
+      if (e.source !== frame.contentWindow || done) return;
+      if (e.data && typeof e.data === 'object' && e.data.sendRequest) onSend(e.data.sendRequest); // a request, not the result
+      else finish(e.data);
+    };
     window.addEventListener('message', onMsg);
     frame.addEventListener('load', () => frame.contentWindow.postMessage({ workerSrc: PM_WORKER, code, ctx, timeoutMs: SCRIPT_TIMEOUT_MS }, '*'));
-    setTimeout(() => finish({ fatal: 'Script sandbox did not respond.' }), SCRIPT_TIMEOUT_MS + 2000);
+    fallback.run();
+    hardCap.run();
     document.body.append(frame);
   });
 }
@@ -1159,6 +1295,7 @@ function buildWire(ed, req, vars, authInfo) {
     .filter(([k], i, all) => k.toLowerCase() !== 'host' || all.slice(i + 1).every(([k2]) => k2.trim().toLowerCase() !== 'host'));
   const has = (n) => headers.some(([k]) => k.toLowerCase() === n);
   const checks = [url, ...headers.flat()];
+  const shown = { url, headers: headers.map((p) => [...p]) }; // what test scripts see: resolved, without auth
   const auth = authInfo.auth;
 
   if (auth.type === 'bearer' && auth.token && !has('authorization')) { headers.push(['Authorization', 'Bearer ' + r(auth.token)]); checks.push(auth.token); }
@@ -1179,7 +1316,7 @@ function buildWire(ed, req, vars, authInfo) {
 
   const b = ed.body;
   let body = { kind: 'none' };
-  const setCT = (ct) => { if (!has('content-type')) headers.push(['Content-Type', ct]); };
+  const setCT = (ct) => { if (!has('content-type')) { headers.push(['Content-Type', ct]); shown.headers.push(['Content-Type', ct]); } };
   if (b.mode === 'raw') {
     body = { kind: 'text', text: r(b.raw) };
     checks.push(b.raw);
@@ -1215,7 +1352,7 @@ function buildWire(ed, req, vars, authInfo) {
     return { error: `Unknown variable${missingVars.length > 1 ? 's' : ''} ${missingVars.map((v) => `{{${v}}}`).join(', ')}. Define ${missingVars.length > 1 ? 'them' : 'it'} in the environment, the collection, or Globals.` };
   }
   try { new URL(url); } catch { return { error: `"${url}" isn't a valid URL.` }; }
-  return { wire: { method: req.method, url, headers, body } };
+  return { wire: { method: req.method, url, headers, body }, shown };
 }
 
 function requestSnapshot(ed) {
@@ -1270,6 +1407,110 @@ function originOf(url) {
   try { return new URL(/^[a-z][\w+.-]*:\/\//i.test(u) ? u : `http://${u}`).origin; } catch { return null; }
 }
 const approvedOrigins = new Set(); // "itemKey -> origin" pairs the user allowed this session
+
+// =====================================================================================================
+// pm.sendRequest, performed here in the app window on a script's behalf (the sandbox has no network).
+//   - destination: the origin of the request being run or of any saved request in its collection, resolved
+//     with the saved (trusted) variables; anything else is asked once per origin per collection (Send) or
+//     refused (Runner, CLI: no one to ask). A Host header counts as a destination too.
+//   - only what the script set is sent: no auth, cookies or variables are added; redirects aren't followed
+//   - at most SEND_MAX calls per script run, SEND_TIMEOUT_MS each; every call is logged in the Console
+// =====================================================================================================
+const sendApprovals = new Set(); // "collection -> origin" pairs the user allowed for pm.sendRequest this session
+let sendAskChain = Promise.resolve(); // one question at a time, so a second call can reuse the first answer
+
+/** Origins a collection's own requests use, resolved with the saved variables. */
+async function collectionOrigins(cid, trusted) {
+  const out = new Set();
+  const col = cid && (state.cols[cid] || await withCol(cid).catch(() => null));
+  if (col) eachRequest(col.item || [], (it) => { const o = originOf(resolve(urlIn(it.request && typeof it.request === 'object' ? it.request.url : it.request).raw, trusted)); if (o) out.add(o); });
+  return out;
+}
+
+const SEND_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/; // a valid header name
+async function scriptSendRequest(spec, { overLimit, waitForUser, runSignal }, c) {
+  // c: { scope (approval key), allowed() -> Set of origins, ask, signal, log(entry), src }; runSignal aborts when the script ends
+  const s = spec && typeof spec === 'object' ? spec : {};
+  const method = String(s.method ?? 'GET').toUpperCase().slice(0, 20);
+  let url = String(s.url ?? '').trim();
+  if (url && !/^[a-z][\w+.-]*:\/\//i.test(url)) url = 'http://' + url;
+  const label = `${method} ${url || '(no URL)'}`;
+  const started = performance.now();
+  // logged when the call starts (so the Console keeps calls in order, and shows ones the script didn't wait for), filled in at the end
+  const entry = { level: 'warn', text: `${label} → no reply: the script ended first`, src: c.src };
+  c.log(entry);
+  const fail = (msg, level = 'error', what = 'not sent') => {
+    if (!(runSignal && runSignal.aborted)) Object.assign(entry, { level, text: `${label} → ${what}: ${msg}` }); // else: "the script ended first"
+    return { error: `pm.sendRequest: ${msg}` };
+  };
+  const ended = () => (c.signal && c.signal.aborted) || (runSignal && runSignal.aborted);
+
+  if (overLimit) return fail(`a script can make at most ${SEND_MAX} requests per run.`);
+  if (!/^[A-Z]{1,16}$/.test(method)) return fail(`"${method}" isn't a valid HTTP method.`);
+  if (url.length > 16000) return fail('the URL is too long.');
+  let target;
+  try { target = new URL(url); } catch { return fail(`"${url}" isn't a valid URL.`); }
+  if (!['http:', 'https:'].includes(target.protocol)) return fail(`only http:// and https:// URLs can be requested, not ${target.protocol}//.`);
+  const rawHeaders = Array.isArray(s.headers) ? s.headers : [];
+  if (rawHeaders.length > 100) return fail('too many headers.');
+  const headers = rawHeaders.filter((p) => Array.isArray(p) && p.length === 2).map(([k, v]) => [String(k).trim(), String(v)]).filter(([k]) => k);
+  const badName = headers.find(([k, v]) => !SEND_TOKEN.test(k) || /[\r\n\0]/.test(v) || v.length > 16000);
+  if (badName) return fail(`invalid header "${badName[0].slice(0, 100)}".`);
+  const body = s.body == null ? null : String(s.body);
+  if (body && body.length > 10 * 1024 * 1024) return fail('the body is larger than 10 MB.');
+  const missing = unresolved([url, ...headers.flat(), body || '']);
+  if (missing.length) return fail(`unknown variable${missing.length > 1 ? 's' : ''} ${missing.map((v) => `{{${v}}}`).join(', ')}.`);
+
+  // Destination: the URL's origin, and the site a Host header would pick on a shared server.
+  const hostHeader = ((headers.filter(([k]) => k.toLowerCase() === 'host').pop() || [])[1] || '').trim();
+  const hostOrigin = hostHeader ? originOf(`${target.protocol}//${hostHeader}`) : null;
+  if (hostHeader && !hostOrigin) return fail(`invalid Host header "${hostHeader.slice(0, 200)}".`);
+  const allowed = await c.allowed();
+  for (const origin of new Set([target.origin, hostOrigin].filter(Boolean))) {
+    const key = `${c.scope} -> ${origin}`;
+    if (allowed.has(origin) || sendApprovals.has(key)) continue;
+    if (!c.ask) {
+      return fail(`${origin} isn't a server this collection's requests use, so a script can't send to it during a run. Send the request on its own to approve it.`, 'warn');
+    }
+    const shown = `${method} ${target.href}${hostOrigin && hostOrigin !== target.origin ? `\n  Host: ${hostHeader}` : ''}`;
+    const ok = await waitForUser(() => {
+      const turn = sendAskChain.then(() => sendApprovals.has(key) || c.ask(
+        `A script wants to send a request to a server that this collection's requests don't use:\n\n  ${shown}\n\n`
+        + `It goes without your auth or cookies, with ${headers.length ? `only the headers the script set (${headers.map(([k]) => k).join(', ')})` : 'no headers'}`
+        + `${body ? ` and a ${fmtSize(new Blob([body]).size)} body` : ''}. Allow scripts in this collection to send requests to ${origin} until you close ApiMan? `
+        + 'Only allow this if you trust the scripts in this collection.', 'Allow a script to send a request?'));
+      sendAskChain = turn.catch(() => {});
+      return turn;
+    });
+    if (!ok) return fail(`you declined requests to ${origin}.`, 'warn');
+    sendApprovals.add(key);
+  }
+  if (ended()) return fail('the request or the script was stopped.');
+
+  if (target.protocol === 'http:' && !isLocalHost(target.hostname)) {
+    c.log({ level: 'warn', text: `pm.sendRequest to ${target.host} uses plain HTTP, so anyone on the network path can read it. Prefer https://.`, src: c.src });
+  }
+  const ctrl = new AbortController();
+  let timedOut = false;
+  const tm = setTimeout(() => { timedOut = true; ctrl.abort(); }, SEND_TIMEOUT_MS);
+  const onAbort = () => ctrl.abort();
+  for (const sig of [c.signal, runSignal]) if (sig) sig.addEventListener('abort', onAbort);
+  let res;
+  try {
+    // exactly what the script described: no auth, cookies or other headers are added
+    res = await backend.send({ method, url: target.href, headers, body: body === null ? { kind: 'none' } : { kind: 'text', text: body }, followRedirects: false }, ctrl.signal);
+  } catch (e) {
+    res = { error: timedOut ? `no response within ${SEND_TIMEOUT_MS / 1000} s.` : ctrl.signal.aborted ? 'the request or the script was stopped.' : e.message };
+  } finally {
+    clearTimeout(tm);
+    for (const sig of [c.signal, runSignal]) if (sig) sig.removeEventListener('abort', onAbort);
+  }
+  if (!res || res.error) return fail(String((res && res.error) || 'no response.'), 'error', 'failed');
+  const ms = res.timeMs ?? Math.round(performance.now() - started);
+  Object.assign(entry, { level: 'info', text: `${method} ${target.href} → ${res.status} ${res.reason || ''} · ${fmtMs(ms)}`.replace(/ +·/, ' ·') });
+  const text = res.binary ? '' : String(res.body ?? '');
+  return { response: { code: res.status, status: res.reason || '', headers: (res.headers || []).slice(0, 500), body: text.slice(0, 10 * 1024 * 1024), responseTime: ms, size: res.size } };
+}
 
 /**
  * Names of every variable that can influence a request URL: placeholders in the URLs of all saved
@@ -1417,12 +1658,25 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
   const preScripts = scriptChain(cid, itemId, ed, 'prerequest');
   const info = { requestName: ed.name, requestId: itemId || '', iteration, eventName: 'prerequest' };
   const envName = envId && state.envs[envId] ? state.envs[envId].name : '';
+  if (!itemId && !ed._approvalId) ed._approvalId = uid();
+  // pm.sendRequest: allowed destinations come from the saved variables, like plannedOrigin
+  let allowedP = null;
+  const allowed = () => (allowedP ||= collectionOrigins(cid, trusted).then((set) => (plannedOrigin && set.add(plannedOrigin), set)));
+  const runWithSend = async (code, ctx, src) => {
+    const sent = [];
+    const out = await runScript(code, ctx, {
+      onSendRequest: (spec, opts) => scriptSendRequest(spec, opts, {
+        scope: cid || `scratch:${itemId || ed._approvalId}`, allowed, ask, signal, log: (l) => sent.push(l), src: `pm.sendRequest (${src})`,
+      }),
+    });
+    return { ...out, sent };
+  };
 
   for (const s of preScripts) {
-    const out = await runScript(s.code, { vars: scopes, request: req, response: null, info, envName });
+    const out = await runWithSend(s.code, { vars: scopes, request: req, response: null, info, envName }, `pre-request ${s.src}`);
     scopes = out.vars;
     req = out.request;
-    logs.push(...out.logs.map((l) => ({ ...l, src: `pre-request (${s.src})` })));
+    logs.push(...out.logs.map((l) => ({ ...l, src: `pre-request (${s.src})` })), ...out.sent);
     tests.push(...out.tests);
     if (out.error) {
       logs.push({ level: 'error', text: out.error, src: `pre-request (${s.src})` });
@@ -1444,7 +1698,6 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
 
   // A pre-request script may not silently send this request (and its auth) to a different server.
   const finalOrigin = originOf(wire.url);
-  if (!itemId && !ed._approvalId) ed._approvalId = uid();
   const approvalKey = `${cid || 'scratch'}:${itemId || ed._approvalId} -> ${finalOrigin}`;
   const hostOf = (hs) => ((hs.filter(([k]) => k.toLowerCase() === 'host').pop() || [])[1] || '').trim().toLowerCase(); // the server sends the last one
   const plannedHost = hostOf(requestSnapshot(ed).headers.map(([k, v]) => [k, resolve(v, trusted)]));
@@ -1482,10 +1735,13 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
   if (!res.error) {
     info.eventName = 'test';
     const response = { code: res.status, status: res.reason || '', headers: res.headers || [], body: res.body ?? '', responseTime: res.timeMs, size: res.size };
+    // Test scripts see the request that went out (variables and path variables resolved), like Postman,
+    // but not the auth ApiMan added to it.
+    const sentReq = { method: wire.method, url: built.shown.url, headers: built.shown.headers, body: wire.body.kind === 'text' ? wire.body.text : req.body };
     for (const s of scriptChain(cid, itemId, ed, 'test')) {
-      const out = await runScript(s.code, { vars: scopes, request: req, response, info, envName });
+      const out = await runWithSend(s.code, { vars: scopes, request: sentReq, response, info, envName }, `tests ${s.src}`);
       scopes = out.vars;
-      logs.push(...out.logs.map((l) => ({ ...l, src: `tests (${s.src})` })));
+      logs.push(...out.logs.map((l) => ({ ...l, src: `tests (${s.src})` })), ...out.sent);
       tests.push(...out.tests);
       if (out.error) {
         logs.push({ level: 'error', text: out.error, src: `tests (${s.src})` });
@@ -3343,7 +3599,7 @@ async function runInEnv(t, envId) {
   t.envOuts[envId] = { pending: true };
   renderDiff();
   const out = await execute({ ed: t.ed, cid: t.cid, itemId: t.itemId, persist: false, envId,
-    ask: (m) => ask({ title: 'Review this script change', message: m, ok: 'Allow', danger: true, pre: true }) });
+    ask: (m, title = 'Review this script change') => ask({ title, message: m, ok: 'Allow', danger: true, pre: true }) });
   t.envOuts[envId] = out;
   if (cur() === t) renderDiff();
 }
@@ -3613,7 +3869,7 @@ async function send() {
     if (t.sending !== ctrl) { clearInterval(ticker); return; }
     if (cur() === t) $$('.elapsed').forEach((el) => { el.textContent = `${((performance.now() - started) / 1000).toFixed(1)} s`; });
   }, 100);
-  const out = await execute({ ed: t.ed, cid: t.cid, itemId: t.itemId, signal: ctrl.signal, ask: (m) => ask({ title: 'Review this script change', message: m, ok: 'Allow', danger: true, pre: true }) });
+  const out = await execute({ ed: t.ed, cid: t.cid, itemId: t.itemId, signal: ctrl.signal, ask: (m, title = 'Review this script change') => ask({ title, message: m, ok: 'Allow', danger: true, pre: true }) });
   if (t.sending !== ctrl) return; // superseded
   t.sending = null;
   t.out = out;
