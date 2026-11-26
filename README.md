@@ -13,7 +13,7 @@ python3 server.py --ca-file ~/company-root-ca.pem   # trust internal HTTPS certi
 python3 server.py run api.json -e staging.json --junit report.xml   # run a collection headlessly (CI)
 python3 test_server.py                # server self-check
 node tools/layout-check.mjs           # layout check: 544 combinations of width, sidebar, layout, text, density, divider and panel (needs Playwright)
-node tools/ui-lint.mjs                # UI rules from DESIGN.md: button styles and where primary buttons may go
+node tools/ui-lint.mjs                # the design system (DESIGN.md): every class, control and colour must come from it
 ```
 
 You only need Python 3. There's nothing to install.

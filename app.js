@@ -59,6 +59,122 @@ function icon(name) {
   return s;
 }
 
+// =====================================================================================================
+// UI components (DESIGN.md §3). Feature code builds every control through these: nothing else creates
+// buttons, inputs, selects or textareas, and every class here is in tools/design-system.json.
+// =====================================================================================================
+const cx = (...c) => c.filter(Boolean).join(' ');
+const TONES = ['ok', 'warn', 'err', 'muted'];
+const toneOf = (t) => (TONES.includes(t) ? t : '');
+const ui = {
+  /** Button. variant: '' | 'primary' | 'ghost' | 'danger' | 'danger solid'; size: '' | 'small'. Other keys are attributes. */
+  button({ label, icon: ic = null, variant = '', size = '', cls = '', onClick, ...attrs } = {}) {
+    return h('button', { type: 'button', class: cx('btn', variant, size, cls), onclick: onClick, ...attrs },
+      ic ? icon(ic) : null, ic && label != null ? h('span', { class: 'lbl' }, label) : label);
+  },
+  /** Icon-only Button: always labelled (title + aria-label). stop: the click doesn't reach the row behind it. */
+  iconButton(name, label, onClick, { size = '', cls = '', stop = false, ...attrs } = {}) {
+    return h('button', { type: 'button', class: cx('btn icon', size, cls), title: label, 'aria-label': label,
+      onclick: (e) => { if (stop) e.stopPropagation(); if (onClick) onClick(e); }, ...attrs }, icon(name));
+  },
+  /** Input. size 'small'; bare (inside bars, tables, pickers); code (mono); num (numbers); asTitle (the request name). `title` is the tooltip. */
+  input({ type = 'text', size = '', bare = false, code = false, num = false, asTitle = false, cls = '', onInput, ...attrs } = {}) {
+    return h('input', { type, class: cx(size, bare && 'bare', code && 'code', num && 'num', asTitle && 'title', cls) || null, oninput: onInput, ...attrs });
+  },
+  /** Select. options: [value, label, attrs?] entries, or { group, options } for an optgroup. */
+  select(options, { value = null, size = '', bare = false, cls = '', onChange, ...attrs } = {}) {
+    const opt = ([v, l, a = {}]) => h('option', { value: v, ...(value != null && String(v) === String(value) ? { selected: true } : {}), ...a }, l);
+    const sel = h('select', { class: cx(size, bare && 'bare', cls) || null, onchange: onChange, ...attrs },
+      ...options.map((o) => (o && o.group ? h('optgroup', { label: o.group }, ...o.options.map(opt)) : opt(o))));
+    if (value != null) sel.value = String(value);
+    return sel;
+  },
+  /** Textarea. code (monospace), prose (documentation), short (three lines). */
+  textarea({ code = false, prose = false, short = false, cls = '', onInput, ...attrs } = {}) {
+    return h('textarea', { class: cx(code && 'code', prose && 'prose', short && 'short', cls) || null, spellcheck: code ? 'false' : null, oninput: onInput, ...attrs });
+  },
+  /** Field: a label above a control, an optional hint below. */
+  field(label, control, { hint = null, narrow = false, grow = false, cls = '' } = {}) {
+    return h('div', { class: cx('field', narrow && 'narrow', grow && 'grow', cls) }, label != null ? h('label', null, label) : null, control, hint ? ui.hint(hint) : null);
+  },
+  /** Colour swatches (Field type), drawn into root: options [key, colour], plus a custom colour input. */
+  swatches(root, options, value, onPick, { customValue = '#2560cf', onCustom } = {}) {
+    const custom = h('input', { type: 'color', value: customValue, 'aria-label': 'Custom accent colour', title: 'Custom colour', oninput: (e) => onCustom(e.target.value) });
+    root.replaceChildren(...options.map(([k, colour]) => h('button', {
+      type: 'button', class: cx('swatch', value === k && 'on'), role: 'radio', 'aria-checked': String(value === k), 'aria-label': k, title: k,
+      style: `--sw: ${colour}`, onclick: () => onPick(k),
+    })), h('label', { class: cx('swatch custom', value === 'custom' && 'on'), title: 'Custom colour' }, custom));
+    return root;
+  },
+  /** An input with an icon button inside it (show / hide a secret, copy a value). */
+  secretField(input, button) { return h('div', { class: 'secret-field' }, input, button); },
+  /** Check: checkbox, label, optional explanation. The checkbox is .input. */
+  check({ label, help = null, checked = false, cls = '', onChange, ...attrs } = {}) {
+    const box = h('input', { type: 'checkbox', ...(checked ? { checked: true } : {}), onchange: onChange, ...attrs });
+    const el = h('label', { class: cx('check', cls) }, box, h('span', null, label, help ? h('small', null, help) : null));
+    el.input = box;
+    return el;
+  },
+  /** Segmented choice (radio group). options: [key, label, attrs?] entries. */
+  seg(options, value, onChange, { label = '', block = false, cls = '', into = null } = {}) {
+    const root = into || h('div', { class: cx('seg', block && 'block', cls), role: 'radiogroup', 'aria-label': label || null });
+    if (into) into.replaceChildren();
+    for (const [k, l, a = {}] of options) {
+      root.append(h('button', { type: 'button', class: cx('seg-btn', k === value && 'on'), role: 'radio', 'aria-checked': String(k === value), 'data-key': k, ...a,
+        onclick: () => { $$('.seg-btn', root).forEach((b) => { const on = b.dataset.key === k; b.classList.toggle('on', on); b.setAttribute('aria-checked', String(on)); }); onChange(k); } }, l));
+    }
+    return root;
+  },
+  /** Segmented tabs (role tab) switching the panes that follow them. defs: { key, label, content }. */
+  tabs(defs, onChange, { cls = '' } = {}) {
+    const bar = h('div', { class: cx('seg', cls), role: 'tablist' });
+    const panes = defs.map((d) => h('div', { 'data-pane': d.key, hidden: d !== defs[0] }, d.content));
+    defs.forEach((d, i) => bar.append(h('button', {
+      type: 'button', class: cx('seg-btn', i === 0 && 'on'), role: 'tab', 'aria-selected': String(i === 0),
+      onclick: (e) => {
+        $$('.seg-btn', bar).forEach((b) => { const on = b === e.currentTarget; b.classList.toggle('on', on); b.setAttribute('aria-selected', String(on)); });
+        panes.forEach((p) => { p.hidden = p.dataset.pane !== d.key; if (!p.hidden) refreshEditors(p); });
+        if (onChange) onChange(d.key);
+      },
+    }, d.label)));
+    return [bar, ...panes];
+  },
+  pill(text, tone = '', attrs = {}) { return h('span', { class: cx('pill', toneOf(tone)), ...attrs }, text); },
+  count(text, tone = '') { return h('span', { class: cx('count', toneOf(tone)) }, text); },
+  /** HTTP status, coloured by class (2xx…5xx), or 'err' when there was no response. */
+  status(code, { small = false, label = null, ...attrs } = {}) {
+    return h('span', { class: cx('status-code', code ? `s${String(code)[0]}` : 'err', small && 'small'), ...attrs }, label ?? (code ? String(code) : 'Error'));
+  },
+  method(m) { return h('span', { class: `mtag ${m}` }, m); },
+  /** Dot: tone 'ok' = live, 'warn' = unsaved; off keeps its place but hides it. */
+  dot({ tone = '', off = false, label = null, ...attrs } = {}) {
+    return h('span', { class: cx('dot', toneOf(tone), off && 'off'), role: label ? 'img' : null, 'aria-label': label, title: label, ...attrs });
+  },
+  hint(text, { oneLine = false, ...attrs } = {}) { return h('p', { class: cx('hint', oneLine && 'one-line'), ...attrs }, text); },
+  note(text, tone = '') { return h('p', { class: cx('note', toneOf(tone)) }, text); },
+  kbd(text) { return h('kbd', null, text); },
+  /** Toolbar: controls on the left, actions (small, ghost) right-aligned. */
+  toolbar(left = [], right = [], { cls = '', ...attrs } = {}) {
+    return h('div', { class: cx('pane-tools', cls), ...attrs }, ...left, right.length ? h('div', { class: 'tool-group' }, ...right) : null);
+  },
+  /** ActionRow: buttons inside content (forms, empty states). */
+  actions(...btns) { return h('div', { class: 'actions' }, ...btns); },
+  /** Section heading inside a pane: label, optional summary, optional trailing control. */
+  sectionHead(label, summary = null, trailing = null) {
+    return h('div', { class: 'section-head' }, h('span', { class: 'label' }, label), summary != null ? h('span', { class: 'hint' }, summary) : null, trailing);
+  },
+  /** Meta: a line of inline facts; values are ui.value(). */
+  meta(items, attrs = {}) { return h('div', { class: 'meta', ...attrs }, ...items); },
+  value(text, tone = '') { return h('b', { class: toneOf(tone) || null }, text); },
+  /** Result row (tests, diff changes, runner failures): pill, name, detail. */
+  result(tone, pillText, name, msg = null, { compact = false } = {}) {
+    return h('div', { class: cx('test-row', compact && 'compact') }, ui.pill(pillText, tone), h('div', null, h('div', null, name), msg != null && msg !== '' ? h('div', { class: 'msg' }, msg) : null));
+  },
+  logLine(src, text, tone = '', srcAttrs = {}) { return h('div', { class: cx('line', toneOf(tone)) }, h('span', { class: 'src', ...srcAttrs }, src), text); },
+  empty(...kids) { return h('div', { class: 'empty-state' }, ...kids); },
+  progress(tone = '') { return h('div', { class: cx('bar', toneOf(tone)) }, h('div', { style: 'width:0%' })); },
+};
+
 const uid = () => (crypto.randomUUID ? crypto.randomUUID()
   : 'id-' + Math.random().toString(36).slice(2) + Date.now().toString(36));
 
@@ -1508,11 +1624,9 @@ async function oauthPeek(auth, vars) { try { return oauthLoad(await oauthKey(oau
 
 /** The OAuth 2.0 part of the auth form. vars() gives the variables to resolve {{…}} with. */
 function oauthFields(model, field, onChange, vars) {
-  const sel = (label, key, opts, onPick) => h('div', { class: 'field narrow' }, h('label', null, label),
-    h('select', { onchange: (e) => { model[key] = e.target.value; onChange(); if (onPick) onPick(); } },
-      ...opts.map(([v, l]) => h('option', { value: v, ...(String(model[key] ?? opts[0][0]) === v ? { selected: true } : {}) }, l))));
-  const box = h('div', { class: 'oauth' });
-  const status = h('p', { class: 'hint', role: 'status', 'aria-live': 'polite' });
+  const sel = (label, key, opts, onPick) => ui.field(label, ui.select(opts, { value: model[key] ?? opts[0][0], onChange: (e) => { model[key] = e.target.value; onChange(); if (onPick) onPick(); } }), { narrow: true });
+  const box = h('div');
+  const status = ui.hint('', { role: 'status', 'aria-live': 'polite' });
   const showStatus = async () => {
     const tok = await oauthPeek(model, vars());
     if (!tok || !tok.accessToken) { status.textContent = model.grant === 'authorization_code' || !model.grant ? 'No token yet: you\'ll sign in on the first send.' : 'No token yet: one is fetched on the first send.'; return; }
@@ -1533,19 +1647,17 @@ function oauthFields(model, field, onChange, vars) {
     kids.push(h('div', { class: 'grid-2' }, sel('Send client credentials', 'clientAuth', [['header', 'As Basic auth header'], ['body', 'In the request body']]),
       field('Header prefix', 'headerPrefix', { placeholder: 'Bearer' })));
     if (grant === 'authorization_code') {
-      kids.push(h('label', { class: 'check' }, h('input', { type: 'checkbox', ...(model.pkce !== false ? { checked: true } : {}), onchange: (e) => { model.pkce = e.target.checked; onChange(); } }),
-        h('span', null, 'Use PKCE', h('small', null, 'Recommended. Required for clients without a secret.'))));
-      kids.push(h('div', { class: 'field' }, h('label', null, 'Callback URL (register it with your provider)'),
-        h('div', { class: 'secret-field' }, h('input', { value: oauthRedirectUri(), readonly: true, spellcheck: 'false' }),
-          h('button', { type: 'button', class: 'btn icon', title: 'Copy', 'aria-label': 'Copy the callback URL', onclick: () => navigator.clipboard.writeText(oauthRedirectUri()).then(() => toast('Copied'), () => toast('Copying was blocked by the browser.')) }, icon('copy')))));
+      kids.push(ui.check({ label: 'Use PKCE', help: 'Recommended. Required for clients without a secret.', checked: model.pkce !== false, onChange: (e) => { model.pkce = e.target.checked; onChange(); } }));
+      kids.push(ui.field('Callback URL (register it with your provider)', ui.secretField(ui.input({ value: oauthRedirectUri(), readonly: true, spellcheck: 'false' }),
+        ui.iconButton('copy', 'Copy the callback URL', () => navigator.clipboard.writeText(oauthRedirectUri()).then(() => toast('Copied'), () => toast('Copying was blocked by the browser.'))))));
     }
-    kids.push(status, h('div', { class: 'actions' },
-      h('button', { type: 'button', class: 'btn small', onclick: async (e) => {
+    kids.push(status, ui.actions(
+      ui.button({ label: 'Get new token', size: 'small', onClick: async (e) => {
         const btn = e.currentTarget; btn.disabled = true;
         try { await oauthToken(model, vars(), { force: true }); toast('Got a new token'); } catch (err) { toast(err.message); } finally { btn.disabled = false; showStatus(); }
-      } }, 'Get new token'),
-      h('button', { type: 'button', class: 'btn small', onclick: async () => { await oauthClear(model, vars()); showStatus(); toast('Token cleared'); } }, 'Clear token')));
-    kids.push(h('p', { class: 'hint' }, 'Tokens stay in this browser tab, never in collection files.'));
+      } }),
+      ui.button({ label: 'Clear token', size: 'small', onClick: async () => { await oauthClear(model, vars()); showStatus(); toast('Token cleared'); } })));
+    kids.push(ui.hint('Tokens stay in this browser tab, never in collection files.'));
     box.replaceChildren(...kids);
     linkLabels(box);
     showStatus();
@@ -1793,7 +1905,7 @@ function renderSidebar() {
   const rows = $$('.row', body);
   rows.forEach((r) => { r.tabIndex = -1; $$('button', r).forEach((b) => { b.tabIndex = -1; }); });
   const want = state.refocus || state.focusKey;
-  const current = (want && rows.find((r) => r.dataset.key === want)) || rows.find((r) => r.classList.contains('active')) || rows[0];
+  const current = (want && rows.find((r) => r.dataset.key === want)) || rows.find((r) => r.classList.contains('on')) || rows[0];
   if (current) current.tabIndex = 0;
   if (state.refocus && current) current.focus();
   state.refocus = null;
@@ -1801,9 +1913,8 @@ function renderSidebar() {
 const indent = (depth) => `padding-left: calc(var(--s2) + ${depth} * 20px)`; // 20px = caret + gap, so children sit under their parent's name
 
 function rowActs(...btns) { return h('span', { class: 'acts' }, ...btns); }
-function iconBtn(name, title, onclick) {
-  return h('button', { class: 'btn icon', title, 'aria-label': title, onclick: (e) => { e.stopPropagation(); onclick(e); } }, icon(name));
-}
+/** Tree row action: an icon Button whose click doesn't also open the row. */
+function iconBtn(name, title, onclick) { return ui.iconButton(name, title, onclick, { size: 'small', stop: true }); }
 function countMatches(items) { let n = 0; eachRequest(items, (it) => { if (matches(it)) n++; }); return n; }
 /** The filter text, highlighted inside a name (built as DOM nodes, never HTML). */
 function markMatch(text) {
@@ -1821,12 +1932,10 @@ const matches = (it) => {
 
 function renderCollectionTree() {
   if (!state.colList.length) {
-    return [h('div', { class: 'empty-side' },
+    return [ui.empty(
       h('p', null, 'No collections yet.'),
       h('p', null, 'Create one to save requests, or import an export from Postman.'),
-      h('div', { class: 'actions' },
-        h('button', { class: 'btn small', onclick: () => newCollection() }, 'New collection'),
-        h('button', { class: 'btn small', onclick: () => openImport() }, 'Import')))];
+      ui.actions(ui.button({ label: 'New collection', size: 'small', onClick: () => newCollection() }), ui.button({ label: 'Import', size: 'small', onClick: () => openImport() })))];
   }
   const t = cur();
   const out = [];
@@ -1847,7 +1956,7 @@ function renderCollectionTree() {
         iconBtn('dots', 'More actions', (e) => collectionMenu(e.currentTarget, c.id)))));
     out.push(...kids);
   }
-  if (!out.length) out.push(h('div', { class: 'empty-side' }, `Nothing matches "${state.filter}".`));
+  if (!out.length) out.push(ui.empty(h('p', null, `Nothing matches "${state.filter}".`)));
   return out;
   function itemsNodes(cid, items, depth) {
     const nodes = [];
@@ -1873,12 +1982,12 @@ function renderCollectionTree() {
         const m = itemMethod(it);
         const active = t && t.cid === cid && t.itemId === it.id;
         nodes.push(h('div', {
-          class: `row ${active ? 'active' : ''}`, style: indent(depth), tabindex: '0', role: 'treeitem', 'aria-level': String(depth + 1),
+          class: cx('row', active && 'on'), style: indent(depth), tabindex: '0', role: 'treeitem', 'aria-level': String(depth + 1),
           'aria-selected': String(!!active), 'data-key': `r:${cid}:${it.id}`,
           onclick: () => openItem(cid, it.id), onkeydown: (e) => { if (e.key === 'Enter') openItem(cid, it.id); },
         },
           h('span', { class: 'caret' }),
-          h('span', { class: `mtag ${m}` }, m),
+          ui.method(m),
           h('span', { class: 'name' }, ...markMatch(it.name || 'Untitled')),
           rowActs(iconBtn('dots', 'More actions', (e) => requestMenu(e.currentTarget, cid, it.id)))));
       }
@@ -1896,8 +2005,7 @@ async function toggleCollection(id) {
 
 function renderEnvList() {
   const f = state.filter;
-  const rows = [h('div', { class: 'side-section' }, 'Environments',
-    h('button', { class: 'btn small ghost', onclick: () => editEnvironment(null) }, '+ New'))];
+  const rows = [h('div', { class: 'side-section' }, 'Environments', ui.button({ label: '+ New', variant: 'ghost', size: 'small', onClick: () => editEnvironment(null) }))];
   const g = state.envs[GLOBALS_ID];
   if (!f || 'globals'.includes(f)) {
     rows.push(h('div', { class: 'row', tabindex: '0', role: 'button', 'data-key': 'e:globals', onclick: () => editEnvironment(GLOBALS_ID), onkeydown: (e) => { if (e.key === 'Enter') editEnvironment(GLOBALS_ID); } },
@@ -1909,25 +2017,25 @@ function renderEnvList() {
     if (f && !e.name.toLowerCase().includes(f)) continue;
     const doc = state.envs[e.id];
     const active = e.id === state.activeEnv;
-    rows.push(h('div', { class: `row ${active ? 'active' : ''}`, tabindex: '0', role: 'button', 'data-key': `e:${e.id}`, 'aria-label': `${e.name}${active ? ' (active)' : ''}`, onclick: () => editEnvironment(e.id), onkeydown: (ev) => { if (ev.key === 'Enter') editEnvironment(e.id); } },
-      h('span', { class: 'caret' }, h('span', { class: `env-dot ${active ? 'on' : ''}`, role: active ? 'img' : null, 'aria-label': active ? 'Active' : null })),
+    rows.push(h('div', { class: cx('row', active && 'on'), tabindex: '0', role: 'button', 'data-key': `e:${e.id}`, 'aria-label': `${e.name}${active ? ' (active)' : ''}`, onclick: () => editEnvironment(e.id), onkeydown: (ev) => { if (ev.key === 'Enter') editEnvironment(e.id); } },
+      h('span', { class: 'caret' }, ui.dot({ tone: active ? 'ok' : '', label: active ? 'Active' : null })),
       h('span', { class: 'name' }, e.name),
       h('span', { class: 'sub' }, `${doc ? doc.values.length : 0} vars`),
       rowActs(iconBtn('dots', 'More actions', (ev) => envMenu(ev.currentTarget, e.id)))));
   }
   if (!state.envList.length) {
-    rows.push(h('div', { class: 'empty-side' }, h('p', null, 'Environments hold values that change between setups, like baseUrl and token for local, staging and production.')));
+    rows.push(ui.empty(h('p', null, 'Environments hold values that change between setups, like baseUrl and token for local, staging and production.')));
   }
   return rows;
 }
 
 function renderHistoryList() {
-  if (!state.settings.history) return [h('div', { class: 'empty-side' }, 'History is turned off in Settings.')];
+  if (!state.settings.history) return [ui.empty(h('p', null, 'History is turned off in Settings.'))];
   const f = state.filter;
   const list = state.history.filter((e) => !f || `${e.method} ${e.url} ${e.name}`.toLowerCase().includes(f));
   const out = [h('div', { class: 'side-section' }, f ? `${list.length} of ${state.history.length} requests` : `${state.history.length} requests`,
-    state.history.length ? h('button', { class: 'btn small ghost', onclick: clearHistory }, 'Clear') : null)];
-  if (!list.length) out.push(h('div', { class: 'empty-side' }, state.history.length ? 'Nothing matches.' : 'Requests you send appear here.'));
+    state.history.length ? ui.button({ label: 'Clear', variant: 'ghost', size: 'small', onClick: clearHistory }) : null)];
+  if (!list.length) out.push(ui.empty(h('p', null, state.history.length ? 'Nothing matches.' : 'Requests you send appear here.')));
   let day = '';
   for (const e of list) {
     const d = new Date(e.at).toDateString();
@@ -1951,10 +2059,10 @@ function historyRow(e) {
     class: 'row', tabindex: '0', role: 'button', 'data-key': `h:${e.id}`, title: `${e.method} ${url}\n${new Date(e.at).toLocaleString()}`,
     onclick: () => openFromHistory(e), onkeydown: (ev) => { if (ev.key === 'Enter') openFromHistory(e); },
   },
-    h('span', { class: `mtag ${e.method}` }, e.method),
+    ui.method(e.method),
     h('span', { class: 'name' }, path),
     h('span', { class: 'time' }, time),
-    h('span', { class: `status-code sm ${e.status ? `s${String(e.status)[0]}` : 's-err'}` }, e.status ? String(e.status) : 'Error'));
+    ui.status(e.status, { small: true }));
 }
 
 function openFromHistory(e) {
@@ -1986,12 +2094,12 @@ function showMenu(anchor, items) {
   const name = anchor.getAttribute('aria-label') || (anchor.innerText || anchor.textContent).replace(/\s+/g, ' ').trim();
   if (name) pop.setAttribute('aria-label', name); else pop.removeAttribute('aria-label');
   pop.replaceChildren(...items.map((it) => (it === '-' ? h('div', { class: 'sep', role: 'separator' })
-    : h('button', { class: `mi ${it.danger ? 'danger' : ''} ${it.current ? 'cur' : ''}`, role: 'menuitem', 'aria-current': it.current ? 'true' : null, onclick: () => { hideMenu(); it.onClick(); } }, it.label))));
+    : h('button', { type: 'button', class: cx('mi', it.danger && 'danger', it.current && 'on'), role: 'menuitem', 'aria-current': it.current ? 'true' : null, onclick: () => { hideMenu(); it.onClick(); } }, it.label))));
   placePopover(pop, anchor);
   anchor.setAttribute('aria-expanded', 'true');
   showMenu.anchor = anchor;
   if (row) { row.classList.add('menu-open'); pop.dataset.row = '1'; showMenu.row = row; }
-  const first = pop.querySelector('.mi.cur') || pop.querySelector('button');
+  const first = pop.querySelector('.mi.on') || pop.querySelector('button');
   if (first) first.focus();
 }
 /** Hide the tabs of a segmented row that don't fit (never the active one) and list them in a "More tabs" menu. */
@@ -2003,7 +2111,7 @@ function fitTabs(seg) {
   if (!seg.getClientRects().length || seg.scrollWidth <= seg.clientWidth + 1) { if (more) more.hidden = true; return; }
   if (!more) {
     const what = seg.getAttribute('role') === 'radiogroup' ? 'More options' : 'More tabs';
-    more = h('button', { type: 'button', class: 'btn icon small seg-more', title: what, 'aria-label': what, 'aria-haspopup': 'menu', 'aria-expanded': 'false' }, icon('dots'));
+    more = ui.iconButton('dots', what, null, { size: 'small', cls: 'seg-more', 'aria-haspopup': 'menu', 'aria-expanded': 'false' });
     more.addEventListener('click', () => showMenu(more, btns.filter((b) => b.classList.contains('ovf') && !b.disabled && b.getAttribute('aria-disabled') !== 'true').map((b) => {
       const name = [...b.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim() || b.textContent.trim();
       const count = b.querySelector('.count:not(.dot)')?.textContent.trim();
@@ -2234,19 +2342,18 @@ function renderTabs() {
         onauxclick: (e) => { if (e.button === 1) closeTab(i); },
         onkeydown: (e) => { if (e.key === 'Enter') { state.active = i; renderAll(); } },
       },
-        h('span', { class: `mtag ${t.ed.method}` }, t.ed.method),
+        ui.method(t.ed.method),
         h('span', { class: 'tname' }, t.ed.name),
-        h('span', { class: `dot ${t.dirty ? '' : 'off'}`, role: t.dirty ? 'img' : null, 'aria-label': t.dirty ? 'Unsaved changes' : null, title: t.dirty ? 'Unsaved changes' : null }),
-        h('button', { class: 'x', title: 'Close tab', 'aria-label': `Close ${t.ed.name}`, tabindex: i === state.active ? '0' : '-1', onclick: (e) => { e.stopPropagation(); closeTab(i); } }, icon('x')));
+        ui.dot({ tone: 'warn', off: !t.dirty, label: t.dirty ? 'Unsaved changes' : null }),
+        ui.iconButton('x', `Close ${t.ed.name}`, () => closeTab(i), { size: 'small', cls: 'x', stop: true, tabindex: i === state.active ? '0' : '-1' }));
     }),
-    h('button', { class: 'newtab', title: 'New request tab', 'aria-label': 'New request tab', onclick: () => { openTab(newTab()); $('#url').focus(); } }, icon('plus')),
-    h('button', { class: 'newtab alltabs', title: 'All open tabs', 'aria-label': 'All open tabs', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
-      onclick: (e) => { const strip = $('#tabstrip'), keep = strip.scrollLeft; requestAnimationFrame(() => { strip.scrollLeft = keep; }); showMenu(e.currentTarget, state.tabs.map((t, i) => ({
-        label: h('span', { class: 'mi-tab' }, h('span', { class: `mtag ${t.ed.method}` }, t.ed.method), h('span', { class: 'mi-name' }, t.ed.name, t.dirty ? h('span', { class: 'dirty-dot', 'aria-label': ' (unsaved)' }) : null),
-          h('span', { class: 'mi-sub' }, (t.ed.url || '').replace(/^[a-z]+:\/\//i, '') || 'no URL yet')),
-        current: i === state.active,
-        onClick: () => { state.active = i; persistTabs(); renderAll(); requestAnimationFrame(() => $('#tabstrip .rtab.on')?.focus()); },
-      }))); } }, icon('chevron')));
+    ui.iconButton('plus', 'New request tab', () => { openTab(newTab()); $('#url').focus(); }, { cls: 'newtab' }),
+    ui.iconButton('chevron', 'All open tabs', (e) => { const strip = $('#tabstrip'), keep = strip.scrollLeft; requestAnimationFrame(() => { strip.scrollLeft = keep; }); showMenu(e.currentTarget, state.tabs.map((t, i) => ({
+      label: h('span', { class: 'mi-tab' }, ui.method(t.ed.method), h('span', { class: 'mi-name' }, t.ed.name, t.dirty ? ui.dot({ tone: 'warn', label: 'unsaved' }) : null),
+        h('span', { class: 'mi-sub' }, (t.ed.url || '').replace(/^[a-z]+:\/\//i, '') || 'no URL yet')),
+      current: i === state.active,
+      onClick: () => { state.active = i; persistTabs(); renderAll(); requestAnimationFrame(() => $('#tabstrip .rtab.on')?.focus()); },
+    }))); }, { cls: 'newtab alltabs', 'aria-haspopup': 'menu', 'aria-expanded': 'false' }));
   const on = strip.querySelector('.rtab.on');
   if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
@@ -2254,7 +2361,7 @@ function renderTabs() {
 function renderWelcome() {
   const hasData = state.colList.length > 0 || state.history.length > 0;
   const where = backend && backend.mode === 'local' ? 'on this computer' : 'in this browser';
-  const kbd = (k) => h('kbd', null, k);
+  const kbd = ui.kbd;
   const cols = [];
   if (state.history.length) {
     const seen = new Set();
@@ -2276,11 +2383,11 @@ function renderWelcome() {
     h('p', null, hasData
       ? 'Pick up a recent request, open one from a collection, or start a new one.'
       : `Paste a URL, import a Postman collection or an OpenAPI spec, or start from a cURL command. Everything stays ${where}.`),
-    h('div', { class: 'welcome-actions' },
-      h('button', { class: 'btn primary', 'data-act': 'new-request' }, 'New request'),
-      h('button', { class: 'btn', 'data-act': 'import' }, 'Import collection'),
-      h('button', { class: 'btn', 'data-act': 'import-curl' }, 'Paste cURL')),
-    h('p', { class: 'hint shortcuts empty-state' }, h('span', null, kbd('/'), ' filter requests, ', kbd(MOD), ' + ', kbd('Enter'), ' send, ', kbd(MOD), ' + ', kbd('S'), ' save, ', kbd(MOD), ' + ', kbd('B'), ' sidebar')),
+    ui.actions(
+      ui.button({ label: 'New request', variant: 'primary', 'data-act': 'new-request' }), // the welcome screen's one primary action
+      ui.button({ label: 'Import collection', 'data-act': 'import' }),
+      ui.button({ label: 'Paste cURL', 'data-act': 'import-curl' })),
+    h('p', { class: 'hint shortcuts' }, h('span', null, kbd('/'), ' filter requests, ', kbd(MOD), ' + ', kbd('Enter'), ' send, ', kbd(MOD), ' + ', kbd('S'), ' save, ', kbd(MOD), ' + ', kbd('B'), ' sidebar')),
     ...(cols.length ? [h('div', { class: 'welcome-cols' }, ...cols)] : [])); // replaceChildren would print a null as "null"
 }
 
@@ -2330,7 +2437,7 @@ function renderUrlHl() {
   for (const m of text.matchAll(VAR_RE)) {
     parts.push(text.slice(last, m.index));
     const ok = Object.hasOwn(vars, m[1]) || dynamicVar(m[1]) !== undefined;
-    parts.push(h('span', { class: ok ? 'v' : 'v bad' }, m[0]));
+    parts.push(h('span', { class: ok ? 'v' : 'v err' }, m[0]));
     last = m.index + m[0].length;
   }
   parts.push(text.slice(last), ' ');
@@ -2352,7 +2459,7 @@ function renderResolved() {
   for (const m of shown.matchAll(VAR_RE)) {
     parts.push(shown.slice(last, m.index));
     const v = Object.hasOwn(vars, m[1]) ? vars[m[1]] : dynamicVar(m[1]);
-    parts.push(v === undefined ? h('span', { class: 'bad', title: 'Not defined in the environment, collection or Globals' }, m[0]) : (m[1].startsWith('$') ? `‹${m[1]}›` : v));
+    parts.push(v === undefined ? h('span', { class: 'err', title: 'Not defined in the environment, collection or Globals' }, m[0]) : (m[1].startsWith('$') ? `‹${m[1]}›` : v));
     last = m.index + m[0].length;
   }
   parts.push(shown.slice(last));
@@ -2381,10 +2488,11 @@ function renderCounts() {
 }
 
 /** A "configured" dot that always takes the same space, so tabs never shift when it appears. */
+/** A tab's "has content" indicator: a muted Dot, absent (no reserved gap) when there's nothing set. */
 function setDot(sel, on) {
   const el = $(sel);
-  el.classList.add('dot');
-  el.classList.toggle('off', !on);
+  el.className = 'dot muted';
+  el.hidden = !on;
   el.textContent = on ? 'set' : 'not set';
 }
 
@@ -2424,35 +2532,30 @@ function kvTable(container, rows, opts = {}) {
       render({ i, col });
     };
     const secret = opts.secret && row.type === 'secret';
-    const input = (col, placeholder) => h('input', {
-      type: col === 'value' && secret && !row.reveal ? 'password' : 'text', value: row[col] ?? '', placeholder: ghost ? placeholder : '',
+    const input = (col, placeholder) => ui.input({
+      type: col === 'value' && secret && !row.reveal ? 'password' : 'text', bare: true, code: true, value: row[col] ?? '', placeholder: ghost ? placeholder : '',
       spellcheck: 'false', autocomplete: 'off', 'data-col': col, 'aria-label': placeholder,
-      oninput: (e) => { if (ghost) promote(col, e.target.value); else { row[col] = e.target.value; onChange(); } },
+      onInput: (e) => { if (ghost) promote(col, e.target.value); else { row[col] = e.target.value; onChange(); } },
     });
     let valueCell;
     if (opts.file && row.type === 'file' && !ghost) {
-      const pick = h('input', { type: 'file', hidden: true, onchange: (e) => { row.file = e.target.files[0] || null; row.src = row.file ? row.file.name : row.src; onChange(); render(); } });
+      const pick = ui.input({ type: 'file', hidden: true, onchange: (e) => { row.file = e.target.files[0] || null; row.src = row.file ? row.file.name : row.src; onChange(); render(); } });
       valueCell = h('td', null, h('div', { class: 'file-pick' },
-        h('button', { class: 'btn small', type: 'button', onclick: () => pick.click() }, row.file ? 'Change file' : 'Choose file'),
+        ui.button({ label: row.file ? 'Change file' : 'Choose file', size: 'small', onClick: () => pick.click() }),
         h('span', { class: 'fname' }, row.file ? `${row.file.name} (${fmtSize(row.file.size)})` : row.src ? `${row.src}: choose it again to send` : 'No file chosen'),
         pick));
     } else valueCell = h('td', null, input('value', ph[1]));
-    const typeCell = opts.secret || opts.file ? h('td', { class: 'type' }, ghost ? null : h('select', {
-      'aria-label': 'Type',
-      onchange: (e) => { row.type = e.target.value; onChange(); render(); },
-    }, ...(opts.secret ? [['default', 'Default'], ['secret', 'Secret']] : [['text', 'Text'], ['file', 'File']])
-      .map(([v, l]) => h('option', { value: v, ...(row.type === v || (!row.type && v === (opts.secret ? 'default' : 'text')) ? { selected: true } : {}) }, l)))) : null;
-    return h('tr', { 'data-i': i, class: `${ghost ? 'ghost' : ''} ${row.disabled ? 'off' : ''}` },
-      h('td', { class: 'chk' }, ghost ? null : h('input', {
-        type: 'checkbox', checked: !row.disabled, title: 'Enabled', 'aria-label': 'Enabled',
-        onchange: (e) => { row.disabled = !e.target.checked; onChange(); render(); },
-      })),
+    const typeCell = opts.secret || opts.file ? h('td', { class: 'type' }, ghost ? null : ui.select(opts.secret ? [['default', 'Default'], ['secret', 'Secret']] : [['text', 'Text'], ['file', 'File']],
+      { value: row.type || (opts.secret ? 'default' : 'text'), bare: true, 'aria-label': 'Type', onChange: (e) => { row.type = e.target.value; onChange(); render(); } })) : null;
+    return h('tr', { 'data-i': i, class: cx(ghost && 'ghost', row.disabled && 'off') || null },
+      h('td', { class: 'chk' }, ghost ? null : ui.input({ type: 'checkbox', checked: !row.disabled, title: 'Enabled', 'aria-label': 'Enabled',
+        onchange: (e) => { row.disabled = !e.target.checked; onChange(); render(); } })),
       h('td', null, input('key', ph[0])),
       valueCell,
       typeCell,
       h('td', { class: 'act' }, ghost ? null : [
-        secret ? h('button', { class: 'btn icon', type: 'button', title: row.reveal ? 'Hide' : 'Show', 'aria-label': row.reveal ? 'Hide value' : 'Show value', onclick: () => { row.reveal = !row.reveal; render(); } }, icon(row.reveal ? 'eyeOff' : 'eye')) : null,
-        h('button', { class: 'btn icon', type: 'button', title: 'Remove', 'aria-label': 'Remove row', onclick: () => { rows.splice(i, 1); onChange(); render(); } }, icon('trash')),
+        secret ? ui.iconButton(row.reveal ? 'eyeOff' : 'eye', row.reveal ? 'Hide value' : 'Show value', () => { row.reveal = !row.reveal; render(); }, { size: 'small' }) : null,
+        ui.iconButton('trash', 'Remove row', () => { rows.splice(i, 1); onChange(); render(); }, { size: 'small' }),
       ]));
   };
   render();
@@ -2465,13 +2568,13 @@ function renderParams() {
   const pv = $('#pathVarsKv');
   if (!t.ed.pathVars.length) pv.replaceChildren();
   else {
-    pv.replaceChildren(h('div', { class: 'label section-label' }, 'Path variables'),
-      h('table', { class: 'kv kv-path' }, h('thead', null, h('tr', null, h('th', { class: 'chk' }), h('th', null, 'Path variable'), h('th', null, 'Value'), h('th', { class: 'act' }))),
+    pv.replaceChildren(ui.sectionHead('Path variables'),
+      h('table', { class: 'kv' }, h('thead', null, h('tr', null, h('th', { class: 'chk' }), h('th', null, 'Path variable'), h('th', null, 'Value'), h('th', { class: 'act' }))),
         h('tbody', null, t.ed.pathVars.map((v) => h('tr', null,
           h('td', { class: 'chk' }),
-          h('td', null, h('input', { type: 'text', value: `:${v.key}`, readonly: true, tabindex: '-1', 'aria-label': 'Path variable' })),
-          h('td', null, h('input', { type: 'text', value: v.value, placeholder: 'Value', spellcheck: 'false', 'aria-label': `Value for :${v.key}`,
-            oninput: (e) => { v.value = e.target.value; markDirty(); } })),
+          h('td', null, ui.input({ bare: true, code: true, value: `:${v.key}`, readonly: true, tabindex: '-1', 'aria-label': 'Path variable' })),
+          h('td', null, ui.input({ bare: true, code: true, value: v.value, placeholder: 'Value', spellcheck: 'false', 'aria-label': `Value for :${v.key}`,
+            onInput: (e) => { v.value = e.target.value; markDirty(); } })),
           h('td', { class: 'act' }))))));
   }
   kvTable($('#paramsKv'), t.ed.params, {
@@ -2493,47 +2596,36 @@ function renderHeaders() {
 
 /** Shared auth form, used for requests, folders and collections. */
 function authForm(model, { allowInherit, inheritText, onChange, vars = () => merged(scopesFor(cur() && cur().cid)) }) {
-  const wrap = h('div', { class: 'auth-form' });
+  const wrap = h('div');
   const draw = () => {
     const field = (label, key, { secret, placeholder } = {}) => {
       let reveal = false;
-      const input = h('input', {
-        type: secret ? 'password' : 'text', value: model[key] || '', placeholder: placeholder || '', spellcheck: 'false', autocomplete: 'off',
-        oninput: (e) => { model[key] = e.target.value; onChange(); },
-      });
-      return h('div', { class: 'field' }, h('label', null, label),
-        secret ? h('div', { class: 'secret-field' }, input,
-          h('button', { class: 'btn icon', type: 'button', title: 'Show / hide', 'aria-label': 'Show or hide', onclick: (e) => { reveal = !reveal; input.type = reveal ? 'text' : 'password'; e.currentTarget.replaceChildren(icon(reveal ? 'eyeOff' : 'eye')); } }, icon('eye')))
-          : input);
+      const input = ui.input({ type: secret ? 'password' : 'text', value: model[key] || '', placeholder: placeholder || '', spellcheck: 'false', autocomplete: 'off',
+        onInput: (e) => { model[key] = e.target.value; onChange(); } });
+      return ui.field(label, secret ? ui.secretField(input, ui.iconButton('eye', 'Show or hide', (e) => { reveal = !reveal; input.type = reveal ? 'text' : 'password'; e.currentTarget.replaceChildren(icon(reveal ? 'eyeOff' : 'eye')); })) : input);
     };
     const types = [...(allowInherit ? [['inherit', 'Inherit from parent']] : []), ['noauth', 'No auth'], ['bearer', 'Bearer token'], ['basic', 'Basic auth'], ['apikey', 'API key'], ['oauth2', 'OAuth 2.0']];
     if (model.type === 'unsupported') types.push(['unsupported', `${model.raw.type} (not supported)`]);
-    const sel = h('select', {
-      'aria-label': 'Auth type',
-      onchange: (e) => {
-        const type = e.target.value;
-        for (const k of Object.keys(model)) delete model[k];
-        Object.assign(model, { type }, type === 'apikey' ? { in: 'header', key: '', value: '' } : {},
-          type === 'oauth2' ? { grant: 'authorization_code', pkce: true, clientAuth: 'header', headerPrefix: 'Bearer' } : {});
-        onChange();
-        draw();
-      },
-    }, ...types.map(([v, l]) => h('option', { value: v, ...(model.type === v ? { selected: true } : {}) }, l)));
-    const kids = [h('div', { class: 'field narrow' }, h('label', null, 'Type'), sel)];
-    if (model.type === 'inherit') kids.push(h('p', { class: 'note' }, inheritText ? inheritText() : 'Uses the auth of the folder or collection this request is saved in.'));
-    if (model.type === 'noauth') kids.push(h('p', { class: 'hint' }, 'No Authorization header is added.'));
+    const sel = ui.select(types, { value: model.type, 'aria-label': 'Auth type', onChange: (e) => {
+      const type = e.target.value;
+      for (const k of Object.keys(model)) delete model[k];
+      Object.assign(model, { type }, type === 'apikey' ? { in: 'header', key: '', value: '' } : {},
+        type === 'oauth2' ? { grant: 'authorization_code', pkce: true, clientAuth: 'header', headerPrefix: 'Bearer' } : {});
+      onChange();
+      draw();
+    } });
+    const kids = [ui.field('Type', sel, { narrow: true })];
+    if (model.type === 'inherit') kids.push(ui.note(inheritText ? inheritText() : 'Uses the auth of the folder or collection this request is saved in.'));
+    if (model.type === 'noauth') kids.push(ui.hint('No Authorization header is added.'));
     if (model.type === 'bearer') kids.push(field('Token', 'token', { secret: true, placeholder: 'eyJhbGciOi… or {{token}}' }));
     if (model.type === 'basic') kids.push(h('div', { class: 'grid-2' }, field('Username', 'username'), field('Password', 'password', { secret: true })));
     if (model.type === 'apikey') {
       kids.push(h('div', { class: 'grid-2' }, field('Key', 'key', { placeholder: 'X-Api-Key' }), field('Value', 'value', { secret: true, placeholder: '{{apiKey}}' })));
-      kids.push(h('div', { class: 'field narrow' }, h('label', null, 'Add to'),
-        h('select', { onchange: (e) => { model.in = e.target.value; onChange(); } },
-          h('option', { value: 'header', ...(model.in !== 'query' ? { selected: true } : {}) }, 'Header'),
-          h('option', { value: 'query', ...(model.in === 'query' ? { selected: true } : {}) }, 'Query parameter'))));
+      kids.push(ui.field('Add to', ui.select([['header', 'Header'], ['query', 'Query parameter']], { value: model.in === 'query' ? 'query' : 'header', onChange: (e) => { model.in = e.target.value; onChange(); } }), { narrow: true }));
     }
     if (model.type === 'oauth2') kids.push(oauthFields(model, field, onChange, vars));
-    if (model.type === 'unsupported') kids.push(h('p', { class: 'note warn' }, `The "${model.raw.type}" auth from Postman isn't supported yet. It stays in the file unchanged but isn't sent. Pick another type to replace it.`));
-    if (['bearer', 'basic', 'apikey'].includes(model.type)) kids.push(h('p', { class: 'hint' }, 'Tip: keep secrets in an environment as Secret variables and reference them like {{token}}.'));
+    if (model.type === 'unsupported') kids.push(ui.note(`The "${model.raw.type}" auth from Postman isn't supported yet. It stays in the file unchanged but isn't sent. Pick another type to replace it.`, 'warn'));
+    if (['bearer', 'basic', 'apikey'].includes(model.type)) kids.push(ui.hint('Tip: keep secrets in an environment as Secret variables and reference them like {{token}}.'));
     wrap.replaceChildren(...kids);
     linkLabels(wrap);
   };
@@ -2561,28 +2653,19 @@ const BODY_MODES = [['none', 'None'], ['raw', 'Raw'], ['formdata', 'Form data'],
 function renderBody() {
   const t = cur();
   const b = t.ed.body;
-  $('#bodyModes').replaceChildren(...BODY_MODES.map(([m, label]) => h('button', {
-    class: `seg-btn ${b.mode === m ? 'on' : ''}`, role: 'radio', 'aria-checked': String(b.mode === m),
-    onclick: () => { b.mode = m; renderBody(); renderCounts(); markDirty(); },
-  }, label)));
+  ui.seg(BODY_MODES, b.mode, (m) => { b.mode = m; renderBody(); renderCounts(); markDirty(); }, { into: $('#bodyModes') });
   const extras = [];
   if (b.mode === 'raw') {
-    extras.push(h('select', { 'aria-label': 'Raw format', onchange: (e) => { b.lang = e.target.value; markDirty(); renderBody(); } },
-      ...[['json', 'JSON'], ['text', 'Text'], ['xml', 'XML'], ['html', 'HTML'], ['javascript', 'JavaScript']]
-        .map(([v, l]) => h('option', { value: v, ...(b.lang === v ? { selected: true } : {}) }, l))));
+    extras.push(ui.select([['json', 'JSON'], ['text', 'Text'], ['xml', 'XML'], ['html', 'HTML'], ['javascript', 'JavaScript']],
+      { value: b.lang, size: 'small', 'aria-label': 'Raw format', onChange: (e) => { b.lang = e.target.value; markDirty(); renderBody(); } }));
   }
-  if (b.mode === 'raw' && b.lang === 'json') extras.push(h('button', { class: 'btn small ghost', onclick: () => {
+  if (b.mode === 'raw' && b.lang === 'json') extras.push(ui.button({ label: 'Beautify', variant: 'ghost', size: 'small', onClick: () => {
     try { b.raw = JSON.stringify(JSON.parse(b.raw), null, Number(state.settings.tabSize) || 2); renderBody(); markDirty(); } catch (e) { toast(`Not valid JSON: ${e.message}`); }
-  } }, 'Beautify'));
+  } }));
   $('#bodyExtras').replaceChildren(...extras);
 
   const box = $('#bodyEditor');
-  const area = (key, placeholder, rows = 14) => h('textarea', {
-    class: 'code', spellcheck: 'false', wrap: 'off', placeholder, rows, value: b[key], 'aria-label': key === 'raw' ? 'Request body' : key === 'gqlQuery' ? 'GraphQL query' : 'GraphQL variables',
-    oninput: (e) => { b[key] = e.target.value; markDirty(); },
-    onkeydown: tabIndent,
-  });
-  if (b.mode === 'none') box.replaceChildren(h('p', { class: 'hint' }, 'This request has no body.'));
+  if (b.mode === 'none') box.replaceChildren(ui.hint('This request has no body.'));
   else if (b.mode === 'raw') {
     box.replaceChildren(codeEditor({ value: b.raw, mode: b.lang, label: 'Request body', placeholder: b.lang === 'json' ? '{ "name": "{{$randomFirstName}}" }' : 'Request body',
       onChange: (v) => { b.raw = v; renderCounts(); markDirty(); } }));
@@ -2590,15 +2673,15 @@ function renderBody() {
   else if (b.mode === 'urlencoded') { box.replaceChildren(); kvTable(box, b.urlencoded, { onChange: markDirty }); }
   else if (b.mode === 'formdata') { box.replaceChildren(); kvTable(box, b.formdata, { file: true, onChange: markDirty }); }
   else if (b.mode === 'file') {
-    const pick = h('input', { type: 'file', hidden: true, onchange: (e) => { b.fileObj = e.target.files[0] || null; if (b.fileObj) b.fileSrc = b.fileObj.name; markDirty(); renderBody(); } });
-    box.replaceChildren(h('div', { class: 'drop' },
+    const pick = ui.input({ type: 'file', hidden: true, onchange: (e) => { b.fileObj = e.target.files[0] || null; if (b.fileObj) b.fileSrc = b.fileObj.name; markDirty(); renderBody(); } });
+    box.replaceChildren(h('div', { class: 'empty-state drop' },
       h('p', null, b.fileObj ? `${b.fileObj.name} (${fmtSize(b.fileObj.size)})` : b.fileSrc ? `${b.fileSrc}: choose it again to send (files aren't stored)` : 'Send a file as the raw request body.'),
-      h('button', { class: 'btn', onclick: () => pick.click() }, b.fileObj ? 'Change file' : 'Choose file'), pick));
+      ui.button({ label: b.fileObj ? 'Change file' : 'Choose file', size: 'small', onClick: () => pick.click() }), pick));
   } else if (b.mode === 'graphql') {
     box.replaceChildren(
-      h('div', { class: 'field grow' }, h('label', null, 'Query'), codeEditor({ value: b.gqlQuery, mode: 'graphql', label: 'GraphQL query', placeholder: 'query { users { id name } }', onChange: (v) => { b.gqlQuery = v; renderCounts(); markDirty(); } })),
-      h('div', { class: 'field' }, h('label', null, 'Variables (JSON)'), codeEditor({ value: b.gqlVars, mode: 'json', label: 'GraphQL variables', placeholder: '{ "id": 1 }', cls: 'short', onChange: (v) => { b.gqlVars = v; markDirty(); } })));
-  } else box.replaceChildren(h('p', { class: 'note warn' }, `The "${b.unsupported.mode}" body from Postman isn't supported. It's kept in the file but not sent. Pick another body type to replace it.`));
+      ui.field('Query', codeEditor({ value: b.gqlQuery, mode: 'graphql', label: 'GraphQL query', placeholder: 'query { users { id name } }', onChange: (v) => { b.gqlQuery = v; renderCounts(); markDirty(); } }), { grow: true }),
+      ui.field('Variables (JSON)', codeEditor({ value: b.gqlVars, mode: 'json', label: 'GraphQL variables', placeholder: '{ "id": 1 }', cls: 'short', onChange: (v) => { b.gqlVars = v; markDirty(); } })));
+  } else box.replaceChildren(ui.note(`The "${b.unsupported.mode}" body from Postman isn't supported. It's kept in the file but not sent. Pick another body type to replace it.`, 'warn'));
 }
 
 const CM_MODES = {
@@ -2713,26 +2796,25 @@ function renderResponse() {
     switchPane('#respTabs', 'rbody');
     $('#respTools').hidden = !t.sending; // "Sending..." shows where the status will appear
     $('#respTools').classList.add('no-body');
-    $('#respBody').replaceChildren(h('div', { class: 'empty-state' }, t.sending
-      ? h('p', { class: 'hint' }, `Waiting for the response to ${t.ed.method} ${t.ed.url || 'this request'}…`)
-      : [h('p', { class: 'hint' }, 'Send the request to see its response here.'),
-        h('p', { class: 'hint' }, h('kbd', null, MOD), ' + ', h('kbd', null, 'Enter'), ' sends, ',
-          h('kbd', null, MOD), ' + ', h('kbd', null, 'S'), ' saves, ', h('kbd', null, MOD), ' + ', h('kbd', null, 'F'), ' searches a response.')]));
+    $('#respBody').replaceChildren(ui.empty(...(t.sending
+      ? [ui.hint(`Waiting for the response to ${t.ed.method} ${t.ed.url || 'this request'}…`)]
+      : [ui.hint('Send the request to see its response here.'),
+        ui.hint([ui.kbd(MOD), ' + ', ui.kbd('Enter'), ' sends, ', ui.kbd(MOD), ' + ', ui.kbd('S'), ' saves, ', ui.kbd(MOD), ' + ', ui.kbd('F'), ' searches a response.'])])));
     renderDiff();
     return;
   }
   const res = out.res;
   const hasRes = res && !out.error;
   status.replaceChildren(...(hasRes ? [
-    h('span', { title: `${res.status} ${res.reason || REASONS[res.status] || ''}, ${fmtMs(res.timeMs)}, ${fmtSize(res.size)}` }, h('span', { class: `status-code s${String(res.status)[0]}` }, String(res.status),
-      h('span', { class: 'm-reason' }, ` ${res.reason || REASONS[res.status] || ''}`))),
-    h('span', { class: 'm-time', title: 'Time' }, h('b', null, fmtMs(res.timeMs))),
-    h('span', { class: 'm-size', title: 'Size' }, h('b', null, fmtSize(res.size)), res.truncated ? ' (truncated)' : ''),
-    ...(out.wire && res.finalUrl && res.finalUrl !== out.wire.url ? [h('span', { class: 'pill', title: res.finalUrl }, 'Redirected')] : []),
-  ] : [h('span', { class: 'status-code s-err' }, 'Error')]));
+    h('span', { title: `${res.status} ${res.reason || REASONS[res.status] || ''}, ${fmtMs(res.timeMs)}, ${fmtSize(res.size)}` },
+      ui.status(res.status, { label: [String(res.status), h('span', { class: 'm-reason' }, ` ${res.reason || REASONS[res.status] || ''}`)] })),
+    h('span', { class: 'm-time', title: 'Time' }, ui.value(fmtMs(res.timeMs))),
+    h('span', { class: 'm-size', title: 'Size' }, ui.value(fmtSize(res.size)), res.truncated ? ' (truncated)' : ''),
+    ...(out.wire && res.finalUrl && res.finalUrl !== out.wire.url ? [ui.pill('Redirected', '', { title: res.finalUrl })] : []),
+  ] : [ui.status(null)]));
   const notes = [
-    ...(out.error ? [h('p', { class: 'note err' }, out.error)] : []),
-    ...(out.warnings || []).map((w) => h('p', { class: 'note warn' }, w)),
+    ...(out.error ? [ui.note(out.error, 'err')] : []),
+    ...(out.warnings || []).map((w) => ui.note(w, 'warn')),
   ];
   const tests = out.tests || [];
   const failed = tests.filter((x) => x.passed === false).length;
@@ -2742,7 +2824,7 @@ function renderResponse() {
   $('#cntRCookies').textContent = cookies.length ? String(cookies.length) : '';
   const ct = $('#cntRTests');
   ct.textContent = tests.length ? `${passed}/${tests.length}` : '';
-  ct.className = `count ${failed ? 'fail' : tests.length ? 'pass' : ''}`;
+  ct.className = cx('count', failed ? 'err' : tests.length && 'ok');
   $('#cntRConsole').textContent = out.logs && out.logs.length ? String(out.logs.length) : '';
   switchPane('#respTabs', t.respTab);
 
@@ -2758,7 +2840,7 @@ function renderResponse() {
   pv.title = previewable ? '' : 'Preview shows HTML and images; this response is neither.';
   clearFind();
   if (!$('#findBar').hidden) setTimeout(() => runFind(0), 0); // keep the open Find bar in sync with the new response
-  $('#respBody').replaceChildren(...notes, ...(notes.length && hasRes ? [h('div', { class: 'gap' })] : []), ...(hasRes ? [bodyView(res, view)] : []));
+  $('#respBody').replaceChildren(...notes, ...(hasRes ? [bodyView(res, view)] : []));
   // headers
   $('#respHeaders').replaceChildren(...(hasRes ? [h('thead', null, h('tr', null, h('th', null, 'Name'), h('th', null, 'Value'))),
     h('tbody', null, res.headers.map(([k, v]) => h('tr', null, h('td', null, k), h('td', { class: 'mono' }, v))))] : []));
@@ -2766,19 +2848,17 @@ function renderResponse() {
   $('#respCookies').replaceChildren(cookies.length
     ? h('table', { class: 'grid' }, h('thead', null, h('tr', null, ...['Name', 'Value', 'Domain', 'Path', 'Expires', 'Flags'].map((x) => h('th', null, x)))),
       h('tbody', null, cookies.map((c) => h('tr', null, h('td', null, c.name), h('td', { class: 'mono' }, c.value), h('td', null, c.domain || ''), h('td', null, c.path || ''), h('td', null, c.expires || ''), h('td', null, c.flags.join(', '))))))
-    : h('p', { class: 'hint' }, backend.mode === 'local' ? 'The response set no cookies.' : 'The response set no cookies that browsers let pages read (run ApiMan locally to see Set-Cookie headers).'));
+    : ui.hint(backend.mode === 'local' ? 'The response set no cookies.' : 'The response set no cookies that browsers let pages read (run ApiMan locally to see Set-Cookie headers).'));
   // tests
   $('#respTests').replaceChildren(tests.length
-    ? h('div', null, h('p', { class: 'hint' }, `${passed} passed, ${failed} failed${tests.length - passed - failed ? `, ${tests.length - passed - failed} skipped` : ''}`),
-      ...tests.map((x) => h('div', { class: 'test-row' },
-        h('span', { class: `pill ${x.passed === false ? 'err' : x.passed === null ? '' : 'ok'}` }, x.passed === false ? 'Fail' : x.passed === null ? 'Skip' : 'Pass'),
-        h('div', null, h('div', null, x.name), x.error && x.passed === false ? h('div', { class: 'msg' }, x.error) : null))))
-    : h('div', { class: 'empty-state' }, h('p', { class: 'hint' }, 'No tests ran. Right-click a value in the JSON body to add a test for it, or write them in Scripts, then Tests. For example:'),
-      h('pre', { class: 'hint-code' }, 'pm.test("Status is 200", () => {\n  pm.response.to.have.status(200);\n});')));
+    ? h('div', null, ui.hint(`${passed} passed, ${failed} failed${tests.length - passed - failed ? `, ${tests.length - passed - failed} skipped` : ''}`),
+      ...tests.map((x) => ui.result(x.passed === false ? 'err' : x.passed === null ? '' : 'ok', x.passed === false ? 'Fail' : x.passed === null ? 'Skip' : 'Pass', x.name, x.passed === false ? x.error : null)))
+    : ui.empty(ui.hint('No tests ran. Right-click a value in the JSON body to add a test for it, or write them in Scripts, then Tests. For example:'),
+      h('pre', { class: 'code-block' }, 'pm.test("Status is 200", () => {\n  pm.response.to.have.status(200);\n});')));
   // console
   $('#respConsole').replaceChildren(...(out.logs && out.logs.length
-    ? out.logs.map((l) => h('div', { class: `line ${l.level}` }, h('span', { class: 'src' }, l.src || ''), l.text))
-    : [h('p', { class: 'hint' }, 'console.log() output from scripts appears here.')]));
+    ? out.logs.map((l) => ui.logLine(l.src || '', l.text, { error: 'err', warn: 'warn' }[l.level] || ''))
+    : [ui.hint('console.log() output from scripts appears here.')]));
   renderDiff();
 }
 
@@ -2812,7 +2892,7 @@ function renderMarkdown(src) {
     if (line.startsWith('```')) {
       const code = [];
       for (i++; i < lines.length && !lines[i].startsWith('```'); i++) code.push(lines[i]);
-      blocks.push(h('pre', { class: 'hint-code' }, code.join('\n')));
+      blocks.push(h('pre', { class: 'code-block' }, code.join('\n')));
     } else if (/^#{1,6}\s/.test(line)) {
       const level = line.match(/^#+/)[0].length;
       blocks.push(h(`h${Math.min(level + 2, 6)}`, null, ...inline(line.replace(/^#+\s/, ''))));
@@ -2911,14 +2991,14 @@ function bodyView(res, view) {
       frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">${inertHtml(res.body)}`;
       return frame;
     }
-    return h('p', { class: 'hint' }, 'Preview works for HTML and images. Use Pretty or Raw for this response.');
+    return ui.hint('Preview works for HTML and images. Use Pretty or Raw for this response.');
   }
   if (res.binary) {
-    return h('div', { class: 'drop' }, h('p', null, `Binary response (${ct || 'unknown type'}, ${fmtSize(res.size)}).`),
-      h('button', { class: 'btn', onclick: saveBody }, 'Download'));
+    return h('div', { class: 'empty-state drop' }, h('p', null, `Binary response (${ct || 'unknown type'}, ${fmtSize(res.size)}).`),
+      ui.button({ label: 'Download', size: 'small', onClick: saveBody }));
   }
   const text = res.body ?? '';
-  if (!text) return h('p', { class: 'hint' }, 'The response body is empty.');
+  if (!text) return ui.hint('The response body is empty.');
   const wrap = document.documentElement.dataset.wrap !== 'off'; // follows the Settings preview too
   const langOf = () => (/json/.test(ct) ? 'json' : /html/.test(ct) ? 'html' : /xml|svg/.test(ct) ? 'xml' : /javascript/.test(ct) ? 'javascript' : 'text');
   if (view === 'pretty') {
@@ -3263,57 +3343,56 @@ function renderDiff() {
   const base = diffBaseline(t);
   // Toolbar: the same .pane-tools row as the Body view (select, filter, then text actions on the right).
   const envChoices = [...(state.activeEnv ? [{ id: '', name: 'No environment' }] : []), ...state.envList.filter((e) => e.id !== state.activeEnv)];
-  const picker = h('select', { 'aria-label': 'Compare the latest response with', title: 'Compare the latest response with…', onchange: (e) => { t.diffWith = e.target.value; renderDiff(); } },
-    h('option', { value: 'prev' }, 'vs previous response'),
-    h('option', { value: 'pinned', ...(t.pinned ? {} : { disabled: true }) }, t.pinned ? `vs pinned (${t.pinned.res.status}, ${new Date(t.pinned.pinnedAt).toLocaleTimeString([], { hour12: false })})` : 'vs pinned (pin one first)'),
-    ...(envChoices.length ? [h('optgroup', { label: `Send again with another environment (now: ${activeName})` }, ...envChoices.map((e) => h('option', { value: `env:${e.id}` }, `vs ${e.name}`)))] : []));
+  const picker = ui.select([
+    ['prev', 'vs previous response'],
+    ['pinned', t.pinned ? `vs pinned (${t.pinned.res.status}, ${new Date(t.pinned.pinnedAt).toLocaleTimeString([], { hour12: false })})` : 'vs pinned (pin one first)', t.pinned ? {} : { disabled: true }],
+    ...(envChoices.length ? [{ group: `Send again with another environment (now: ${activeName})`, options: envChoices.map((e) => [`env:${e.id}`, `vs ${e.name}`]) }] : []),
+  ], { size: 'small', 'aria-label': 'Compare the latest response with', title: 'Compare the latest response with…', onChange: (e) => { t.diffWith = e.target.value; renderDiff(); } });
   picker.value = t.diffWith || 'prev';
   if (picker.value !== (t.diffWith || 'prev')) { t.diffWith = 'prev'; picker.value = 'prev'; }
-  const ignoreIn = h('input', { type: 'search', class: 'diff-ignore', spellcheck: 'false', 'aria-label': 'Fields to ignore', placeholder: 'Ignore fields',
+  const ignoreIn = ui.input({ type: 'search', size: 'small', id: 'diffIgnore', spellcheck: 'false', 'aria-label': 'Fields to ignore', placeholder: 'Ignore fields',
     title: 'Comma-separated: a name (updatedAt) ignores it anywhere, a path (data.items[*].etag) ignores that path', value: state.diffIgnore || '',
-    oninput: debounce((e) => { state.diffIgnore = e.target.value; ls.set('apiman:diffIgnore', state.diffIgnore); renderDiff(); requestAnimationFrame(() => { const el = $('#respDiff .diff-ignore'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }); }, 350) });
-  const actions = h('div', { class: 'tool-group' },
-    base && base.envId !== undefined && base.out && !base.pending ? h('button', { type: 'button', class: 'btn small ghost', title: `Send this request with ${base.label} again`, onclick: () => runInEnv(t, base.envId) }, 'Resend') : null,
-    h('button', { type: 'button', class: 'btn small ghost', disabled: !hasOut, title: 'Keep this response to compare later responses with',
-      onclick: () => { t.pinned = { ...out, pinnedAt: Date.now() }; t.diffWith = 'pinned'; toast('Pinned'); renderDiff(); } }, 'Pin'));
-  const bar = h('div', { class: 'pane-tools' }, picker, ignoreIn, actions);
+    onInput: debounce((e) => { state.diffIgnore = e.target.value; ls.set('apiman:diffIgnore', state.diffIgnore); renderDiff(); requestAnimationFrame(() => { const el = $('#diffIgnore'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }); }, 350) });
+  const bar = ui.toolbar([picker, ignoreIn], [
+    base && base.envId !== undefined && base.out && !base.pending ? ui.button({ label: 'Resend', variant: 'ghost', size: 'small', title: `Send this request with ${base.label} again`, onClick: () => runInEnv(t, base.envId) }) : null,
+    ui.button({ label: 'Pin', variant: 'ghost', size: 'small', disabled: !hasOut, title: 'Keep this response to compare later responses with',
+      onClick: () => { t.pinned = { ...out, pinnedAt: Date.now() }; t.diffWith = 'pinned'; toast('Pinned'); renderDiff(); } }),
+  ].filter(Boolean));
   const body = [];
-  const empty = (...kids) => body.push(h('div', { class: 'empty-state' }, ...kids));
+  const empty = (...kids) => body.push(ui.empty(...kids));
   if (!hasOut) {
-    empty(h('p', { class: 'hint' }, 'Send the request. Each response is then compared with the previous one, a pinned one, or the same request sent with another environment.'));
+    empty(ui.hint('Send the request. Each response is then compared with the previous one, a pinned one, or the same request sent with another environment.'));
   } else if (base && base.envId !== undefined && (!base.out || base.pending)) {
-    if (base.pending) empty(h('p', { class: 'hint' }, `Sending with ${base.label}…`));
-    else empty(h('p', { class: 'hint' }, `Sends this request again with the variables of ${base.label}, then compares the two responses. Scripts' variable changes aren't saved.`),
-      h('div', { class: 'actions' }, h('button', { type: 'button', class: 'btn small', onclick: () => runInEnv(t, base.envId) }, `Send with ${base.label}`)));
+    if (base.pending) empty(ui.hint(`Sending with ${base.label}…`));
+    else empty(ui.hint(`Sends this request again with the variables of ${base.label}, then compares the two responses. Scripts' variable changes aren't saved.`),
+      ui.actions(ui.button({ label: `Send with ${base.label}`, size: 'small', onClick: () => runInEnv(t, base.envId) })));
   } else if (!base) {
-    empty(h('p', { class: 'hint' }, t.diffWith === 'pinned' ? 'Pin a response first.' : 'Send again to compare the next response with this one, or pin this one.'));
+    empty(ui.hint(t.diffWith === 'pinned' ? 'Pin a response first.' : 'Send again to compare the next response with this one, or pin this one.'));
   } else if (base.out.error || !base.out.res) {
-    body.push(h('p', { class: 'note err' }, `The ${base.label} request failed: ${base.out.error || 'no response'}`));
-    if (base.envId !== undefined) body.push(h('div', { class: 'actions' }, h('button', { type: 'button', class: 'btn small', onclick: () => runInEnv(t, base.envId) }, 'Try again')));
+    body.push(ui.note(`The ${base.label} request failed: ${base.out.error || 'no response'}`, 'err'));
+    if (base.envId !== undefined) body.push(ui.actions(ui.button({ label: 'Try again', size: 'small', onClick: () => runInEnv(t, base.envId) })));
   } else {
     const r = compareOuts(base.out, out, state.diffIgnore);
     const n = diffCount(r);
     cnt.textContent = String(n);
-    cnt.className = `count ${n ? '' : 'pass'}`;
+    cnt.className = cx('count', !n && 'ok');
     const left = base.label, right = base.envId !== undefined ? activeName : 'latest';
-    const pair = (x, y, fmt) => (x === y ? fmt(y) : h('b', null, `${fmt(x)} → ${fmt(y)}`));
-    body.push(h('p', { class: 'hint' }, `${left} → ${right}: status `, pair(r.status[0], r.status[1], String), ', time ', pair(r.time[0], r.time[1], fmtMs), ', size ', pair(r.size[0], r.size[1], fmtSize)));
+    const pair = (x, y, fmt) => (x === y ? fmt(y) : ui.value(`${fmt(x)} → ${fmt(y)}`));
+    body.push(ui.hint([`${left} → ${right}: status `, pair(r.status[0], r.status[1], String), ', time ', pair(r.time[0], r.time[1], fmtMs), ', size ', pair(r.size[0], r.size[1], fmtSize)]));
     const val = (v) => (v === undefined ? '–' : JSON.stringify(v));
     const short = (s) => (s.length > 300 ? s.slice(0, 300) + '…' : s);
     // One change per row, like the Tests tab: pill, what changed, then before → after.
-    const row = (type, name, before, after) => h('div', { class: 'test-row' },
-      h('span', { class: `pill ${type === 'added' ? 'ok' : type === 'removed' ? 'err' : 'warn'}` }, type[0].toUpperCase() + type.slice(1)),
-      h('div', null, h('div', { class: 'mono' }, name), h('div', { class: 'msg mono' }, before, ' → ', after)));
-    const section = (title, summary, extra) => h('div', { class: 'pane-tools diff-section' }, h('span', { class: 'label' }, title), h('span', { class: 'hint' }, summary), extra);
+    const row = (type, name, before, after) => ui.result(type === 'added' ? 'ok' : type === 'removed' ? 'err' : 'warn', type[0].toUpperCase() + type.slice(1),
+      h('span', { class: 'mono' }, name), h('span', { class: 'mono' }, before, ' → ', after));
+    const section = (title, summary, extra) => ui.sectionHead(title, summary, extra);
     const b = r.body;
     if (b.kind === 'json') {
       const view = t.diffView || 'fields';
-      const toggle = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Diff view' }, ...[['fields', 'Fields'], ['lines', 'Lines']].map(([k, l]) =>
-        h('button', { type: 'button', class: `seg-btn${view === k ? ' on' : ''}`, role: 'radio', 'aria-checked': String(view === k), onclick: () => { t.diffView = k; renderDiff(); } }, l)));
+      const toggle = ui.seg([['fields', 'Fields'], ['lines', 'Lines']], view, (k) => { t.diffView = k; renderDiff(); }, { label: 'Diff view' });
       body.push(section('Body', `${b.changes.length ? `${b.changes.length}${b.truncated ? '+' : ''} change${b.changes.length === 1 ? '' : 's'}` : 'same JSON'}${b.ignored ? `, ${b.ignored} ignored` : ''}`, toggle));
       if (view === 'lines') body.push(renderLineDiff(b.lines(), left, right));
       else body.push(...b.changes.map((c) => row(c.type, c.path || '(root)', c.note ? '' : short(val(c.before)), c.note || short(val(c.after)))));
-      if (b.truncated && view !== 'lines') body.push(h('p', { class: 'hint' }, 'Showing the first 1000 changes.'));
+      if (b.truncated && view !== 'lines') body.push(ui.hint('Showing the first 1000 changes.'));
     } else if (b.kind === 'text') {
       body.push(section('Body', b.count ? `${b.count} changed line${b.count === 1 ? '' : 's'}` : 'same text'));
       if (b.count) body.push(renderLineDiff(b.lines(), left, right));
@@ -3337,12 +3416,12 @@ function renderLineDiff({ ops, coarse }, leftLabel, rightLabel) {
       let j = i; while (j < ops.length && !keep[j]) j++;
       const skipped = j - i;
       const from = i;
-      const row = h('tr', { class: 'gap' }, h('td', { colspan: 3 }, h('button', { type: 'button', class: 'btn small ghost', onclick: () => {
+      const row = h('tr', { class: 'gap' }, h('td', { colspan: 3 }, ui.button({ label: `Show ${skipped} unchanged line${skipped === 1 ? '' : 's'}`, variant: 'ghost', size: 'small', onClick: () => {
         const extra = [];
         let a = ln0, b = rn0;
         for (let k = from; k < from + skipped; k++) { a++; b++; extra.push(h('tr', null, h('td', { class: 'n' }, String(a)), h('td', { class: 'n' }, String(b)), h('td', { class: 'mono' }, ops[k][1]))); }
         row.replaceWith(...extra);
-      } }, `Show ${skipped} unchanged line${skipped === 1 ? '' : 's'}`)));
+      } })));
       const ln0 = ln, rn0 = rn;
       rows.push(row);
       ln += skipped; rn += skipped; i = j - 1;
@@ -3354,7 +3433,7 @@ function renderLineDiff({ ops, coarse }, leftLabel, rightLabel) {
       h('td', { class: 'mono' }, h('span', { class: 'sign', 'aria-hidden': 'true' }, op === ' ' ? ' ' : op), text)));
   }
   return h('div', { class: 'line-diff' },
-    coarse ? h('p', { class: 'hint' }, 'Too many changed lines to align precisely; showing removed then added lines.') : null,
+    coarse ? ui.hint('Too many changed lines to align precisely; showing removed then added lines.') : null,
     h('table', { 'aria-label': `Line changes from ${leftLabel} to ${rightLabel}` }, h('tbody', null, rows)));
 }
 
@@ -3456,23 +3535,21 @@ function renderWs(t) {
   const ws = t.ws;
   const status = $('#respStatus');
   const label = { connecting: 'Connecting…', open: 'Connected', closed: 'Disconnected' }[ws.state];
-  status.replaceChildren(h('span', { class: `status-code ${ws.state === 'open' ? 's2' : ws.state === 'closed' ? 's-err' : ''}` }, label),
+  status.replaceChildren(ui.value(label, ws.state === 'open' ? 'ok' : ws.state === 'closed' ? 'err' : ''),
     h('span', { class: 'm-time' }, `${ws.log.filter((m) => m.dir === 'in').length} in, ${ws.log.filter((m) => m.dir === 'out').length} out`));
   for (const id of ['#cntRHeaders', '#cntRCookies', '#cntRTests', '#cntRDiff', '#cntRConsole']) $(id).textContent = '';
   t.respTab = 'rbody';
   switchPane('#respTabs', 'rbody');
   $('#respTools').hidden = true;
   const send = () => { if (wsSend(t, input.value)) { input.value = ''; t.wsDraft = ''; input.focus(); } };
-  const input = h('textarea', { class: 'code short', rows: 3, spellcheck: 'false', 'aria-label': 'Message to send', placeholder: ws.state === 'open' ? 'Message: {{variables}} work' : 'Connect to send messages', value: t.wsDraft || '',
-    oninput: (e) => { t.wsDraft = e.target.value; },
+  const input = ui.textarea({ code: true, short: true, rows: 3, 'aria-label': 'Message to send', placeholder: ws.state === 'open' ? 'Message: {{variables}} work' : 'Connect to send messages', value: t.wsDraft || '',
+    onInput: (e) => { t.wsDraft = e.target.value; },
     onkeydown: (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); send(); } } });
   // Same building blocks as the rest of the response pane: a .pane-tools row, Console-style lines, small buttons.
-  const tools = h('div', { class: 'pane-tools' },
-    h('input', { type: 'search', class: 'ws-filter', placeholder: 'Filter messages', 'aria-label': 'Filter messages', value: t.wsFilter || '', oninput: (e) => { t.wsFilter = e.target.value; renderWsLog(t, false); } }),
-    h('div', { class: 'tool-group' }, h('button', { type: 'button', class: 'btn small ghost', onclick: () => { ws.log = []; renderWsLog(t, false); } }, 'Clear')));
+  const tools = ui.toolbar([ui.input({ type: 'search', size: 'small', id: 'wsFilter', placeholder: 'Filter messages', 'aria-label': 'Filter messages', value: t.wsFilter || '', onInput: (e) => { t.wsFilter = e.target.value; renderWsLog(t, false); } })],
+    [ui.button({ label: 'Clear', variant: 'ghost', size: 'small', onClick: () => { ws.log = []; renderWsLog(t, false); } })]);
   const compose = h('div', { class: 'ws-compose' }, input,
-    h('div', { class: 'pane-tools' }, h('span', { class: 'hint' }, `${MOD}+Enter sends`),
-      h('div', { class: 'tool-group' }, h('button', { type: 'button', class: 'btn small', disabled: ws.state !== 'open', onclick: send }, 'Send'))));
+    ui.toolbar([ui.hint(`${MOD}+Enter sends`)], [ui.button({ label: 'Send', size: 'small', disabled: ws.state !== 'open', onClick: send })]));
   $('#respBody').replaceChildren(h('div', { class: 'ws' }, tools, h('div', { class: 'console ws-log', id: 'wsLog', role: 'log', 'aria-live': 'polite' }), compose));
   renderWsLog(t, true);
 }
@@ -3485,10 +3562,9 @@ function renderWsLog(t, stick) {
     let body = String(m.data);
     if ((m.dir === 'in' || m.dir === 'out') && /^\s*[[{]/.test(body)) { try { JSON.parse(body); body = prettyJson(body, 2); } catch { /* as sent */ } }
     const time = new Date(m.at).toLocaleTimeString([], { hour12: false }) + '.' + String(m.at % 1000).padStart(3, '0');
-    return h('div', { class: `line ${m.dir === 'err' ? 'error' : m.dir === 'info' ? 'info' : ''}` }, // the Console tab's line layout
-      h('span', { class: 'src', title: { in: 'Received', out: 'Sent', info: 'Info', err: 'Error' }[m.dir] }, `${{ in: '↓', out: '↑', info: '·', err: '!' }[m.dir]} ${time}`), body);
+    return ui.logLine(`${{ in: '↓', out: '↑', info: '·', err: '!' }[m.dir]} ${time}`, body, m.dir === 'err' ? 'err' : m.dir === 'info' ? 'muted' : '', { title: { in: 'Received', out: 'Sent', info: 'Info', err: 'Error' }[m.dir] });
   });
-  box.replaceChildren(...(rows.length ? rows : [h('p', { class: 'hint' }, f ? 'No messages match.' : 'No messages yet.')]));
+  box.replaceChildren(...(rows.length ? rows : [ui.hint(f ? 'No messages match.' : 'No messages yet.')]));
   if (stick && atEnd) { box.scrollTop = box.scrollHeight; requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; }); } // follow new messages unless you scrolled up
   const st = $('#respStatus .m-time');
   if (st) st.textContent = `${t.ws.log.filter((m) => m.dir === 'in').length} in, ${t.ws.log.filter((m) => m.dir === 'out').length} out`;
@@ -3563,7 +3639,7 @@ async function saveAs() {
     if (!state.colList.length) return;
   }
   await Promise.all(state.colList.map((c) => withCol(c.id).catch(() => {})));
-  const nameIn = h('input', { value: t.ed.name, spellcheck: 'false' });
+  const nameIn = ui.input({ value: t.ed.name, spellcheck: 'false' });
   const targets = [];
   for (const c of state.colList) {
     const col = state.cols[c.id];
@@ -3572,10 +3648,10 @@ async function saveAs() {
     const walk = (items, depth) => { for (const it of items) if (isFolder(it)) { targets.push({ label: `${'  '.repeat(depth)}${c.name} / ${it.name}`, cid: c.id, folderId: it.id }); walk(it.item, depth + 1); } };
     walk(col.item, 1);
   }
-  const sel = h('select', null, ...targets.map((x, i) => h('option', { value: String(i), ...(t.cid === x.cid && !x.folderId ? { selected: true } : {}) }, x.label)));
+  const sel = ui.select(targets.map((x, i) => [String(i), x.label]), { value: String(Math.max(0, targets.findIndex((x) => t.cid === x.cid && !x.folderId))) });
   openDialog({
     title: 'Save request',
-    body: [h('div', { class: 'field' }, h('label', null, 'Name'), nameIn), h('div', { class: 'field' }, h('label', null, 'Save to'), sel)],
+    body: [ui.field('Name', nameIn), ui.field('Save to', sel)],
     buttons: [{ label: 'Save', primary: true, onClick: async () => {
       const target = targets[Number(sel.value)];
       t.ed.name = nameIn.value.trim() || t.ed.name;
@@ -3646,15 +3722,16 @@ function renderDialog({ title, body, buttons = [], wide = false, confirm = false
   $('#dlgTitle').textContent = title;
   $('#dlgBody').replaceChildren(...[body].flat().filter((x) => x != null && x !== false));
   linkLabels($('#dlgBody'));
-  $('#dlgFoot').replaceChildren(...buttons.map((b) => h('button', {
-    type: 'button', class: `btn ${b.primary ? 'primary' : ''} ${b.danger ? 'danger' : ''} ${b.solid ? 'solid' : ''} ${b.left ? 'push-left' : ''}`,
-    onclick: async (e) => {
+  // Dialog footer: the one place primary buttons live (DESIGN.md §3, Buttons)
+  $('#dlgFoot').replaceChildren(...buttons.map((b) => ui.button({
+    label: b.label, variant: cx(b.primary && 'primary', b.danger && 'danger', b.solid && 'solid'), cls: b.left ? 'push-left' : '',
+    onClick: async (e) => {
       const btn = e.currentTarget;
       btn.disabled = true;
       const mine = dialogSeq;
       try { if (await b.onClick() && dialogSeq === mine && dlg.open) dlg.close(); } catch (err) { toast(err.message); } finally { btn.disabled = false; }
     },
-  }, b.label)));
+  })));
   dialogSeq += 1;
   dialogCloses.set(dialogSeq, onClose || null);
   if (!dlg.open) { if (dlg.classList.contains('docked')) dlg.show(); else dlg.showModal(); } // docked: the app stays usable beside it
@@ -3675,7 +3752,7 @@ function ask({ title, message, input, ok = 'OK', danger = false, pre = false }) 
   return new Promise((resolve) => {
     let settled = false;
     const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
-    const field = input ? h('input', { value: input.value || '', placeholder: input.placeholder || '', spellcheck: 'false', autocomplete: 'off' }) : null;
+    const field = input ? ui.input({ value: input.value || '', placeholder: input.placeholder || '', spellcheck: 'false', autocomplete: 'off' }) : null;
     const submit = () => {
       if (field && !field.value.trim()) { field.focus(); return false; }
       settle(field ? field.value.trim() : true);
@@ -3685,8 +3762,8 @@ function ask({ title, message, input, ok = 'OK', danger = false, pre = false }) 
     openDialog({
       title,
       body: [
-        message ? h('p', { class: `hint field ${pre ? 'pre-line' : ''}` }, message) : null,
-        field ? h('div', { class: 'field' }, h('label', null, input.label), field) : null,
+        message ? ui.hint(message, { class: cx('hint', pre && 'pre-line') }) : null,
+        field ? ui.field(input.label, field) : null,
       ],
       confirm: true,
       buttons: [
@@ -3712,27 +3789,15 @@ function linkLabels(root) {
   }
 }
 
-function dlgTabs(defs, onChange) {
-  const bar = h('div', { class: 'seg dlg-tabs', role: 'tablist' });
-  const panes = defs.map((d) => h('div', { 'data-pane': d.key, hidden: d !== defs[0] }, d.content));
-  defs.forEach((d, i) => bar.append(h('button', {
-    type: 'button', class: `seg-btn ${i === 0 ? 'on' : ''}`, role: 'tab', 'aria-selected': String(i === 0),
-    onclick: (e) => {
-      $$('.seg-btn', bar).forEach((b) => { const on = b === e.currentTarget; b.classList.toggle('on', on); b.setAttribute('aria-selected', String(on)); });
-      panes.forEach((p) => { p.hidden = p.dataset.pane !== d.key; if (!p.hidden) refreshEditors(p); });
-      if (onChange) onChange(d.key);
-    },
-  }, d.label)));
-  return [bar, ...panes];
-}
+/** Tabs inside a dialog: Segmented tabs in the dialog's tab slot. */
+function dlgTabs(defs, onChange) { return ui.tabs(defs, onChange, { cls: 'dlg-tabs' }); }
 
 function scriptsPair(model) {
-  const mk = (key, label, ph) => h('div', { class: 'field' }, h('label', null, label),
-    codeEditor({ value: model[key], mode: 'javascript', label, placeholder: ph.split('\n')[0], cls: 'short', onChange: (v) => { model[key] = v; } }));
+  const mk = (key, label, ph) => ui.field(label, codeEditor({ value: model[key], mode: 'javascript', label, placeholder: ph.split('\n')[0], cls: 'short', onChange: (v) => { model[key] = v; } }));
   return [
     mk('pre', 'Pre-request: runs before every request inside', '// e.g. refresh a timestamp\npm.collectionVariables.set("now", Date.now());'),
     mk('test', 'Tests: run after every request inside', 'pm.test("No server errors", () => pm.expect(pm.response.code).to.be.below(500));'),
-    h('p', { class: 'hint' }, 'Scripts run sandboxed: they can\'t make network calls of their own or read your stored data, and ApiMan asks before a script changes which server a request goes to.'),
+    ui.hint('Scripts run sandboxed: they can\'t make network calls of their own or read your stored data, and ApiMan asks before a script changes which server a request goes to.'),
   ];
 }
 
@@ -3749,20 +3814,20 @@ async function editContainer(cid, folderId) {
     test: scriptIn(target.event, 'test'),
     docs: docIn(isCol ? col.info.description : target.description),
   };
-  const nameIn = h('input', { value: model.name, spellcheck: 'false', oninput: (e) => { model.name = e.target.value; } });
+  const nameIn = ui.input({ value: model.name, spellcheck: 'false', onInput: (e) => { model.name = e.target.value; } });
   const varsBox = h('div');
   if (isCol) kvTable(varsBox, model.vars, { secret: true, placeholders: ['Variable', 'Value'] });
   const defs = [
     { key: 'auth', label: 'Auth', content: authForm(model.auth, { allowInherit: !isCol, inheritText: () => 'Uses the auth of the parent folder or collection.', onChange: () => {}, vars: () => merged(scopesFor(cid)) }) },
-    ...(isCol ? [{ key: 'vars', label: 'Variables', content: [varsBox, h('p', { class: 'hint' }, 'Use as {{name}} anywhere in this collection. Environment values win over these when both exist.')] }] : []),
+    ...(isCol ? [{ key: 'vars', label: 'Variables', content: [varsBox, ui.hint('Use as {{name}} anywhere in this collection. Environment values win over these when both exist.')] }] : []),
     { key: 'scripts', label: 'Scripts', content: scriptsPair(model) },
-    { key: 'docs', label: 'Docs', content: h('textarea', { class: 'prose', rows: 8, value: model.docs, oninput: (e) => { model.docs = e.target.value; } }) },
+    { key: 'docs', label: 'Docs', content: ui.textarea({ prose: true, rows: 8, value: model.docs, onInput: (e) => { model.docs = e.target.value; } }) },
   ];
   openDialog({
     title: isCol ? 'Collection settings' : 'Folder settings',
     wide: true,
     tall: true,
-    body: [h('div', { class: 'field' }, h('label', null, 'Name'), nameIn), ...dlgTabs(defs)],
+    body: [ui.field('Name', nameIn), ...dlgTabs(defs)],
     buttons: [{ label: 'Save', primary: true, onClick: async () => {
       // apply to the CURRENT document (a conflict may have reloaded it since this dialog opened)
       const col = state.cols[cid] || await withCol(cid);
@@ -3795,18 +3860,19 @@ async function editEnvironment(id) {
   if (!doc) return;
   const rows = doc.values.map((v) => ({ key: v.key || '', value: String(v.value ?? ''), disabled: v.enabled === false, type: v.type === 'secret' ? 'secret' : 'default' }));
   const openedKeys = new Set(rows.map((r) => r.key)); // to tell variables added elsewhere from ones deleted here
-  const nameIn = h('input', { value: isGlobals ? 'Globals' : doc.name, placeholder: 'e.g. Local, Staging, Production', disabled: isGlobals, spellcheck: 'false' });
+  const nameIn = ui.input({ value: isGlobals ? 'Globals' : doc.name, placeholder: 'e.g. Local, Staging, Production', disabled: isGlobals, spellcheck: 'false' });
   const box = h('div');
   kvTable(box, rows, { secret: true, placeholders: ['Variable', 'Value'] });
-  const activate = h('input', { type: 'checkbox', checked: !id || id === state.activeEnv });
+  const activateCheck = ui.check({ label: 'Use this environment', checked: !id || id === state.activeEnv });
+  const activate = activateCheck.input;
   openDialog({
     title: isGlobals ? 'Globals' : id ? 'Edit environment' : 'New environment',
     wide: true,
     body: [
-      isGlobals ? h('p', { class: 'hint field' }, 'Globals apply everywhere, with the lowest priority: environment and collection values win.') : h('div', { class: 'field' }, h('label', null, 'Name'), nameIn),
+      isGlobals ? ui.hint('Globals apply everywhere, with the lowest priority: environment and collection values win.') : ui.field('Name', nameIn),
       box,
-      h('p', { class: 'hint' }, 'Secret values are hidden on screen. Like everything in ApiMan they are stored only on this computer.'),
-      isGlobals ? null : h('label', { class: 'check' }, activate, h('span', null, 'Use this environment')),
+      ui.hint('Secret values are hidden on screen. Like everything in ApiMan they are stored only on this computer.'),
+      isGlobals ? null : activateCheck,
     ],
     buttons: [
       ...(id && !isGlobals ? [{ label: 'Delete', danger: true, onClick: async () => { closeDialog(); await deleteEnvironment(id); return false; } }] : []),
@@ -3862,7 +3928,7 @@ function renderEnvPicker() {
     ...state.envList.map((e) => h('option', { value: e.id, ...(e.id === state.activeEnv ? { selected: true } : {}) }, e.name)),
     h('option', { value: '__new' }, '+ New environment…'));
   sel.value = state.activeEnv || '';
-  $('#envDot').classList.toggle('on', !!state.activeEnv);
+  $('#envDot').classList.toggle('ok', !!state.activeEnv); // Dot: live when an environment is active
 }
 
 function peekVariables(anchor) {
@@ -3875,25 +3941,22 @@ function peekVariables(anchor) {
   const pop = $('#popover');
   const peek = h('div', { class: 'peek' });
   for (const [label, values, name] of sections) {
-    peek.append(h('div', { class: 'label' }, name ? `${label}: ${name}` : label));
-    if (!values) { peek.append(h('div', { class: 'hint' }, label === 'Environment' ? 'No environment selected.' : 'Open a saved request to see its collection variables.')); continue; }
+    peek.append(ui.sectionHead(name ? `${label}: ${name}` : label));
+    if (!values) { peek.append(ui.hint(label === 'Environment' ? 'No environment selected.' : 'Open a saved request to see its collection variables.')); continue; }
     const on = values.filter((v) => v.key && v.enabled !== false && !v.disabled);
-    if (!on.length) { peek.append(h('div', { class: 'hint' }, 'No variables.')); continue; }
+    if (!on.length) { peek.append(ui.hint('No variables.')); continue; }
     peek.append(h('table', { class: 'grid' }, h('tbody', null, on.map((v) => {
       const secret = v.type === 'secret' || SECRET_HEADER.test(v.key) || /key$/i.test(v.key);
       const value = String(v.value ?? '');
       const cell = h('td', { class: 'v', title: secret ? '' : value }, secret ? '••••••••' : value);
       let shown = false;
       return h('tr', null, h('td', { title: v.key }, v.key), cell,
-        h('td', { class: 'r' }, secret ? h('button', {
-          class: 'btn icon small', title: 'Show value', 'aria-label': `Show ${v.key}`,
-          onclick: (e) => { shown = !shown; cell.textContent = shown ? value : '••••••••'; cell.title = shown ? value : ''; e.currentTarget.replaceChildren(icon(shown ? 'eyeOff' : 'eye')); },
-        }, icon('eye')) : null));
+        h('td', { class: 'r' }, secret ? ui.iconButton('eye', `Show ${v.key}`, (e) => { shown = !shown; cell.textContent = shown ? value : '••••••••'; cell.title = shown ? value : ''; e.currentTarget.replaceChildren(icon(shown ? 'eyeOff' : 'eye')); }, { size: 'small' }) : null));
     }))));
   }
-  peek.append(h('div', { class: 'actions' },
-    h('button', { class: 'btn small', onclick: () => { hideMenu(); if (state.activeEnv) editEnvironment(state.activeEnv); else editEnvironment(null); } }, state.activeEnv ? 'Edit environment' : 'New environment'),
-    h('button', { class: 'btn small', onclick: () => { hideMenu(); editEnvironment(GLOBALS_ID); } }, 'Edit globals')));
+  peek.append(ui.actions(
+    ui.button({ label: state.activeEnv ? 'Edit environment' : 'New environment', size: 'small', onClick: () => { hideMenu(); if (state.activeEnv) editEnvironment(state.activeEnv); else editEnvironment(null); } }),
+    ui.button({ label: 'Edit globals', size: 'small', onClick: () => { hideMenu(); editEnvironment(GLOBALS_ID); } })));
   pop.replaceChildren(peek);
   pop.setAttribute('role', 'dialog'); // a table and buttons, not a menu
   pop.setAttribute('aria-label', 'Variables in use');
@@ -3904,24 +3967,25 @@ function peekVariables(anchor) {
 
 // ---------- import ----------
 function openImport(start = 'file') {
-  const fileIn = h('input', { type: 'file', 'aria-label': 'Files to import', accept: '.json,.yaml,.yml,application/json,application/yaml', multiple: true, hidden: true, onchange: (e) => importFiles([...e.target.files]) });
+  const fileIn = ui.input({ type: 'file', 'aria-label': 'Files to import', accept: '.json,.yaml,.yml,application/json,application/yaml', multiple: true, hidden: true, onchange: (e) => importFiles([...e.target.files]) });
   const drop = h('div', {
-    class: 'drop',
+    class: 'empty-state drop',
     ondragover: (e) => { e.preventDefault(); },
     ondrop: (e) => { e.preventDefault(); importFiles([...e.dataTransfer.files]); },
   }, h('p', null, 'Drop Postman collections or environments (v2.1 JSON), or OpenAPI / Swagger specs (JSON or YAML), here.'),
-    h('button', { type: 'button', class: 'btn', onclick: () => fileIn.click() }, 'Choose files'), fileIn);
-  const curlIn = h('textarea', { class: 'code', 'aria-label': 'cURL command', rows: 10, spellcheck: 'false', placeholder: "curl -X POST 'https://api.example.com/items' \\\n  -H 'Authorization: Bearer …' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '{\"name\":\"x\"}'" });
-  const pasteIn = h('textarea', { class: 'code', 'aria-label': 'Postman collection, environment, or OpenAPI spec', rows: 10, spellcheck: 'false', placeholder: 'Paste a Postman collection or environment (JSON),\nor an OpenAPI / Swagger spec (JSON or YAML)' });
+    ui.button({ label: 'Choose files', size: 'small', onClick: () => fileIn.click() }), fileIn);
+  const curlIn = ui.textarea({ code: true, 'aria-label': 'cURL command', rows: 10, placeholder: "curl -X POST 'https://api.example.com/items' \\\n  -H 'Authorization: Bearer …' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '{\"name\":\"x\"}'" });
+  const pasteIn = ui.textarea({ code: true, 'aria-label': 'Postman collection, environment, or OpenAPI spec', rows: 10, placeholder: 'Paste a Postman collection or environment (JSON),\nor an OpenAPI / Swagger spec (JSON or YAML)' });
   const defs = [
-    { key: 'file', label: 'File', content: [drop, h('p', { class: 'hint' }, 'In Postman: ⋯ on a collection → Export → Collection v2.1. An OpenAPI spec becomes a collection with example bodies, auth and tests that check each response against the spec.')] },
-    { key: 'curl', label: 'cURL', content: [curlIn, h('div', { hidden: true }, h('button', { type: 'button', class: 'btn primary', 'data-import': 'curl', onclick: () => {
-      try { const ed = parseCurl(curlIn.value); closeDialog(); openTab(newTab({ ed, dirty: true })); toast('Imported from cURL'); } catch (e) { toast(e.message); }
-    } }, 'Import cURL'))] },
-    { key: 'paste', label: 'Paste', content: [pasteIn, h('div', { hidden: true }, h('button', { type: 'button', class: 'btn primary', 'data-import': 'paste', onclick: async () => {
-      try { await importJson(parseSpecText(pasteIn.value), 'The pasted text'); closeDialog(); } catch (e) { toast(e.message); }
-    } }, 'Import'))] },
+    { key: 'file', label: 'File', content: [drop, ui.hint('In Postman: ⋯ on a collection → Export → Collection v2.1. An OpenAPI spec becomes a collection with example bodies, auth and tests that check each response against the spec.')] },
+    { key: 'curl', label: 'cURL', content: [curlIn] },
+    { key: 'paste', label: 'Paste', content: [pasteIn] },
   ];
+  const run = {
+    file: () => fileIn.click(),
+    curl: () => { try { const ed = parseCurl(curlIn.value); closeDialog(); openTab(newTab({ ed, dirty: true })); toast('Imported from cURL'); } catch (e) { toast(e.message); } },
+    paste: async () => { try { await importJson(parseSpecText(pasteIn.value), 'The pasted text'); closeDialog(); } catch (e) { toast(e.message); } },
+  };
   let activeKey = 'file';
   const updateImport = () => {
     const btn = $('#dlgFoot .btn.primary');
@@ -3935,12 +3999,7 @@ function openImport(start = 'file') {
   const tabsAndPanes = dlgTabs(defs, (k) => { activeKey = k; updateImport(); });
   openDialog({
     title: 'Import', body: tabsAndPanes, onOpen: updateImport, focus: '#dlgBody .dlg-tabs .on',
-    buttons: [{ label: 'Import', primary: true, onClick: () => {
-      const active = [...tabsAndPanes[0].children].findIndex((b) => b.classList.contains('on'));
-      if (active === 0) fileIn.click();
-      else $(`#dlgBody [data-import="${active === 1 ? 'curl' : 'paste'}"]`).click();
-      return false;
-    } }],
+    buttons: [{ label: 'Import', primary: true, onClick: () => { run[activeKey](); return false; } }],
   });
   if (start !== 'file') $$('#dlgBody .dlg-tabs .seg-btn')[start === 'curl' ? 1 : 2].click();
   setTimeout(() => { if (start === 'curl') curlIn.focus(); }, 50);
@@ -4723,16 +4782,16 @@ function openCode() {
   const t = cur();
   if (!t) return;
   let lang = ls.get('apiman:codeLang', 'curl');
-  const mask = h('input', { type: 'checkbox', checked: true });
+  const maskCheck = ui.check({ label: 'Hide secrets', help: 'Masks tokens, API keys and cookies, so the code is safe to paste into chats and tickets.', checked: true, cls: 'dlg-after' });
+  const mask = maskCheck.input;
   const LANG_MODE = { curl: 'shell', httpie: 'shell', fetch: 'javascript', python: 'python', java: 'java', go: 'go', powershell: 'powershell' };
   const viewer = codeEditor({ readOnly: true, label: 'Generated code', cls: 'codegen' });
   const pre = { set textContent(v) { if (viewer.cm) { viewer.cm.setValue(v); viewer.cm.setOption('mode', CM_MODES[LANG_MODE[lang]] ?? null); } else viewer.querySelector('pre').textContent = v; },
                 get textContent() { return viewer.cm ? viewer.cm.getValue() : viewer.querySelector('pre').textContent; } };
-  const tabsBar = h('div', { class: 'seg dlg-tabs', role: 'tablist' });
+  const tabsBar = h('div', { class: 'seg dlg-tabs', role: 'radiogroup', 'aria-label': 'Language' });
   const draw = () => {
-    tabsBar.replaceChildren(...['curl', 'httpie', 'powershell', 'fetch', 'python', 'java', 'go'].filter((k) => GENERATORS[k]).map((k) => [k, GENERATORS[k]]).map(([k, g]) => h('button', {
-      type: 'button', class: `seg-btn ${k === lang ? 'on' : ''}`, role: 'tab', 'aria-selected': String(k === lang), onclick: () => { lang = k; ls.set('apiman:codeLang', k); draw(); tabsBar.querySelector('.on')?.focus(); },
-    }, g.label)));
+    ui.seg(['curl', 'httpie', 'powershell', 'fetch', 'python', 'java', 'go'].filter((k) => GENERATORS[k]).map((k) => [k, GENERATORS[k].label]), lang,
+      (k) => { lang = k; ls.set('apiman:codeLang', k); draw(); tabsBar.querySelector('.on')?.focus(); }, { into: tabsBar });
     const r = codeWire(mask.checked);
     pre.textContent = r.error ? `// ${r.error}` : GENERATORS[lang].gen(r.wire);
   };
@@ -4743,8 +4802,7 @@ function openCode() {
     cancel: 'Close',
     focus: '#dlgFoot .btn.primary',
     wide: true,
-    body: [tabsBar, viewer,
-      h('label', { class: 'check dlg-after' }, mask, h('span', null, 'Hide secrets', h('small', null, 'Masks tokens, API keys and cookies, so the code is safe to paste into chats and tickets.')))],
+    body: [tabsBar, viewer, maskCheck],
     buttons: [{ label: 'Copy', primary: true, onClick: async () => { await navigator.clipboard.writeText(pre.textContent); toast('Code copied'); return false; } }],
   });
 }
@@ -4753,13 +4811,13 @@ function openCode() {
 async function openRunner(cid, folderId) {
   if (!state.colList.length) { toast('Create or import a collection first.'); return; }
   await Promise.all(state.colList.map((c) => withCol(c.id).catch(() => {})));
-  const colSel = h('select');
-  const folderSel = h('select');
-  const iterIn = h('input', { type: 'number', min: '1', max: '1000', value: '1' });
-  const delayIn = h('input', { type: 'number', min: '0', max: '60000', value: '0' });
-  const stopOnFail = h('input', { type: 'checkbox' });
-  const keepVars = h('input', { type: 'checkbox' }); // opt-in: a run doesn't rewrite your files unless you ask
-  for (const c of state.colList) colSel.append(h('option', { value: c.id, ...(c.id === (cid || (cur() && cur().cid)) ? { selected: true } : {}) }, c.name));
+  const colSel = ui.select(state.colList.map((c) => [c.id, c.name]), { value: cid || (cur() && cur().cid) || state.colList[0].id });
+  const folderSel = ui.select([]);
+  const iterIn = ui.input({ type: 'number', num: true, min: '1', max: '1000', value: '1' });
+  const delayIn = ui.input({ type: 'number', num: true, min: '0', max: '60000', value: '0' });
+  const stopCheck = ui.check({ label: 'Stop on first failure' });
+  const keepCheck = ui.check({ label: 'Save variable changes', help: 'Values set by scripts (like a login token) are saved to the environment and collection.' }); // opt-in: a run doesn't rewrite your files unless you ask
+  const stopOnFail = stopCheck.input, keepVars = keepCheck.input;
   const fillFolders = () => {
     const col = state.cols[colSel.value];
     folderSel.replaceChildren(h('option', { value: '' }, 'Whole collection'));
@@ -4769,10 +4827,10 @@ async function openRunner(cid, folderId) {
   colSel.addEventListener('change', () => { folderId = null; fillFolders(); });
   fillFolders();
 
-  const summary = h('div', { class: 'runner-summary' });
-  const bar = h('div', { class: 'bar' }, h('div', { style: 'width:0%' }));
+  const summary = ui.meta([]);
+  const bar = ui.progress();
   const tbody = h('tbody');
-  const results = h('div', { hidden: true }, summary, bar,
+  const results = h('div', { id: 'runResults', hidden: true }, summary, bar,
     h('table', { class: 'grid' }, h('thead', null, h('tr', null, h('th', { class: 'tight' }, '#'), h('th', null, 'Request'), ...['Status', 'Time', 'Tests'].map((x) => h('th', { class: 'num' }, x)))), tbody));
   let ctrl = null;
 
@@ -4780,10 +4838,10 @@ async function openRunner(cid, folderId) {
     title: 'Collection runner',
     cancel: 'Close',
     body: [
-      h('div', { class: 'grid-2' }, h('div', { class: 'field' }, h('label', null, 'Collection'), colSel), h('div', { class: 'field' }, h('label', null, 'Folder'), folderSel)),
-      h('div', { class: 'grid-2' }, h('div', { class: 'field' }, h('label', null, 'Iterations'), iterIn), h('div', { class: 'field' }, h('label', null, 'Delay between requests (ms)'), delayIn)),
-      h('label', { class: 'check' }, keepVars, h('span', null, 'Save variable changes', h('small', null, 'Values set by scripts (like a login token) are saved to the environment and collection.'))),
-      h('label', { class: 'check' }, stopOnFail, h('span', null, 'Stop on first failure')),
+      h('div', { class: 'grid-2' }, ui.field('Collection', colSel), ui.field('Folder', folderSel)),
+      h('div', { class: 'grid-2' }, ui.field('Iterations', iterIn), ui.field('Delay between requests (ms)', delayIn)),
+      keepCheck,
+      stopCheck,
       results,
     ],
     onClose: () => { if (ctrl) ctrl.abort(); },
@@ -4811,22 +4869,21 @@ async function openRunner(cid, folderId) {
         stopOnFail: stopOnFail.checked, keepVars: keepVars.checked, signal: ctrl.signal,
         onResult: ({ it, idx, ed, out, tp, totals }) => {
           const { n, pass, fail, errors, totalMs, ok, c4, c5, total } = totals;
-          const sc = out.error ? 'err' : `s${String(out.res.status)[0]}`;
           tbody.append(h('tr', null,
             h('td', { class: 'tight' }, iterations > 1 ? `${it + 1}.${idx + 1}` : String(n)),
-            h('td', null, h('span', { class: `mtag ${ed.method}` }, ed.method), ' ', ed.name,
-              ...out.tests.filter((x) => x.passed === false).map((x) => h('div', { class: 'runner-fail' }, h('span', { class: 'pill err' }, 'Fail'), `${x.name}: ${x.error}`)),
-              out.error ? h('div', { class: 'runner-fail' }, h('span', { class: 'pill err' }, 'Error'), out.error) : null),
-            h('td', { class: 'num' }, (out.error ? '–' : h('span', { class: `status-code ${sc}` }, String(out.res.status)))),
+            h('td', null, ui.method(ed.method), ' ', ed.name,
+              ...out.tests.filter((x) => x.passed === false).map((x) => ui.result('err', 'Fail', `${x.name}: ${x.error}`, null, { compact: true })),
+              out.error ? ui.result('err', 'Error', out.error, null, { compact: true }) : null),
+            h('td', { class: 'num' }, (out.error ? '–' : ui.status(out.res.status))),
             h('td', { class: 'num' }, out.res && !out.error ? fmtMs(out.res.timeMs) : '–'),
             h('td', { class: 'num' }, out.tests.length ? `${tp}/${out.tests.length}` : '–')));
           bar.firstChild.style.width = `${(n / total) * 100}%`;
-          bar.classList.toggle('has-fail', fail + errors + c5 > 0);
-          bar.classList.toggle('has-warn', !(fail + errors + c5) && c4 > 0);
+          bar.classList.toggle('err', fail + errors + c5 > 0);
+          bar.classList.toggle('warn', !(fail + errors + c5) && c4 > 0);
           const outcome = [`${ok} succeeded`, ...(c4 ? [`${c4} returned 4xx`] : []), ...(c5 ? [`${c5} returned 5xx`] : []), ...(errors ? [`${errors} not sent`] : [])].join(', ');
           summary.replaceChildren(
-            h('span', null, h('b', null, `${n} of ${total}`), ` requests: ${outcome}`),
-            h('span', null, 'Tests: ', h('span', { class: `big ${pass ? 'pass' : 'zero'}` }, `${pass} passed`), ' ', h('span', { class: `big ${fail ? 'fail' : 'zero'}` }, `${fail} failed`)),
+            h('span', null, ui.value(`${n} of ${total}`), ` requests: ${outcome}`),
+            h('span', null, 'Tests: ', ui.value(`${pass} passed`, pass ? 'ok' : 'muted'), ' ', ui.value(`${fail} failed`, fail ? 'err' : 'muted')),
             h('span', null, `Average ${n - errors ? fmtMs(Math.round(totalMs / Math.max(1, n - errors))) : '–'}`));
         },
       });
@@ -4930,15 +4987,7 @@ function openSettings(initial = null, layoutSnap = null) {
   let saved = false, reopening = false;
   let syncSizesRef = null;
   const preview = () => { applyAppearance(draft); requestAnimationFrame(() => requestAnimationFrame(() => syncSizesRef && syncSizesRef())); };
-  const seg = (key, options, label) => {
-    const bar = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': label });
-    const draw = () => bar.replaceChildren(...options.map(([v, l]) => h('button', {
-      type: 'button', class: `seg-btn ${draft[key] === v ? 'on' : ''}`, role: 'radio', 'aria-checked': String(draft[key] === v),
-      onclick: () => { draft[key] = v; draw(); bar.querySelector('[aria-checked="true"]')?.focus(); if (key === 'theme') previewTheme(); else preview(); },
-    }, l)));
-    draw();
-    return bar;
-  };
+  const seg = (key, options, label) => ui.seg(options, draft[key], (v) => { draft[key] = v; if (key === 'theme') previewTheme(); else preview(); }, { label });
   const previewTheme = () => {
     if (draft.theme === 'light' || draft.theme === 'dark') document.documentElement.dataset.theme = draft.theme;
     else delete document.documentElement.dataset.theme;
@@ -4948,15 +4997,13 @@ function openSettings(initial = null, layoutSnap = null) {
   // Every size is a slider AND an exact number field, kept in sync.
   const slider = (key, min, max, step, unit, label, scale = 1) => {
     const shown = (v) => String(Math.round(v * scale * 100) / 100);
-    const num = h('input', { type: 'number', class: 'num-input', min: String(min * scale), max: String(max * scale), step: String(step * scale), value: shown(draft[key]), 'aria-label': `${label} (${unit})` });
-    const range = h('input', { type: 'range', min: String(min), max: String(max), step: String(step), value: String(draft[key]), 'aria-label': label });
+    const num = ui.input({ type: 'number', size: 'small', num: true, min: String(min * scale), max: String(max * scale), step: String(step * scale), value: shown(draft[key]), 'aria-label': `${label} (${unit})` });
+    const range = ui.input({ type: 'range', min: String(min), max: String(max), step: String(step), value: String(draft[key]), 'aria-label': label });
     range.addEventListener('input', () => { draft[key] = Number(range.value); num.value = shown(draft[key]); preview(); });
     num.addEventListener('change', () => { draft[key] = clampNum(Number(num.value) / scale, min, max, draft[key]); range.value = String(draft[key]); num.value = shown(draft[key]); preview(); });
     return h('div', { class: 'field' }, h('span', { class: 'label' }, label), h('div', { class: 'slider-row' }, range, num, h('span', { class: 'unit' }, unit)));
   };
-  const select = (key, options, label) => h('div', { class: 'field' }, h('label', null, label),
-    h('select', { onchange: (e) => { draft[key] = e.target.value; preview(); } },
-      ...Object.entries(options).map(([v, [l]]) => h('option', { value: v, ...(draft[key] === v ? { selected: true } : {}) }, l))));
+  const select = (key, options, label) => ui.field(label, ui.select(Object.entries(options).map(([v, [l]]) => [v, l]), { value: draft[key], onChange: (e) => { draft[key] = e.target.value; preview(); } }));
   if (draft.densityScale == null) draft.densityScale = DENSITY[draft.density] || 1;
   if (initial) setTimeout(() => { if (initial.theme === 'light' || initial.theme === 'dark') document.documentElement.dataset.theme = initial.theme; else delete document.documentElement.dataset.theme; applyAppearance(draft); }, 0);
   // exact panel sizes (applied immediately, like dragging)
@@ -4964,11 +5011,11 @@ function openSettings(initial = null, layoutSnap = null) {
   let unit = ls.get('apiman:sizeUnit', 'px');
   const PER = { px: 1, in: 96, cm: 96 / 2.54 };
   const show = (px) => (unit === 'px' ? String(Math.round(px)) : String(Math.round((px / PER[unit]) * 100) / 100));
-  const sideNum = h('input', { type: 'number', class: 'num-input', step: 'any', 'aria-label': 'Sidebar width' });
-  const reqNum = h('input', { type: 'number', class: 'num-input', step: 'any', 'aria-label': 'Request pane size' });
-  const splitNum = h('input', { type: 'number', class: 'num-input', min: '15', max: '85', step: '0.5', 'aria-label': 'Request pane share in percent' });
-  const unitSel = h('select', { class: 'unit-select', 'aria-label': 'Size unit' }, ...['px', 'in', 'cm'].map((u) => h('option', { value: u, ...(u === unit ? { selected: true } : {}) }, u)));
-  const unitTxt = () => $$('.size-unit', unitSel.closest('.dlg-body') || document).forEach((el) => { el.textContent = unit; });
+  const sideNum = ui.input({ type: 'number', size: 'small', num: true, step: 'any', 'aria-label': 'Sidebar width' });
+  const reqNum = ui.input({ type: 'number', size: 'small', num: true, step: 'any', 'aria-label': 'Request pane size' });
+  const splitNum = ui.input({ type: 'number', size: 'small', num: true, min: '15', max: '85', step: '0.5', 'aria-label': 'Request pane share in percent' });
+  const unitSel = ui.select([['px', 'px'], ['in', 'in'], ['cm', 'cm']], { value: unit, size: 'small', 'aria-label': 'Size unit' });
+  const unitTxt = () => { const el = $('#reqSizeUnit'); if (el) el.textContent = unit; };
   const syncSizes = () => {
     const z = initResizers.sizes();
     sideNum.value = show($('.side').getBoundingClientRect().width || z.side);
@@ -4986,18 +5033,16 @@ function openSettings(initial = null, layoutSnap = null) {
   unitSel.addEventListener('change', () => { unit = unitSel.value; ls.set('apiman:sizeUnit', unit); syncSizes(); unitTxt(); });
   setTimeout(syncSizes, 0);
   const swatches = h('div', { class: 'swatches', role: 'radiogroup', 'aria-label': 'Accent colour' });
-  const custom = h('input', { type: 'color', value: draft.accentCustom || '#2560cf', 'aria-label': 'Custom accent colour', title: 'Custom colour',
-    oninput: (e) => { draft.accent = 'custom'; draft.accentCustom = e.target.value; drawSwatches(); preview(); } });
-  const drawSwatches = () => swatches.replaceChildren(...Object.entries(ACCENTS).map(([k, [light, darkC]]) => h('button', {
-    type: 'button', class: `swatch ${draft.accent === k ? 'on' : ''}`, role: 'radio', 'aria-checked': String(draft.accent === k), 'aria-label': k, title: k,
-    style: `--sw: ${effectiveTheme(draft) === 'dark' ? darkC : light}`, onclick: () => { draft.accent = k; drawSwatches(); preview(); },
-  })), h('label', { class: `swatch custom ${draft.accent === 'custom' ? 'on' : ''}`, title: 'Custom colour' }, custom));
+  const drawSwatches = () => ui.swatches(swatches, Object.entries(ACCENTS).map(([k, [light, darkC]]) => [k, effectiveTheme(draft) === 'dark' ? darkC : light]), draft.accent,
+    (k) => { draft.accent = k; drawSwatches(); preview(); },
+    { customValue: draft.accentCustom || '#2560cf', onCustom: (v) => { draft.accent = 'custom'; draft.accentCustom = v; drawSwatches(); preview(); } });
   drawSwatches();
-  const timeout = h('input', { type: 'number', min: '1', max: '600', value: String(s.timeout) });
-  const follow = h('input', { type: 'checkbox', checked: s.followRedirects });
-  const hist = h('input', { type: 'checkbox', checked: s.history });
-  const insecure = h('input', { type: 'checkbox', checked: s.insecure });
-  const wrap = h('input', { type: 'checkbox', checked: draft.wrap !== false, onchange: (e) => { draft.wrap = e.target.checked; preview(); } });
+  const timeout = ui.input({ type: 'number', num: true, min: '1', max: '600', value: String(s.timeout) });
+  const followCheck = ui.check({ label: 'Follow redirects', help: 'Credentials are never forwarded to a different site, and HTTPS never downgrades to HTTP.', checked: s.followRedirects });
+  const histCheck = ui.check({ label: 'Keep request history', help: 'Stored only in this browser. It includes request details as you typed them.', checked: s.history });
+  const insecureCheck = ui.check({ label: 'Skip TLS certificate checks', help: ['Last resort for internal servers with self-signed certificates: it lets an attacker on the network read your traffic. Prefer starting the server with ', h('code', { class: 'inline' }, '--ca-file'), '.'], checked: s.insecure });
+  const wrapCheck = ui.check({ label: 'Wrap long lines in responses', checked: draft.wrap !== false, cls: 'align-end', onChange: (e) => { draft.wrap = e.target.checked; preview(); } });
+  const follow = followCheck.input, hist = histCheck.input, insecure = insecureCheck.input;
 
   const appearance = [
     h('div', { class: 'grid-2' },
@@ -5015,27 +5060,26 @@ function openSettings(initial = null, layoutSnap = null) {
       slider('lineHeight', 1.3, 1.9, 0.05, '×', 'Code line height')),
     h('div', { class: 'grid-2' },
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Tab width in editors'), seg('tabSize', [[2, '2 spaces'], [4, '4 spaces'], [8, '8 spaces']], 'Tab width')),
-      h('label', { class: 'check align-end' }, wrap, h('span', null, 'Wrap long lines in responses'))),
+      wrapCheck),
     h('div', { class: 'grid-2 desktop-only' },
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Request and response'), seg('layout', [['auto', 'Side by side'], ['stacked', 'Stacked']], 'Layout'),
-        h('span', { class: 'hint', id: 'autoStackNote', hidden: document.documentElement.dataset.autoStack !== 'true' }, 'Stacked automatically right now: side by side, each pane would be too narrow.')),
+        ui.hint('Stacked automatically right now: side by side, each pane would be too narrow.', { id: 'autoStackNote', hidden: document.documentElement.dataset.autoStack !== 'true' })),
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Sidebar'), seg('sidePosition', [['left', 'Left'], ['right', 'Right']], 'Sidebar position'))),
     h('div', { class: 'grid-3 desktop-only' },
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Sidebar width'), h('div', { class: 'slider-row' }, sideNum, unitSel)),
-      h('div', { class: 'field' }, h('span', { class: 'label', id: 'reqSizeLabel' }, initResizers.isStacked() ? 'Request pane height' : 'Request pane width'), h('div', { class: 'slider-row' }, reqNum, h('span', { class: 'unit size-unit' }, unit))),
+      h('div', { class: 'field' }, h('span', { class: 'label', id: 'reqSizeLabel' }, initResizers.isStacked() ? 'Request pane height' : 'Request pane width'), h('div', { class: 'slider-row' }, reqNum, h('span', { class: 'unit', id: 'reqSizeUnit' }, unit))),
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Request pane share'), h('div', { class: 'slider-row' }, splitNum, h('span', { class: 'unit' }, '%')))),
     h('div', { class: 'field-row desktop-only' },
-      h('button', { type: 'button', class: 'btn small', onclick: () => { initResizers.reset(); syncSizes(); toast('Panel sizes reset'); } }, 'Reset panel sizes'),
-      h('span', { class: 'hint' }, 'Drag the lines between panels to resize them (sizes show while dragging). Double-click a line to reset it. Cmd/Ctrl+B hides the sidebar.')),
+      ui.button({ label: 'Reset panel sizes', size: 'small', onClick: () => { initResizers.reset(); syncSizes(); toast('Panel sizes reset'); } }),
+      ui.hint('Drag the lines between panels to resize them (sizes show while dragging). Double-click a line to reset it. Cmd/Ctrl+B hides the sidebar.')),
   ];
   const requests = [
-    h('div', { class: 'field narrow' }, h('label', null, 'Request timeout (seconds)'), timeout),
-    h('label', { class: 'check' }, follow, h('span', null, 'Follow redirects', h('small', null, 'Credentials are never forwarded to a different site, and HTTPS never downgrades to HTTP.'))),
-    h('label', { class: 'check' }, hist, h('span', null, 'Keep request history', h('small', null, 'Stored only in this browser. It includes request details as you typed them.'))),
-    backend.mode === 'local'
-      ? h('label', { class: 'check' }, insecure, h('span', null, 'Skip TLS certificate checks', h('small', null, 'Last resort for internal servers with self-signed certificates: it lets an attacker on the network read your traffic. Prefer starting the server with ', h('code', { class: 'inline' }, '--ca-file'), '.')))
-      : h('p', { class: 'hint' }, 'Website mode: the browser sends requests, so certificate and CORS rules apply. Run ApiMan locally (python3 server.py) to call any API, including internal ones over VPN.'),
-    h('p', { class: 'hint' }, $('#dataDir').textContent),
+    ui.field('Request timeout (seconds)', timeout, { narrow: true }),
+    followCheck,
+    histCheck,
+    backend.mode === 'local' ? insecureCheck
+      : ui.hint('Website mode: the browser sends requests, so certificate and CORS rules apply. Run ApiMan locally (python3 server.py) to call any API, including internal ones over VPN.'),
+    ui.hint($('#dataDir').textContent),
   ];
   openDialog({
     title: 'Settings',
@@ -5433,13 +5477,13 @@ async function start() {
     const seg = respRow.querySelector('.seg'), meta = $('#respStatus'), alt = $('#respMetaAlt'), tools = $('#respTools');
     const view = tools.querySelector(':scope > .seg');
     alt.replaceChildren(...[...meta.children].map((el) => el.cloneNode(true)));
-    tools.classList.remove('wrap', 'icons', 'short', 'squeeze', 'no-size', 'no-time');
+    tools.classList.remove('wrap', 'icons', 'no-reason', 'squeeze', 'no-size', 'no-time');
     view.querySelectorAll('.ovf').forEach((b) => b.classList.remove('ovf'));
     const over = () => { // anything past the content edge (into the padding) counts as overflow
       const edge = tools.getBoundingClientRect().right - parseFloat(getComputedStyle(tools).paddingRight) + 0.5;
       return tools.scrollWidth > tools.clientWidth + 1 || [...tools.querySelectorAll(':scope > *, .tool-group > *')].some((el) => el.getClientRects().length && el.getBoundingClientRect().right > edge);
     };
-    for (const step of ['short', 'icons', 'no-size', 'no-time']) if (over()) tools.classList.add(step);
+    for (const step of ['no-reason', 'icons', 'no-size', 'no-time']) if (over()) tools.classList.add(step);
     if (over()) { tools.classList.add('squeeze'); fitTabs(view); tools.classList.remove('squeeze'); } // last: hide extra views, keep the rest whole
     else fitTabs(view);
     if (over()) tools.classList.add('wrap');
@@ -5480,7 +5524,7 @@ async function start() {
   $$('.pane-tools .seg').forEach(watchOverflow);
   new MutationObserver(() => {
     const rows = $$('#sideBody .row');
-    const keep = rows.find((r) => r.dataset.key && r.dataset.key === state.focusKey) || rows.find((r) => r.classList.contains('active')) || rows[0];
+    const keep = rows.find((r) => r.dataset.key && r.dataset.key === state.focusKey) || rows.find((r) => r.classList.contains('on')) || rows[0];
     rows.forEach((r) => { if (r.tabIndex !== (r === keep ? 0 : -1)) r.tabIndex = r === keep ? 0 : -1; });
   }).observe($('#sideBody'), { childList: true, subtree: true });
   // Sidebar tree keyboard: Up/Down move, Right/Left open/close, Space activates (Enter is handled per row).
@@ -5553,7 +5597,7 @@ async function start() {
     const i = [...$$('#tabstrip .rtab')].indexOf(tab);
     showMenu(tab, [
       { label: 'Duplicate tab', onClick: () => { const t = state.tabs[i]; openTab(newTab({ ed: { ...JSON.parse(JSON.stringify(t.ed)), name: `${t.ed.name} copy` }, dirty: true })); } },
-      ...(state.tabs[i].cid ? [{ label: 'Reveal in sidebar', onClick: () => { const t = state.tabs[i]; state.view = 'collections'; state.open.add(t.cid); renderSidebar(); requestAnimationFrame(() => { const row = $(`#sideBody [data-key="r:${t.cid}:${t.itemId}"]`) || $$('#sideBody .row.active')[0]; if (row) { row.scrollIntoView({ block: 'nearest' }); row.focus(); } }); } }] : []),
+      ...(state.tabs[i].cid ? [{ label: 'Reveal in sidebar', onClick: () => { const t = state.tabs[i]; state.view = 'collections'; state.open.add(t.cid); renderSidebar(); requestAnimationFrame(() => { const row = $(`#sideBody [data-key="r:${t.cid}:${t.itemId}"]`) || $$('#sideBody .row.on')[0]; if (row) { row.scrollIntoView({ block: 'nearest' }); row.focus(); } }); } }] : []),
       '-',
       { label: 'Close tab', onClick: () => closeTab(i) },
       { label: 'Close other tabs', onClick: async () => { const keep = state.tabs[i]; for (let j = state.tabs.length - 1; j >= 0; j--) if (state.tabs[j] !== keep) await closeTab(j); } },
@@ -5651,7 +5695,6 @@ async function start() {
     badge.title = 'Requests go out from this computer, through your VPN, with no CORS limits.';
     const info = await api('GET', '/api/info');
     // one line: "Data folder: …/end/of/the/path", the whole path in the tooltip
-    $('#dataDir').classList.add('path');
     $('#dataDir').replaceChildren(h('span', null, 'Data folder:'), ' ', h('span', { class: 'dd-path', title: info.dataDir }, h('bdi', null, info.dataDir)));
   } else {
     backend = makeBackend('browser');

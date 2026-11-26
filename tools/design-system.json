@@ -1,0 +1,290 @@
+{
+  "about": "The complete list of classes ApiMan's UI may use, by component (see DESIGN.md). tools/ui-lint.mjs fails on any class used in app.js, index.html or app.css that is not listed here.",
+  "vocabulary": {
+    "size": [
+      "small"
+    ],
+    "tone": [
+      "ok",
+      "warn",
+      "err",
+      "muted"
+    ],
+    "state": [
+      "on",
+      "off",
+      "open",
+      "busy",
+      "done",
+      "show",
+      "stale",
+      "clipped",
+      "menu-open",
+      "dragging",
+      "ovf"
+    ]
+  },
+  "components": {
+    "Button": [
+      "btn",
+      "primary",
+      "ghost",
+      "danger",
+      "solid",
+      "icon",
+      "lbl"
+    ],
+    "Input": [
+      "bare",
+      "code",
+      "num",
+      "title",
+      "prose",
+      "short"
+    ],
+    "Field": [
+      "field",
+      "narrow",
+      "grow",
+      "grid-2",
+      "grid-3",
+      "field-row",
+      "secret-field",
+      "slider-row",
+      "unit",
+      "swatches",
+      "swatch",
+      "custom"
+    ],
+    "Check": [
+      "check",
+      "align-end"
+    ],
+    "Segmented": [
+      "seg",
+      "block",
+      "seg-btn",
+      "tab",
+      "seg-more"
+    ],
+    "Badge": [
+      "pill",
+      "count",
+      "status-code",
+      "s2",
+      "s3",
+      "s4",
+      "s5",
+      "mtag",
+      "GET",
+      "POST",
+      "PUT",
+      "PATCH",
+      "DELETE",
+      "HEAD",
+      "OPTIONS"
+    ],
+    "Dot": [
+      "dot"
+    ],
+    "Text": [
+      "label",
+      "hint",
+      "one-line",
+      "note",
+      "inline",
+      "code-block",
+      "pre-line"
+    ],
+    "Toolbar": [
+      "pane-tools",
+      "boxed",
+      "tool-group",
+      "spacer",
+      "actions",
+      "icons",
+      "squeeze",
+      "wrap",
+      "no-body",
+      "no-size",
+      "no-time"
+    ],
+    "SectionHead": [
+      "section-head"
+    ],
+    "Meta": [
+      "meta",
+      "m-reason",
+      "m-time",
+      "m-size",
+      "sending",
+      "elapsed"
+    ],
+    "TreeRow": [
+      "row",
+      "collection",
+      "caret",
+      "folder-ico",
+      "name",
+      "sub",
+      "time",
+      "acts"
+    ],
+    "ResultRow": [
+      "test-row",
+      "compact",
+      "msg"
+    ],
+    "Log": [
+      "console",
+      "line",
+      "src"
+    ],
+    "Table": [
+      "kv",
+      "grid",
+      "chk",
+      "type",
+      "act",
+      "file-pick",
+      "fname",
+      "tight",
+      "v",
+      "r",
+      "mono"
+    ],
+    "CodeView": [
+      "code-editor",
+      "fill",
+      "readonly",
+      "codegen",
+      "editor-host",
+      "out",
+      "line-diff",
+      "n",
+      "sign",
+      "del",
+      "ins",
+      "gap",
+      "preview",
+      "docs-preview",
+      "j-key",
+      "j-str",
+      "j-num",
+      "j-lit"
+    ],
+    "EmptyState": [
+      "empty-state",
+      "drop"
+    ],
+    "Dialog": [
+      "confirm",
+      "wide",
+      "drawer",
+      "docked",
+      "dlg-shell",
+      "dlg-head",
+      "dlg-body",
+      "tall",
+      "dlg-foot",
+      "push-left",
+      "dlg-tabs",
+      "dlg-after"
+    ],
+    "Menu": [
+      "popover",
+      "mi",
+      "sep",
+      "mi-tab",
+      "mi-name",
+      "mi-sub",
+      "peek",
+      "ctx-anchor"
+    ],
+    "Toast": [
+      "toast"
+    ],
+    "Progress": [
+      "bar"
+    ],
+    "DocumentTabs": [
+      "tabstrip",
+      "rtab",
+      "tname",
+      "x",
+      "newtab",
+      "alltabs"
+    ],
+    "RequestBar": [
+      "reqbar",
+      "url-wrap",
+      "url-hl",
+      "send",
+      "resolved"
+    ]
+  },
+  "regions": [
+    "app",
+    "top",
+    "brand",
+    "logo-bg",
+    "wordmark",
+    "top-actions",
+    "top-end",
+    "env-picker",
+    "side",
+    "side-tabs",
+    "side-search",
+    "side-body",
+    "side-section",
+    "side-foot",
+    "data-dir",
+    "dd-path",
+    "side-open",
+    "work",
+    "welcome",
+    "welcome-inner",
+    "welcome-cols",
+    "shortcuts",
+    "editor",
+    "titlebar",
+    "crumb",
+    "split",
+    "pane-col",
+    "req-col",
+    "resp-col",
+    "resizer",
+    "resizing",
+    "rows",
+    "pane-max",
+    "tabs",
+    "pane",
+    "resp-body",
+    "ws",
+    "ws-log",
+    "ws-compose",
+    "drag-tip",
+    "drawer-open",
+    "drawer-over",
+    "sr-only",
+    "desktop-only",
+    "fade-left",
+    "fade-right",
+    "skip-link"
+  ],
+  "vendor": {
+    "prefixes": [
+      "CodeMirror",
+      "cm-"
+    ],
+    "note": "CodeMirror's own classes, themed in the CodeView section"
+  },
+  "componentFunctions": [
+    "ui",
+    "kvTable",
+    "codeEditor",
+    "renderDialog",
+    "showMenu",
+    "fitTabs"
+  ]
+}

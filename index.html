@@ -47,8 +47,8 @@
     <div class="spacer"></div>
     <div class="env-picker">
       <label for="envSelect" class="sr-only">Environment</label>
-      <span class="env-dot" id="envDot" aria-hidden="true"></span>
-      <select id="envSelect" title="Active environment"></select>
+      <span class="dot" id="envDot" aria-hidden="true"></span>
+      <select id="envSelect" class="bare" title="Active environment"></select>
       <button id="btnEnvPeek" class="btn icon" title="Quick look at variables" aria-label="Quick look at variables">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M1.5 10S4.8 4 10 4s8.5 6 8.5 6-3.3 6-8.5 6S1.5 10 1.5 10Z" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="10" cy="10" r="2.6" fill="currentColor"/></svg>
       </button>
@@ -92,20 +92,20 @@
     <div class="editor" id="editor" hidden>
       <div class="titlebar">
         <nav class="crumb" id="crumb" aria-label="Location"></nav>
-        <input id="reqName" class="name-input" aria-label="Request name" spellcheck="false">
-        <span class="dirty-dot" id="dirtyDot" role="img" aria-label="Unsaved changes" title="Unsaved changes" hidden></span>
+        <input id="reqName" class="title" aria-label="Request name" spellcheck="false">
+        <span class="dot warn" id="dirtyDot" role="img" aria-label="Unsaved changes" title="Unsaved changes" hidden></span>
         <div class="spacer"></div>
         <button id="btnCode" class="btn ghost" title="Generate code">&lt;/&gt; Code</button>
         <button id="btnSave" class="btn" title="Save (Ctrl/Cmd+S)">Save</button>
       </div>
 
       <div class="reqbar" id="reqbar" data-method="GET">
-        <select id="method" aria-label="Method">
+        <select id="method" class="bare" aria-label="Method">
           <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option>
           <option>DELETE</option><option>HEAD</option><option>OPTIONS</option>
         </select>
         <div class="url-wrap"><div class="url-hl" id="urlHl" aria-hidden="true"></div>
-  <input id="url" placeholder="Enter a URL, e.g. {{baseUrl}}/users" aria-label="URL" spellcheck="false" autocomplete="off"></div>
+  <input id="url" class="bare code" placeholder="Enter a URL, e.g. {{baseUrl}}/users" aria-label="URL" spellcheck="false" autocomplete="off"></div>
         <button class="send" id="btnSend" title="Send (Ctrl/Cmd+Enter)">Send</button>
       </div>
       <div class="resolved" id="resolved" aria-live="polite"></div>
@@ -169,11 +169,11 @@
             <button class="tab" role="tab" id="tab-rdiff" aria-controls="pane-rdiff" aria-selected="false" data-tab="rdiff" title="Compare with the previous response, a pinned one, or another environment">Diff<span class="count" id="cntRDiff"></span></button>
             <button class="tab" role="tab" id="tab-rconsole" aria-controls="pane-rconsole" aria-selected="false" data-tab="rconsole">Console<span class="count" id="cntRConsole"></span></button>
             </div>
-            <div class="resp-meta" id="respStatus" role="status" aria-live="polite"></div>
+            <div class="meta sr-only" id="respStatus" role="status" aria-live="polite"></div>
             <button class="btn icon small pane-max" data-max="resp" aria-pressed="false" title="Maximise the response pane" aria-label="Maximise the response pane"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 8V4h4M16 12v4h-4M4 4l5 5M16 16l-5-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
           </div>
           <div class="pane-tools" id="respTools" hidden>
-            <span class="resp-meta-alt" id="respMetaAlt" aria-hidden="true"></span>
+            <span class="meta" id="respMetaAlt" aria-hidden="true"></span>
             <div class="seg" role="radiogroup" aria-label="Body view">
               <button class="seg-btn on" role="radio" aria-checked="true" data-view="pretty">Pretty</button>
               <button class="seg-btn" role="radio" aria-checked="false" data-view="raw">Raw</button>
@@ -187,9 +187,9 @@
             </div>
           </div>
           <div class="pane" role="tabpanel" id="pane-rbody" aria-labelledby="tab-rbody" data-pane="rbody">
-            <div class="find-bar" id="findBar" role="search" hidden>
-              <input id="findInput" type="search" placeholder="Find in response" aria-label="Find in response" spellcheck="false" autocomplete="off">
-              <span class="find-count" id="findCount" aria-live="polite"></span>
+            <div class="pane-tools boxed" id="findBar" role="search" hidden>
+              <input id="findInput" class="small code" type="search" placeholder="Find in response" aria-label="Find in response" spellcheck="false" autocomplete="off">
+              <span class="count" id="findCount" aria-live="polite"></span>
               <button class="btn small ghost" id="findCase" aria-pressed="false" title="Match case">Aa</button>
               <button class="btn icon small" id="findPrev" title="Previous match (Shift+Enter)" aria-label="Previous match"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 12.5l5-5 5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
               <button class="btn icon small" id="findNext" title="Next match (Enter)" aria-label="Next match"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 7.5l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
@@ -197,10 +197,10 @@
             </div>
             <div id="respBody" class="resp-body"></div>
           </div>
-          <div class="pane" role="tabpanel" id="pane-rheaders" aria-labelledby="tab-rheaders" data-pane="rheaders" hidden><table class="grid" id="respHeaders"></table></div>
+          <div class="pane" role="tabpanel" id="pane-rheaders" aria-labelledby="tab-rheaders" data-pane="rheaders" hidden><table class="grid boxed" id="respHeaders"></table></div>
           <div class="pane" role="tabpanel" id="pane-rcookies" aria-labelledby="tab-rcookies" data-pane="rcookies" hidden><div id="respCookies"></div></div>
           <div class="pane" role="tabpanel" id="pane-rtests" aria-labelledby="tab-rtests" data-pane="rtests" hidden><div id="respTests"></div></div>
-          <div class="pane" role="tabpanel" id="pane-rdiff" aria-labelledby="tab-rdiff" data-pane="rdiff" hidden><div id="respDiff" class="diff"></div></div>
+          <div class="pane" role="tabpanel" id="pane-rdiff" aria-labelledby="tab-rdiff" data-pane="rdiff" hidden><div id="respDiff"></div></div>
           <div class="pane" role="tabpanel" id="pane-rconsole" aria-labelledby="tab-rconsole" data-pane="rconsole" hidden><div id="respConsole" class="console"></div></div>
         </section>
       </div>
