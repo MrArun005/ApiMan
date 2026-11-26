@@ -68,7 +68,10 @@ const measure = () => page.evaluate(() => {
     }
     // children never spill out of their bar
     const br = R(bar);
-    for (const k of kids) { const r = R(k); if (r.right > br.right + 1 || r.bottom > br.bottom + 1) fails.push(`${name(k)} spills out of ${name(bar)}`); }
+    // ...and stay inside its content box: crossing into the padding breaks the alignment with the content below
+    const pad = parseFloat(getComputedStyle(bar).paddingRight) || 0;
+    const inner = bar.matches('#respTools, .pane-tools') ? [...kids, ...bar.querySelectorAll('.tool-group > *')].filter((k) => vis(k) && R(k).width > 1) : kids;
+    for (const k of inner) { const r = R(k); if (r.right > br.right - pad + 1 || r.bottom > br.bottom + 1) fails.push(`${name(k)} spills out of ${name(bar)}`); }
   }
   // 5. side by side: both tab rows share one height, and the maximise buttons sit at the same inset
   if (!stacked && !phone) {

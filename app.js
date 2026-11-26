@@ -1710,8 +1710,9 @@ function showMenu(anchor, items) {
   const pop = $('#popover');
   const row = anchor.closest('.row');
   pop.setAttribute('role', 'menu');
+  pop.removeAttribute('aria-label');
   pop.replaceChildren(...items.map((it) => (it === '-' ? h('div', { class: 'sep', role: 'separator' })
-    : h('button', { class: `mi ${it.danger ? 'danger' : ''}`, role: 'menuitem', onclick: () => { hideMenu(); it.onClick(); } }, it.label))));
+    : h('button', { class: `mi ${it.danger ? 'danger' : ''} ${it.current ? 'cur' : ''}`, role: 'menuitem', 'aria-current': it.current ? 'true' : null, onclick: () => { hideMenu(); it.onClick(); } }, it.label))));
   placePopover(pop, anchor);
   anchor.setAttribute('aria-expanded', 'true');
   showMenu.anchor = anchor;
@@ -1727,7 +1728,8 @@ function fitTabs(seg) {
   let more = seg.nextElementSibling?.classList.contains('seg-more') ? seg.nextElementSibling : null;
   if (!seg.getClientRects().length || seg.scrollWidth <= seg.clientWidth + 1) { if (more) more.hidden = true; return; }
   if (!more) {
-    more = h('button', { type: 'button', class: 'btn icon small seg-more', title: 'More tabs', 'aria-label': 'More tabs', 'aria-haspopup': 'menu', 'aria-expanded': 'false' }, icon('dots'));
+    const what = seg.getAttribute('role') === 'radiogroup' ? 'More options' : 'More tabs';
+    more = h('button', { type: 'button', class: 'btn icon small seg-more', title: what, 'aria-label': what, 'aria-haspopup': 'menu', 'aria-expanded': 'false' }, icon('dots'));
     more.addEventListener('click', () => showMenu(more, btns.filter((b) => b.classList.contains('ovf') && !b.disabled).map((b) => {
       const name = [...b.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim() || b.textContent.trim();
       const count = b.querySelector('.count:not(.dot)')?.textContent.trim();
@@ -1961,6 +1963,7 @@ function renderTabs() {
       onclick: (e) => showMenu(e.currentTarget, state.tabs.map((t, i) => ({
         label: h('span', { class: 'mi-tab' }, h('span', { class: `mtag ${t.ed.method}` }, t.ed.method), h('span', { class: 'mi-name' }, t.ed.name, t.dirty ? h('span', { class: 'dirty-dot', 'aria-label': ' (unsaved)' }) : null),
           h('span', { class: 'mi-sub' }, (t.ed.url || '').replace(/^[a-z]+:\/\//i, '') || 'no URL yet'), i === state.active ? h('span', { class: 'mi-sub' }, 'current') : null),
+        current: i === state.active,
         onClick: () => { state.active = i; persistTabs(); renderAll(); requestAnimationFrame(() => $('#tabstrip .rtab.on')?.focus()); },
       }))) }, icon('chevron')));
   const on = strip.querySelector('.rtab.on');
@@ -2536,6 +2539,7 @@ function openFind() {
   const t = cur();
   if (t && t.bodyView === 'preview' && !$('#respTools').classList.contains('no-body')) { // search the source instead
     $('#respTools [data-view="raw"]').click();
+    find.restoreView = 'preview'; // undone when Find closes: the user never chose Raw
     setTimeout(openFind, 0);
     return;
   }
@@ -2547,7 +2551,12 @@ function openFind() {
   if ($('#findInput').value) runFind(0);
 }
 function clearFind() { find.marks.forEach((m) => m.clear()); if (find.current) find.current.clear(); find.current = null; find.marks = []; find.hits = []; find.i = -1; }
-function closeFind() { clearFind(); $('#findBar').hidden = true; $('#findCount').textContent = ''; const cm = findCm(); if (cm) refreshEditors($('#pane-rbody')); $('#btnFindBody').focus(); } // focus goes back to the opener
+function closeFind() {
+  clearFind(); $('#findBar').hidden = true; $('#findCount').textContent = '';
+  const cm = findCm(); if (cm) refreshEditors($('#pane-rbody'));
+  if (find.restoreView) { const v = find.restoreView; find.restoreView = null; $(`#respTools [data-view="${v}"]`)?.click(); }
+  $('#btnFindBody').focus(); // focus goes back to the opener
+}
 function runFind(start) {
   clearFind();
   const cm = findCm();
@@ -3038,20 +3047,22 @@ function peekVariables(anchor) {
     h('button', { class: 'btn small', onclick: () => { hideMenu(); if (state.activeEnv) editEnvironment(state.activeEnv); else editEnvironment(null); } }, state.activeEnv ? 'Edit environment' : 'New environment'),
     h('button', { class: 'btn small', onclick: () => { hideMenu(); editEnvironment(GLOBALS_ID); } }, 'Edit globals')));
   pop.replaceChildren(peek);
+  pop.setAttribute('role', 'dialog'); // a table and buttons, not a menu
+  pop.setAttribute('aria-label', 'Variables in use');
   placePopover(pop, anchor);
 }
 
 // ---------- import ----------
 function openImport(start = 'file') {
-  const fileIn = h('input', { type: 'file', accept: '.json,application/json', multiple: true, hidden: true, onchange: (e) => importFiles([...e.target.files]) });
+  const fileIn = h('input', { type: 'file', 'aria-label': 'Postman files to import', accept: '.json,application/json', multiple: true, hidden: true, onchange: (e) => importFiles([...e.target.files]) });
   const drop = h('div', {
     class: 'drop',
     ondragover: (e) => { e.preventDefault(); },
     ondrop: (e) => { e.preventDefault(); importFiles([...e.dataTransfer.files]); },
   }, h('p', null, 'Drop Postman collection or environment files here (v2.1 JSON).'),
     h('button', { type: 'button', class: 'btn', onclick: () => fileIn.click() }, 'Choose files'), fileIn);
-  const curlIn = h('textarea', { class: 'code', rows: 10, spellcheck: 'false', placeholder: "curl -X POST 'https://api.example.com/items' \\\n  -H 'Authorization: Bearer …' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '{\"name\":\"x\"}'" });
-  const pasteIn = h('textarea', { class: 'code', rows: 10, spellcheck: 'false', placeholder: 'Paste a Postman collection or environment JSON' });
+  const curlIn = h('textarea', { class: 'code', 'aria-label': 'cURL command', rows: 10, spellcheck: 'false', placeholder: "curl -X POST 'https://api.example.com/items' \\\n  -H 'Authorization: Bearer …' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '{\"name\":\"x\"}'" });
+  const pasteIn = h('textarea', { class: 'code', 'aria-label': 'Postman collection or environment JSON', rows: 10, spellcheck: 'false', placeholder: 'Paste a Postman collection or environment JSON' });
   const defs = [
     { key: 'file', label: 'File', content: [drop, h('p', { class: 'hint' }, 'In Postman: ⋯ on a collection → Export → Collection v2.1. Environments: ⋯ → Export.')] },
     { key: 'curl', label: 'cURL', content: [curlIn, h('div', { hidden: true }, h('button', { type: 'button', class: 'btn primary', 'data-import': 'curl', onclick: () => {
@@ -3868,10 +3879,10 @@ function initResizers() {
     if (persist) save(key, pct);
   };
   setSideW(layout.side || 288, false);
-  setSplit((stacked() ? layout.reqH || 40 : layout.req || 50), false);
+  setSplit((stacked() ? layout.reqH || 35 : layout.req || 50), false);
   if (layout.req) root.style.setProperty('--req-w', `${layout.req}%`);
   if (layout.reqH) root.style.setProperty('--req-h', `${layout.reqH}%`);
-  matchMedia('(max-width: 1180px)').addEventListener('change', () => setSplit((stacked() ? layout.reqH || 40 : layout.req || 50), false));
+  matchMedia('(max-width: 1180px)').addEventListener('change', () => setSplit((stacked() ? layout.reqH || 35 : layout.req || 50), false));
 
   const drag = (el, onMove) => el.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
@@ -3893,7 +3904,13 @@ function initResizers() {
   });
   const tip = h('div', { class: 'drag-tip', hidden: true });
   document.body.append(tip);
-  const showTip = (e, text) => { tip.hidden = false; tip.textContent = text; tip.style.left = `${e.clientX + 14}px`; tip.style.top = `${e.clientY + 14}px`; };
+  const showTip = (e, text) => {
+    tip.hidden = false; tip.textContent = text;
+    const r = e.currentTarget && e.currentTarget.getBoundingClientRect ? e.currentTarget.getBoundingClientRect() : null;
+    const rows = r && r.width > r.height; // a horizontal divider (stacked layout)
+    tip.style.left = `${r && !rows ? r.right + 10 : e.clientX + 14}px`;
+    tip.style.top = `${r && rows ? r.bottom + 10 : e.clientY + 14}px`;
+  };
   document.addEventListener('pointerup', () => { tip.hidden = true; });
   drag(side, (e) => {
     const right = document.documentElement.dataset.side === 'right';
@@ -3920,9 +3937,9 @@ function initResizers() {
     setSplit(Number(split.dataset.now) + (e.key === more ? 1 : -1) * (e.shiftKey ? 5 : 0.5));
   });
   side.addEventListener('dblclick', () => setSideW(288));   // double-click resets
-  split.addEventListener('dblclick', () => setSplit(stacked() ? 40 : 50));
+  split.addEventListener('dblclick', () => setSplit(stacked() ? 35 : 50));
   side.title = split.title = 'Drag to resize, double-click to reset';
-  initResizers.refresh = () => setSplit((stacked() ? layout.reqH || 40 : layout.req || 50), false);
+  initResizers.refresh = () => setSplit((stacked() ? layout.reqH || 35 : layout.req || 50), false);
   initResizers.setSide = (px) => setSideW(px);
   initResizers.snapshot = () => ({ ...ls.get('apiman:layout', {}) });
   initResizers.restore = (snap) => {
@@ -3930,7 +3947,7 @@ function initResizers() {
     ls.set('apiman:layout', layout);
     setSideW(snap.side || 288, false);
     root.style.setProperty('--req-w', `${snap.req || 50}%`);
-    root.style.setProperty('--req-h', `${snap.reqH || 40}%`);
+    root.style.setProperty('--req-h', `${snap.reqH || 35}%`);
     initResizers.refresh();
   };
   initResizers.paneSize = () => { const r = $('.req-col').getBoundingClientRect(); return stacked() ? r.height : r.width; };
@@ -3944,7 +3961,7 @@ function initResizers() {
     if ((document.documentElement.dataset.autoStack === 'true') !== on) {
       if (on) document.documentElement.dataset.autoStack = 'true'; else delete document.documentElement.dataset.autoStack;
       if ($('#autoStackNote')) $('#autoStackNote').hidden = !on;
-      setSplit((stacked() ? layout.reqH || 40 : layout.req || 50), false);
+      setSplit((stacked() ? layout.reqH || 35 : layout.req || 50), false);
       refreshEditors(document);
     }
   };
@@ -3954,7 +3971,7 @@ function initResizers() {
   initResizers.autoStack = autoStack;
   initResizers.setSplit = (pct) => setSplit(pct);
   initResizers.sizes = () => ({ side: Number(side.dataset.now), split: Number(split.dataset.now) });
-  initResizers.reset = () => { setSideW(288); layout.req = 50; layout.reqH = 40; ls.set('apiman:layout', layout); root.style.setProperty('--req-w', '50%'); root.style.setProperty('--req-h', '40%'); setSplit(stacked() ? 40 : 50); };
+  initResizers.reset = () => { setSideW(288); layout.req = 50; layout.reqH = 35; ls.set('apiman:layout', layout); root.style.setProperty('--req-w', '50%'); root.style.setProperty('--req-h', '35%'); setSplit(stacked() ? 35 : 50); };
 }
 
 async function start() {
@@ -3981,7 +3998,10 @@ async function start() {
     alt.replaceChildren(...[...meta.children].map((el) => el.cloneNode(true)));
     tools.classList.remove('wrap', 'icons', 'short', 'squeeze', 'no-size', 'no-time');
     view.querySelectorAll('.ovf').forEach((b) => b.classList.remove('ovf'));
-    const over = () => tools.scrollWidth > tools.clientWidth + 1;
+    const over = () => { // anything past the content edge (into the padding) counts as overflow
+      const edge = tools.getBoundingClientRect().right - parseFloat(getComputedStyle(tools).paddingRight) + 0.5;
+      return tools.scrollWidth > tools.clientWidth + 1 || [...tools.querySelectorAll(':scope > *, .tool-group > *')].some((el) => el.getClientRects().length && el.getBoundingClientRect().right > edge);
+    };
     for (const step of ['short', 'icons']) if (over()) tools.classList.add(step);
     if (over()) { tools.classList.add('squeeze'); fitTabs(view); tools.classList.remove('squeeze'); } // hide extra views, then keep the rest whole
     else fitTabs(view);
@@ -4086,6 +4106,8 @@ async function start() {
     if (e.key !== 'Escape' || $('#dlg').open || !$('#popover').hidden || !$('.app').classList.contains('side-open')) return;
     setSide(false); $('#btnSide').focus();
   });
+  { const strip = $('#tabstrip'), upd = () => strip.classList.toggle('fade-left', strip.scrollLeft > 1);
+    strip.addEventListener('scroll', upd, { passive: true }); new ResizeObserver(upd).observe(strip); }
   // The active request tab stays in view when the strip or the text size changes.
   new ResizeObserver(() => { const on = $('#tabstrip .rtab.on'); if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }).observe($('#tabstrip'));
   // Maximised pane: Escape restores both panes.

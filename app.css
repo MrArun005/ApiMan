@@ -263,7 +263,7 @@ input[type="number"] { font-variant-numeric: tabular-nums; }
 /* ===================================================================================== tabs strip */
 .work { display: flex; flex-direction: column; min-width: 0; min-height: 0; container: work / inline-size; }
 /* auto-stack (set by JS when side-by-side panes would be narrower than their content needs) */
-:root[data-auto-stack="true"] .split:not([data-max]) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 40%)) 1px minmax(200px, 1fr); }
+:root[data-auto-stack="true"] .split:not([data-max]) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 35%)) 1px minmax(200px, 1fr); }
 :root[data-auto-stack="true"] .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
 :root[data-auto-stack="true"] .split > .resizer::after { inset: -1px 0; }
 .tabstrip { scroll-padding-inline-end: calc(2 * var(--h-bar) + 8px); display: flex; align-items: stretch; height: var(--h-bar); background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; flex: none; } /* scrolls by wheel/trackpad; the active tab is kept in view */
@@ -603,11 +603,11 @@ table.grid .tight { width: 1%; white-space: nowrap; }
 .runner-fail { display: flex; gap: var(--s2); align-items: baseline; margin-top: var(--s1); font-size: var(--fs-xs); color: var(--muted); font-weight: 400; white-space: normal; }
 
 /* ===================================================================================== responsive */
-:root[data-layout="stacked"] .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 40%)) 1px minmax(200px, 1fr); }
+:root[data-layout="stacked"] .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 35%)) 1px minmax(200px, 1fr); }
 :root[data-layout="stacked"] .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
 :root[data-layout="stacked"] .split > .resizer::after { inset: -1px 0; }
 @media (max-width: 1180px) {
-  .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 40%)) 1px minmax(200px, 1fr); }
+  .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, var(--req-h, 35%)) 1px minmax(200px, 1fr); }
   .split > .resizer::before { inset: -4px 0; cursor: row-resize; }
   .split > .resizer::after { inset: -1px 0; }
 }
@@ -818,3 +818,13 @@ dialog.drawer .field-row { flex-wrap: wrap; } dialog.drawer .field-row .hint { f
 .top .env-picker { min-width: 0; flex: 0 1 auto; }
 .top .env-picker select { min-width: 0; text-overflow: ellipsis; }
 .top > .btn { flex: none; }
+/* round 13 */
+h1.wordmark { font: inherit; margin: 0; }
+/* the response bar keeps one height in every state: hidden parts keep their space */
+#respTools.no-body > .seg, #respTools.no-body .tool-group > .btn, .resp-col:has(#tab-rbody[aria-selected="false"]) #respTools > .seg,
+.resp-col:has(#tab-rbody[aria-selected="false"]) #respTools .tool-group > .btn { display: inline-flex; visibility: hidden; }
+.resp-col:has(#tab-rbody[aria-selected="false"]) #respTools .seg-more:not([hidden]), #respTools.no-body .seg-more:not([hidden]) { display: inline-flex; visibility: hidden; }
+@media (min-width: 821px) { .reqbar .send { width: calc(104px * var(--text-scale)); min-width: 0; padding: 0; } } /* Send and Cancel: one width */
+.slider-row .unit { flex: none; width: 2.6ch; text-align: left; } /* one unit column, so every slider row lines up */
+.popover .mi.cur { background: var(--hover); }
+.tabstrip.fade-left { -webkit-mask-image: linear-gradient(90deg, transparent, #000 32px); mask-image: linear-gradient(90deg, transparent, #000 32px); }
