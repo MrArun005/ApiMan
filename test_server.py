@@ -77,9 +77,11 @@ class ServerTest(unittest.TestCase):
             srv.server_close()
         cls.tmp.cleanup()
 
-    def call(self, method, path, body=None, headers=None):
+    def call(self, method, path, body=None, headers=None, data=None):
+        if data is None and body is not None:
+            data = json.dumps(body).encode()
         req = urllib.request.Request(self.base + path, method=method, headers={server.TOKEN_HEADER: server.SESSION_TOKEN, **(headers or {})},
-                                     data=json.dumps(body).encode() if body is not None else None)
+                                     data=data)
         try:
             with urllib.request.urlopen(req) as r:
                 raw = r.read()
@@ -214,6 +216,48 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 409)
         ctx.exception.close()
         self.assertEqual(self.call("GET", f"/api/collections/{cid}")[1]["item"][0]["name"], "from window A")
+
+    # ---------- workspace state (<data>/.apiman/state.json) ----------
+
+    def test_state_round_trip_allowlist_and_owner_only_file(self):
+        root = server.Handler.stores["collections"].root
+        state_file = root / ".apiman" / "state.json"
+        if state_file.exists():
+            state_file.unlink()
+        self.assertEqual(self.call("GET", "/api/state"), (200, {"state": None}))      # absent -> null
+
+        snap = {"settings": {"theme": "dark"}, "activeEnv": "Staging.json", "history": [{"url": "https://x"}],
+                "tabs": [], "layout": "side", "codeLang": "curl", "sizeUnit": "kb", "open": {"a": True}, "diffIgnore": []}
+        self.assertEqual(self.call("PUT", "/api/state", {**snap, "oauthTokens": "secret", "outs": [1]}), (200, {"ok": True}))
+        self.assertEqual(self.call("GET", "/api/state"), (200, {"state": snap}))       # unknown keys dropped
+        self.assertNotIn("secret", state_file.read_text("utf-8"))
+        self.assertEqual(state_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(state_file.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(list(state_file.parent.glob("*.tmp")), [])                       # atomic, no leftovers
+        self.assertIn("*", (state_file.parent / ".gitignore").read_text())             # git never picks it up
+        self.assertNotIn(".apiman", str(self.call("GET", "/api/collections")[1]))        # never listed as a collection
+
+        self.call("PUT", "/api/state", {"codeLang": "python"})                            # whole snapshot replaces
+        self.assertEqual(self.call("GET", "/api/state")[1], {"state": {"codeLang": "python"}})
+
+    def test_state_rejects_non_objects_and_oversize_bodies(self):
+        for bad in ([1, 2], "x", 3, None):
+            status, res = self.call("PUT", "/api/state", data=json.dumps(bad).encode())
+            self.assertEqual(status, 400, bad)
+        self.assertEqual(self.call("PUT", "/api/state", data=b"{not json")[0], 400)
+        big = {"history": ["x" * (server.MAX_STATE + 1)]}
+        self.assertEqual(self.call("PUT", "/api/state", big)[0], 413)
+        self.assertEqual(self.call("POST", "/api/state", {})[0], 404)  # only GET and PUT
+
+    def test_state_needs_the_session_token(self):
+        for method, data in (("GET", None), ("PUT", b'{"codeLang": "evil"}')):
+            req = urllib.request.Request(self.base + "/api/state", method=method, data=data)
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req)
+            self.assertEqual(ctx.exception.code, 403, method)
+            ctx.exception.close()
+        self.assertNotEqual((self.call("GET", "/api/state")[1]["state"] or {}).get("codeLang"), "evil")
+        self.assertEqual(self.call("GET", "/api/state", headers={"Origin": "https://evil.example"})[0], 403)
 
     def test_api_needs_the_session_token(self):
         req = urllib.request.Request(self.base + "/api/collections")  # no token, like any other local program

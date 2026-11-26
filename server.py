@@ -41,6 +41,8 @@ ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,120}\.json$")
 METHOD_RE = re.compile(r"^[A-Z]{1,16}$")
 MAX_REQUEST = 50 * 1024 * 1024    # what the browser may send us
 MAX_RESPONSE = 20 * 1024 * 1024   # what we read back from the target API
+MAX_STATE = 5 * 1024 * 1024       # workspace state (<data>/.apiman/state.json)
+STATE_KEYS = ("settings", "activeEnv", "open", "history", "tabs", "diffIgnore", "layout", "codeLang", "sizeUnit")
 SCHEMA_V21 = "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 CA_FILE = None  # extra trusted CA bundle (PEM), set by --ca-file
 # A fresh secret per launch. It's written only into ApiMan's own page and required on every /api call,
@@ -187,6 +189,57 @@ def make_stores(root):
         "collections": Store(root, validate_collection, lambda d: d["info"]["name"]),
         "environments": Store(root / "environments", validate_environment, lambda d: d["name"]),
     }
+
+
+class TooLarge(ValueError):
+    pass
+
+
+class StateStore:
+    """Workspace state: one JSON object in <data>/.apiman/state.json, ApiMan's private, local-only folder."""
+
+    _lock = threading.Lock()
+
+    def __init__(self, root):
+        self.dir = Path(root) / ".apiman"
+        self.file = self.dir / "state.json"
+
+    @staticmethod
+    def clean(data):
+        if not isinstance(data, dict):
+            raise ValueError("State must be a JSON object")
+        return {k: data[k] for k in STATE_KEYS if k in data}  # allowlist: nothing else lands in the folder
+
+    def get(self):
+        try:
+            return self.clean(json.loads(self.file.read_text("utf-8")))
+        except FileNotFoundError:
+            return None
+        except ValueError:  # bad JSON, bad UTF-8, or not an object: treated as absent
+            return None
+
+    def put(self, data):
+        data = self.clean(data)
+        with self._lock:
+            if not self.dir.is_dir():
+                self.dir.mkdir(mode=0o700, exist_ok=True)
+                os.chmod(self.dir, 0o700)  # mkdir's mode is masked by the umask
+            ignore = self.dir / ".gitignore"
+            if not ignore.exists():  # history and tabs can hold tokens: never let git pick this folder up
+                ignore.write_text("# ApiMan's private, local-only state\n*\n", "utf-8")
+            # Atomic, owner-only: history and tabs can hold tokens. mkstemp creates the file 0600.
+            fd, tmp = tempfile.mkstemp(dir=self.dir, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, self.file)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except FileNotFoundError:
+                    pass
+                raise
 
 
 # Allowlist, not denylist: custom credential headers (X-Api-Key, X-Auth-Token, ...) can have any name.
@@ -376,6 +429,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, {"ok": True})
             if method == "POST" and path == "/api/send":
                 return self.reply(200, send(self.read_json()))
+            if path == "/api/state" and method in ("GET", "PUT"):
+                state = StateStore(self.stores["collections"].root)
+                if method == "GET":
+                    return self.reply(200, {"state": state.get()})
+                state.put(self.read_json(MAX_STATE))
+                return self.reply(200, {"ok": True})
             m = re.match(r"^/api/(collections|environments)(?:/(.+))?$", path)
             if m:
                 store, doc_id = self.stores[m.group(1)], m.group(2) and urllib.parse.unquote(m.group(2))
@@ -409,6 +468,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(404, {"error": "Not found"})
         except FileNotFoundError:
             return self.reply(404, {"error": "Not found"})
+        except TooLarge as e:
+            return self.reply(413, {"error": str(e)})
         except (ValueError, json.JSONDecodeError) as e:
             return self.reply(400, {"error": str(e)})
         except (TypeError, AttributeError, KeyError):
@@ -419,10 +480,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self): self.route("PUT")
     def do_DELETE(self): self.route("DELETE")
 
-    def read_json(self):
+    def read_json(self, limit=None):
         length = max(0, int(self.headers.get("Content-Length") or 0))
         if length > MAX_REQUEST:
             raise ValueError("Request too large")
+        if limit is not None and length > limit:
+            remaining = length  # drain it (bounded by MAX_REQUEST), so the client gets our answer, not a reset
+            while remaining > 0:
+                chunk = self.rfile.read(min(1 << 16, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+            raise TooLarge(f"Request too large (limit {limit // (1024 * 1024)} MB)")
         return json.loads(self.rfile.read(length) or b"{}")
 
     def reply(self, status, payload, extra_headers=None):
