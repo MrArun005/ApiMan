@@ -900,7 +900,6 @@ dialog.drawer:not(.docked)::backdrop { background: rgb(10 14 18 / 0.35); } /* ov
 @container resp (max-width: 420px) { /* narrow response pane: less frame, slimmer gutter, more code */
   .resp-col .pane { padding-left: var(--s2); padding-right: var(--s2); }
   .resp-col .CodeMirror-linenumber { padding: 0 var(--s1) 0 var(--s2); }
-  #respTools { padding-left: var(--s2); padding-right: var(--s2); }
 }
 /* round 21 */
 :root.drawer-over dialog.drawer.docked { box-shadow: -12px 0 32px rgb(0 0 0 / 0.35); } /* overlaying (window got narrow): lift it off the app */
@@ -910,3 +909,9 @@ dialog.drawer:not(.docked)::backdrop { background: rgb(10 14 18 / 0.35); } /* ov
   .reqbar:has(#url:focus) { outline: 2px solid Highlight; }
   .resizer::after { background: CanvasText; }
 }
+/* round 22 */
+:root { color-scheme: light dark; } :root[data-theme="light"] { color-scheme: light; } :root[data-theme="dark"] { color-scheme: dark; } /* native controls follow the chosen theme */
+table.kv .act { width: 1%; white-space: nowrap; } /* the delete column is as wide as its button; Value gets the room */
+table.kv tr > :nth-child(2) { width: 38%; }
+.req-col .pane-tools { align-items: center; } /* one vertical centre for every control in the row */
+@media (max-width: 600px) { #btnCode { margin-left: auto; } dialog.drawer, dialog.drawer:has(.dlg-body.tall) { width: 100vw; max-width: 100vw; } }

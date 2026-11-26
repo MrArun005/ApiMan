@@ -2803,8 +2803,13 @@ function updateDock() {
   const dlg = $('#dlg');
   if (!dlg.open || !dlg.classList.contains('drawer')) return;
   const docked = canDock();
-  document.documentElement.classList.toggle('drawer-open', docked); // too narrow now: the drawer overlays, the app gets its width back
-  document.documentElement.classList.toggle('drawer-over', !docked && !dlg.matches(':modal'));
+  if (docked === dlg.classList.contains('docked')) return;
+  const focused = document.activeElement;
+  dlg.dataset.reshowing = '1'; dlg.close(); // re-open in the right mode; the draft stays (the close listener clears the flag)
+  dlg.classList.toggle('docked', docked);
+  document.documentElement.classList.toggle('drawer-open', docked);
+  if (docked) dlg.show(); else dlg.showModal();
+  if (focused && dlg.contains(focused)) focused.focus({ preventScroll: true });
 }
 window.addEventListener('resize', () => requestAnimationFrame(updateDock));
 function renderDialog({ title, body, buttons = [], wide = false, confirm = false, tall = false, drawer = false, cancel = 'Cancel', onClose, focus, onOpen }) {
@@ -4185,9 +4190,20 @@ async function start() {
     e.preventDefault();
     const i = [...$$('#tabstrip .rtab')].indexOf(tab);
     showMenu(tab, [
+      { label: 'Duplicate tab', onClick: () => { const t = state.tabs[i]; openTab(newTab({ ed: { ...JSON.parse(JSON.stringify(t.ed)), name: `${t.ed.name} copy` }, dirty: true })); } },
+      ...(state.tabs[i].cid ? [{ label: 'Reveal in sidebar', onClick: () => { const t = state.tabs[i]; state.view = 'collections'; state.open.add(t.cid); renderSidebar(); requestAnimationFrame(() => { const row = $(`#sideBody [data-key="r:${t.cid}:${t.itemId}"]`) || $$('#sideBody .row.active')[0]; if (row) { row.scrollIntoView({ block: 'nearest' }); row.focus(); } }); } }] : []),
+      '-',
       { label: 'Close tab', onClick: () => closeTab(i) },
       { label: 'Close other tabs', onClick: async () => { const keep = state.tabs[i]; for (let j = state.tabs.length - 1; j >= 0; j--) if (state.tabs[j] !== keep) await closeTab(j); } },
+      { label: 'Close all tabs', onClick: async () => { for (let j = state.tabs.length - 1; j >= 0; j--) await closeTab(j); } },
     ]);
+  });
+  $('#tabstrip').addEventListener('keydown', (e) => { // Shift+F10 / the menu key open the same menu
+    const tab = e.target.closest('.rtab');
+    if (!tab || !(e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) return;
+    e.preventDefault();
+    const r = tab.getBoundingClientRect();
+    tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 8, clientY: r.bottom }));
   });
   $('#sideBody').addEventListener('contextmenu', (e) => {
     const btn = e.target.closest('.row')?.querySelector('.acts button[aria-label="More actions"]');
@@ -4246,6 +4262,7 @@ async function start() {
   dlgEl.addEventListener('cancel', () => { closingSeq = dialogSeq; });
   dlgEl.addEventListener('submit', (e) => { if (e.submitter && e.submitter.value === 'cancel') closingSeq = dialogSeq; });
   $('#dlg').addEventListener('close', () => {
+    if ($('#dlg').dataset.reshowing) { delete $('#dlg').dataset.reshowing; return; } // switching between docked and overlay, not closing (the event fires later)
     document.documentElement.classList.remove('drawer-open', 'drawer-over'); // the app takes the full width again
     $('#dlg').classList.remove('docked');
     requestAnimationFrame(() => initResizers.refresh && initResizers.refresh());

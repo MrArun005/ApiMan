@@ -14,9 +14,14 @@
     if (s.theme === 'light' || s.theme === 'dark') r.dataset.theme = s.theme;
     if (s.layout === 'stacked') r.dataset.layout = 'stacked';
     if (s.wrap === false) r.dataset.wrap = 'off';
-    if (s.textScale >= 0.85 && s.textScale <= 1.3) r.style.setProperty('--text-scale', String(s.textScale));
-    if (s.codeSize >= 11 && s.codeSize <= 20) r.style.setProperty('--code-size', s.codeSize + 'px');
-    const d = { compact: 0.875, spacious: 1.125 }[s.density]; if (d) r.style.setProperty('--d', String(d));
+    if (s.textScale >= 0.8 && s.textScale <= 1.5) r.style.setProperty('--text-scale', String(s.textScale));
+    if (s.codeSize >= 10 && s.codeSize <= 24) r.style.setProperty('--code-size', s.codeSize + 'px');
+    const d = s.densityScale >= 0.75 && s.densityScale <= 1.4 ? s.densityScale : { compact: 0.875, spacious: 1.125 }[s.density];
+    if (d) r.style.setProperty('--d', String(d));
+    r.dataset.side = s.sidePosition === 'right' ? 'right' : 'left';
+    r.dataset.sideHidden = String(!!s.sideHidden);
+    r.dataset.tabStyle = s.tabStyle === 'accent' ? 'accent' : 'subtle';
+    r.dataset.sendStyle = s.sendStyle === 'accent' ? 'accent' : 'method';
   } catch {}
 </script>
 <link rel="stylesheet" href="vendor/codemirror.css">

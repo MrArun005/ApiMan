@@ -29,7 +29,7 @@ You only need Python 3. There's nothing to install.
 | **Runner** | Run a collection or folder, with iterations, delay, stop on failure, and live pass/fail results |
 | **Responses** | Pretty (highlighted JSON) / raw / preview views, headers, cookies, test results, script console, copy, save to file |
 | **Import / export** | Postman collections v2.1, environments and globals, cURL commands (paste into the URL bar or use Import), export as JSON |
-| **Code** | cURL, JavaScript fetch, Python requests, Java HttpClient |
+| **Code** | cURL, HTTPie, PowerShell, JavaScript fetch, Python requests, Java HttpClient, Go net/http (secrets hidden by default) |
 | **Your layout** | Drag the sidebar edge and the request/response divider (live size readout, arrow keys, double-click resets); maximise either pane; sidebar left, right or hidden (<kbd>Cmd/Ctrl+B</kbd>); side-by-side or stacked |
 | **Appearance** | Light / dark / system theme, accent colour (presets or any colour), interface and code fonts, interface text size, code size, density, code line height, tab width, line wrapping: every size as a slider and an exact number |
 | **Comfort** | Filter, history, keyboard shortcuts (<kbd>Ctrl/Cmd+Enter</kbd> send, <kbd>Ctrl/Cmd+S</kbd> save, <kbd>/</kbd> filter), full keyboard navigation in the sidebar tree |
