@@ -60,7 +60,7 @@ const measure = () => page.evaluate(() => {
   // 4. no overlapping siblings in the bars
   for (const bar of document.querySelectorAll('.top, .titlebar, #reqTabs, #respTabs, #respTools, .pane-tools, .reqbar, .tool-group')) {
     if (!vis(bar)) continue;
-    const kids = [...bar.children].filter((k) => vis(k) && R(k).width > 0 && !k.matches('.spacer'));
+    const kids = [...bar.children].filter((k) => vis(k) && R(k).width > 1 && !k.matches('.spacer'));
     for (let i = 0; i < kids.length; i++) for (let j = i + 1; j < kids.length; j++) {
       const a = R(kids[i]), b = R(kids[j]);
       const ox = Math.min(a.right, b.right) - Math.max(a.left, b.left), oy = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);

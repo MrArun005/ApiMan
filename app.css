@@ -143,8 +143,8 @@ input[type="number"] { font-variant-numeric: tabular-nums; }
 }
 .btn:hover { background: var(--hover); border-color: var(--line-strong); }
 .btn:disabled { opacity: 0.5; cursor: default; }
-.btn.primary { background: var(--ink); border-color: var(--ink); color: var(--panel); }
-.btn.primary:hover { background: var(--ink-2); border-color: var(--ink-2); }
+.btn.primary { background: var(--focus); border-color: var(--focus); color: var(--on-accent, #fff); } /* follows the accent colour */
+.btn.primary:hover { filter: brightness(1.08); }
 .btn.danger { color: var(--err); }
 .btn.ghost { background: transparent; border-color: transparent; color: var(--ink-2); }
 .btn.ghost:hover { background: var(--hover); border-color: var(--line); }
@@ -766,3 +766,30 @@ dialog.drawer .grid-3 { grid-template-columns: 1fr 1fr; }
   .rtab .x { width: 36px; height: 36px; }
   #respTools.icons .tool-group .btn { width: 36px; height: 36px; }
 }
+/* round 10 */
+#respStatus { position: absolute; flex: none; width: 1px; height: 1px; padding: 0; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; } /* read aloud; shown in the response bar */
+#respTools { margin: 0; padding: var(--s2) var(--gutter); border-bottom: 1px solid var(--line); min-height: calc(var(--h-sm) + 2 * var(--s2)); box-sizing: border-box; align-items: center; }
+#respTools.no-body > .seg, #respTools.no-body .tool-group > .btn, .resp-col:has(#tab-rbody[aria-selected="false"]) #respTools > .seg,
+.resp-col:has(#tab-rbody[aria-selected="false"]) #respTools .tool-group > .btn, .resp-col:has(#tab-rbody[aria-selected="false"]) #respTools .seg-more { display: none; }
+.resp-meta-alt { display: flex; align-items: center; gap: var(--s3); color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; margin-right: var(--s2); }
+.resp-meta-alt b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.seg-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+#respHeaders th:first-child, #respHeaders td:first-child { padding-left: var(--s3); } /* same inset as the Params table */
+/* Settings drawer docks: the app shrinks beside it, so every change previews where you can see it */
+:root { --drawer-w: 400px; }
+dialog.drawer, dialog.drawer:has(.dlg-body.tall) { width: min(var(--drawer-w), 100vw); }
+dialog.drawer::backdrop { background: transparent; }
+dialog.drawer .grid-2, dialog.drawer .grid-3 { grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 821px) { :root.drawer-open .app { width: calc(100vw - var(--drawer-w)); } }
+/* accent tint for the active tab (Settings > Active tab) */
+:root[data-tab-style="accent"] { --seg-on: linear-gradient(180deg, color-mix(in srgb, var(--focus) 30%, var(--panel)) 0%, color-mix(in srgb, var(--focus) 16%, var(--panel)) 100%); }
+/* request bar: show exactly which of method / URL / Send has focus */
+.reqbar:focus-within { box-shadow: none; }
+.reqbar:has(#url:focus) { box-shadow: 0 0 0 2px var(--focus), 0 0 0 5px color-mix(in srgb, var(--focus) 22%, transparent); }
+.reqbar select:focus-visible, .reqbar .send:focus-visible { outline: 2px solid var(--focus); outline-offset: -4px; }
+.name-input { text-overflow: ellipsis; }
+.num-input::-webkit-inner-spin-button, .num-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.num-input { -moz-appearance: textfield; appearance: textfield; }
+.tabs .tab, .seg-btn { min-height: max(26px, var(--h-sm)); }
+dialog:has(.dlg-body .import-panes), dialog:has(.drop) { min-height: min(480px, calc(100dvh - 32px)); }
+#respTabs .pane-max { margin-left: auto; } /* flush right now the status lives in the response bar */

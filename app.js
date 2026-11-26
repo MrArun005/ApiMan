@@ -124,7 +124,7 @@ const isLocalHost = (host) => ['localhost', '127.0.0.1', '[::1]'].includes(host)
 const DEFAULT_SETTINGS = {
   theme: 'system', timeout: 60, followRedirects: true, history: true, insecure: false,
   textScale: 1, codeSize: 13, density: 'comfortable', layout: 'auto', wrap: true,
-  densityScale: null, lineHeight: 1.6, tabSize: 2, uiFont: 'geist', codeFont: 'geist-mono', accent: 'blue', accentCustom: '#2560cf',
+  densityScale: null, lineHeight: 1.6, tabSize: 2, tabStyle: 'subtle', uiFont: 'geist', codeFont: 'geist-mono', accent: 'blue', accentCustom: '#2560cf',
   sidePosition: 'left', sideHidden: false,
 };
 const DENSITY = { compact: 0.875, comfortable: 1, spacious: 1.125 };
@@ -154,6 +154,9 @@ function applyAppearance(s = state.settings) {
   const dark = effectiveTheme(s) === 'dark';
   const accent = s.accent === 'custom' && /^#[0-9a-f]{6}$/i.test(s.accentCustom || '') ? s.accentCustom : (ACCENTS[s.accent] || ACCENTS.blue)[dark ? 1 : 0];
   root.style.setProperty('--focus', accent);
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(accent.slice(i, i + 2), 16) / 255).map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  root.style.setProperty('--on-accent', 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.18 ? '#0d1520' : '#ffffff'); // readable text on the accent
+  root.dataset.tabStyle = s.tabStyle === 'accent' ? 'accent' : 'subtle';
   root.dataset.side = s.sidePosition === 'right' ? 'right' : 'left';
   root.dataset.sideHidden = String(!!s.sideHidden);
   const tab = Number(s.tabSize) || 2;
@@ -2389,7 +2392,8 @@ function renderResponse() {
     clearCounts();
     t.respTab = 'rbody';
     switchPane('#respTabs', 'rbody');
-    $('#respTools').hidden = true;
+    $('#respTools').hidden = !t.sending; // "Sending..." shows where the status will appear
+    $('#respTools').classList.add('no-body');
     $('#respBody').replaceChildren(h('div', { class: 'empty-state' }, t.sending
       ? h('p', { class: 'hint' }, `Waiting for the response to ${t.ed.method} ${t.ed.url || 'this request'}…`)
       : [h('p', { class: 'hint' }, 'Send the request to see its response here.'),
@@ -2423,8 +2427,13 @@ function renderResponse() {
   switchPane('#respTabs', t.respTab);
 
   // body
-  $('#respTools').hidden = !hasRes;
+  $('#respTools').hidden = false;
+  $('#respTools').classList.toggle('no-body', !hasRes);
   $$('#respTools .seg-btn').forEach((b) => b.classList.toggle('on', b.dataset.view === t.bodyView));
+  const previewable = hasRes && (/html|xml|svg/.test(contentType(res)) || (res.binary && /^image\//.test(contentType(res))));
+  const pv = $('#respTools [data-view="preview"]');
+  pv.disabled = !previewable;
+  pv.title = previewable ? '' : 'Preview shows HTML and images; this response is neither.';
   clearFind();
   if (!$('#findBar').hidden) setTimeout(() => runFind(0), 0); // keep the open Find bar in sync with the new response
   $('#respBody').replaceChildren(...notes, ...(notes.length && hasRes ? [h('div', { class: 'gap' })] : []), ...(hasRes ? [bodyView(res, t.bodyView)] : []));
@@ -2758,7 +2767,8 @@ function renderDialog({ title, body, buttons = [], wide = false, confirm = false
   dlg.classList.toggle('wide', wide);
   dlg.classList.toggle('confirm', confirm);
   $('#dlgBody').classList.toggle('tall', tall); // dialogs with tabs keep one height, so nothing jumps under the cursor
-  $('#dlg').classList.toggle('drawer', drawer); // docked at the side: live previews stay visible
+  $('#dlg').classList.toggle('drawer', drawer); // docked at the side: the app shrinks beside it, so previews stay visible
+  document.documentElement.classList.toggle('drawer-open', drawer);
   // Every dialog gets the same footer: [destructive/left actions]  ...  Cancel  Primary
   if (cancel && !buttons.some((b) => b.label === 'Cancel')) {
     const at = buttons.findIndex((b) => b.primary || b.solid);
@@ -3051,7 +3061,7 @@ function openImport(start = 'file') {
   pasteIn.addEventListener('input', updateImport);
   const tabsAndPanes = dlgTabs(defs, (k) => { activeKey = k; updateImport(); });
   openDialog({
-    title: 'Import', body: tabsAndPanes, onOpen: updateImport, tall: true,
+    title: 'Import', body: tabsAndPanes, onOpen: updateImport, focus: '#dlgBody .dlg-tabs .on',
     buttons: [{ label: 'Import', primary: true, onClick: () => {
       const active = [...tabsAndPanes[0].children].findIndex((b) => b.classList.contains('on'));
       if (active === 0) fileIn.click();
@@ -3548,6 +3558,8 @@ function openSettings(initial = null, layoutSnap = null) {
     h('div', { class: 'grid-2' },
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Theme'), seg('theme', [['system', 'Match system'], ['light', 'Light'], ['dark', 'Dark']], 'Theme')),
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Accent colour'), swatches)),
+    h('div', { class: 'grid-2' },
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Active tab'), seg('tabStyle', [['subtle', 'Subtle'], ['accent', 'Accent tint']], 'Active tab style'))),
     h('div', { class: 'grid-2' }, select('uiFont', UI_FONTS, 'Interface font'), select('codeFont', CODE_FONTS, 'Code font')),
     h('div', { class: 'grid-2' },
       slider('textScale', 0.85, 1.3, 0.05, '%', 'Interface text size', 100),
@@ -3599,7 +3611,7 @@ function openSettings(initial = null, layoutSnap = null) {
         Object.assign(s, {
           theme: draft.theme, textScale: draft.textScale, codeSize: draft.codeSize, density: draft.density, layout: draft.layout, wrap: draft.wrap,
           densityScale: draft.densityScale, lineHeight: draft.lineHeight, tabSize: Number(draft.tabSize) || 2, uiFont: draft.uiFont, codeFont: draft.codeFont,
-          accent: draft.accent, accentCustom: draft.accentCustom, sidePosition: draft.sidePosition, sideHidden: !!draft.sideHidden,
+          accent: draft.accent, accentCustom: draft.accentCustom, tabStyle: draft.tabStyle, sidePosition: draft.sidePosition, sideHidden: !!draft.sideHidden,
           timeout: Math.max(1, Math.min(600, Number(timeout.value) || 60)),
           followRedirects: follow.checked, history: hist.checked, insecure: backend.mode === 'local' && insecure.checked,
         });
@@ -3951,29 +3963,14 @@ async function start() {
   // The response row measures itself: if tabs + status + button don't fit, the status gets its own line, so no tab is hidden.
   const respRow = $('#respTabs');
   const fitResp = () => {
-    // Both tab rows keep one height and one tab padding. What the response row can't fit (reason, then size,
-    // then time, then the whole status) moves to the toolbar below, so nothing is lost; that toolbar wraps
-    // only when even it runs out of room.
-    const steps = ['hide-reason', 'meta-out']; // the status moves as one unit, never piecemeal
-    const seg = respRow.querySelector('.seg'), meta = $('#respStatus'), max = respRow.querySelector('.pane-max');
-    seg.querySelectorAll('.ovf').forEach((b) => b.classList.remove('ovf')); // measure the full tab row
-    const moreBtn = seg.nextElementSibling?.classList.contains('seg-more') ? seg.nextElementSibling : null;
-    if (moreBtn) moreBtn.hidden = true;
-    const alt = $('#respMetaAlt'), tools = $('#respTools');
-    respRow.classList.remove(...steps);
+    // The status always lives in the response bar under the tabs, as one unit and in one place, so the body never
+    // jumps. Short of room, the actions become icons, then the bar wraps; tabs that don't fit go into More.
+    const seg = respRow.querySelector('.seg'), meta = $('#respStatus'), alt = $('#respMetaAlt'), tools = $('#respTools');
+    alt.replaceChildren(...[...meta.children].map((el) => el.cloneNode(true)));
     tools.classList.remove('wrap', 'icons');
-    alt.replaceChildren();
-    if (!meta.textContent.trim()) return;
-    const phone = matchMedia('(max-width: 820px)').matches; // phones give the status its own line
-    const fits = () => seg.scrollWidth <= seg.clientWidth + 1 && respRow.scrollWidth <= respRow.clientWidth + 1; // real clipping, measured
-    if (!phone) for (const step of steps) { if (fits()) break; respRow.classList.add(step); }
-    const has = (c) => respRow.classList.contains(c);
-    const moved = has('meta-out') ? [...meta.children] : []; // shown in a line under the tabs, on every response tab
-    alt.replaceChildren(...moved.map((el) => { const c = el.cloneNode(true); c.querySelector('.m-reason')?.remove(); return c; })); // the code's colour + tooltip carry the reason
-    // Still short of room: the actions become icon buttons, and only then does the toolbar wrap.
     if (tools.scrollWidth > tools.clientWidth) tools.classList.add('icons');
     if (tools.scrollWidth > tools.clientWidth) tools.classList.add('wrap');
-    fitTabs(seg); // finally, any tab that still doesn't fit goes into the More menu
+    fitTabs(seg);
   };
   // Toolbar actions carry an icon and a label; the label is also their accessible name when only the icon shows.
   [['#btnFindBody', 'search'], ['#btnCopyBody', 'copy'], ['#btnSaveBody', 'download']].forEach(([sel, name]) => {
@@ -3994,7 +3991,7 @@ async function start() {
     el.addEventListener('scroll', update, { passive: true });
     update();
   };
-  ['#reqTabs > .seg', '#respTabs > .seg', '.side .seg.block'].forEach((sel) => watchOverflow($(sel)));
+  ['#reqTabs > .seg', '#respTabs > .seg', '.side .seg.block', '#tabstrip'].forEach((sel) => watchOverflow($(sel)));
   // Request tab row and the request sub-tab rows (body type, auth type...) collapse into a More menu.
   [$('#reqTabs > .seg'), ...$$('.req-col .pane-tools > .seg')].forEach((seg) => {
     const run = () => requestAnimationFrame(() => fitTabs(seg));
@@ -4062,7 +4059,7 @@ async function start() {
   document.addEventListener('keydown', (e) => {
     if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'f' || e.altKey || $('#dlg').open) return;
     if (e.target.closest && e.target.closest('.CodeMirror') && !e.target.closest('#respBody')) return; // request editors keep their own find
-    if ($('#respTools').hidden) return;
+    if ($('#respTools').hidden || $('#respTools').classList.contains('no-body')) return;
     e.preventDefault();
     if ($('.resp-col .tab.on')?.dataset.tab !== 'rbody') $('#tab-rbody').click();
     openFind();
@@ -4099,6 +4096,7 @@ async function start() {
   dlgEl.addEventListener('cancel', () => { closingSeq = dialogSeq; });
   dlgEl.addEventListener('submit', (e) => { if (e.submitter && e.submitter.value === 'cancel') closingSeq = dialogSeq; });
   $('#dlg').addEventListener('close', () => {
+    document.documentElement.classList.remove('drawer-open'); // the app takes the full width again
     const seq = closingSeq ?? dialogSeq;
     closingSeq = null;
     const cb = dialogCloses.get(seq);

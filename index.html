@@ -160,21 +160,21 @@
             <div class="resp-meta" id="respStatus" role="status" aria-live="polite"></div>
             <button class="btn icon small pane-max" data-max="resp" aria-pressed="false" title="Maximise the response pane" aria-label="Maximise the response pane"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 8V4h4M16 12v4h-4M4 4l5 5M16 16l-5-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
           </div>
-          <div class="resp-status-line" id="respMetaAlt" aria-hidden="true"></div>
-          <div class="pane" role="tabpanel" id="pane-rbody" aria-labelledby="tab-rbody" data-pane="rbody">
-            <div class="pane-tools" id="respTools" hidden>
-              <div class="seg" role="radiogroup" aria-label="Body view">
-                <button class="seg-btn on" role="radio" aria-checked="true" data-view="pretty">Pretty</button>
-                <button class="seg-btn" role="radio" aria-checked="false" data-view="raw">Raw</button>
-                <button class="seg-btn" role="radio" aria-checked="false" data-view="preview">Preview</button>
-              </div>
-              <div class="spacer"></div>
-              <div class="tool-group">
-                <button class="btn small ghost" id="btnFindBody" title="Search the response (Cmd/Ctrl+F in the body). Enter: next, Shift+Enter: previous, Esc: close.">Find</button>
-                <button class="btn small ghost" id="btnCopyBody" title="Copy the response body">Copy</button>
-                <button class="btn small ghost" id="btnSaveBody" title="Save the response body to a file">Download</button>
-              </div>
+          <div class="pane-tools" id="respTools" hidden>
+            <div class="seg" role="radiogroup" aria-label="Body view">
+              <button class="seg-btn on" role="radio" aria-checked="true" data-view="pretty">Pretty</button>
+              <button class="seg-btn" role="radio" aria-checked="false" data-view="raw">Raw</button>
+              <button class="seg-btn" role="radio" aria-checked="false" data-view="preview">Preview</button>
             </div>
+            <div class="spacer"></div>
+            <span class="resp-meta-alt" id="respMetaAlt" aria-hidden="true"></span>
+            <div class="tool-group">
+              <button class="btn small ghost" id="btnFindBody" title="Search the response (Cmd/Ctrl+F in the body). Enter: next, Shift+Enter: previous, Esc: close.">Find</button>
+              <button class="btn small ghost" id="btnCopyBody" title="Copy the response body">Copy</button>
+              <button class="btn small ghost" id="btnSaveBody" title="Save the response body to a file">Download</button>
+            </div>
+          </div>
+          <div class="pane" role="tabpanel" id="pane-rbody" aria-labelledby="tab-rbody" data-pane="rbody">
             <div class="find-bar" id="findBar" role="search" hidden>
               <input id="findInput" type="search" placeholder="Find in response" aria-label="Find in response" spellcheck="false" autocomplete="off">
               <span class="find-count" id="findCount" aria-live="polite"></span>
