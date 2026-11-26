@@ -205,7 +205,7 @@ input[type="number"] { font-variant-numeric: tabular-nums; }
 }
 /* Brand column ends exactly where the work area's gutter begins, so New/Import/Runner line up with the content below. */
 .brand { display: flex; align-items: center; gap: var(--s2); width: calc(var(--side-eff) + var(--gutter) - var(--side-gutter) - var(--h) - 3 * var(--s2)); flex: none; }
-@media (min-width: 821px) { /* sidebar on the right: desktop only, phones always stack it */
+@media (min-width: 601px) { /* sidebar on the right: desktop only, phones always stack it */
 :root[data-side="right"] .brand { width: auto; order: 2; margin-left: var(--s3); }
 :root[data-side="right"] .top-actions { order: 1; padding-left: calc(var(--gutter) - var(--side-gutter)); }
 :root[data-side="right"] #btnSide { order: 3; }
@@ -326,7 +326,7 @@ input[type="number"] { font-variant-numeric: tabular-nums; }
 .reqbar:focus-within { box-shadow: 0 0 0 2px var(--focus), 0 0 0 5px color-mix(in srgb, var(--focus) 22%, transparent); } /* same 2px ring as every other field */
 .reqbar select {
   height: auto; border: 0; border-radius: 0; padding: 0 var(--s3) 0 var(--s4); font-weight: 700; letter-spacing: 0.02em;
-  color: var(--cable); background: color-mix(in srgb, var(--cable) 10%, var(--panel)); cursor: pointer;
+  color: var(--cable); background-color: color-mix(in srgb, var(--cable) 10%, var(--panel)); cursor: pointer; padding-right: calc(var(--s3) + 18px);
   border-right: 1px solid color-mix(in srgb, var(--cable) 30%, var(--line));
 }
 .reqbar input { flex: 1; height: auto; border: 0; border-radius: 0; font: calc(var(--fs-code) + 2px) var(--font-code); padding: 0 var(--s4); background: transparent; }
@@ -612,7 +612,7 @@ table.grid .tight { width: 1%; white-space: nowrap; }
   .split > .resizer::after { inset: -1px 0; }
 }
 /* #btnSide: on phones it opens the sidebar panel; on desktop it hides/shows the sidebar (Cmd/Ctrl+B) */
-@media (min-width: 821px) { /* sidebar on the right: desktop only, phones always stack it */
+@media (min-width: 601px) { /* sidebar on the right: desktop only, phones always stack it */
 :root[data-side="right"] .app { grid-template-columns: minmax(0, 1fr) var(--side-eff); }
 :root[data-side="right"] .side { grid-column: 2; grid-row: 2; border-right: 0; border-left: 1px solid var(--line); }
 :root[data-side="right"] .work { grid-column: 1; grid-row: 2; }
@@ -622,7 +622,7 @@ table.grid .tight { width: 1%; white-space: nowrap; }
 :root[data-side-hidden="true"] .side { display: none; }
 :root[data-side-hidden="true"] .brand { width: auto; }
 .drag-tip { position: fixed; z-index: 70; padding: 2px var(--s2); border-radius: var(--r); background: var(--ink); color: var(--panel); font: var(--fs-xs) var(--font-code); pointer-events: none; }
-@media (max-width: 820px) {
+@media (max-width: 600px) {
   :root { --gutter: 16px; }
   .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr); height: auto; min-height: 100vh; }
   .top { flex-wrap: wrap; height: auto; padding: var(--s2) var(--gutter); row-gap: var(--s2); }
@@ -685,7 +685,7 @@ mark { background: color-mix(in srgb, var(--post) 30%, transparent); color: inhe
 .docs-preview p, .docs-preview ul, .docs-preview ol { margin: 0 0 var(--s3); }
 .docs-preview a { color: var(--focus); }
 #pane-docs textarea.prose[hidden] { display: none; }
-@media (max-width: 820px) {
+@media (max-width: 600px) {
   .crumb { display: none; }
   .titlebar { flex-wrap: nowrap; }
   .titlebar > .btn { margin-left: 0; }
@@ -694,7 +694,7 @@ mark { background: color-mix(in srgb, var(--post) 30%, transparent); color: inhe
 }
 
 /* ===================================================================================== round 6 */
-@media (min-width: 821px) { .top { box-sizing: content-box; height: calc(var(--h) + 20px); } } /* phones: the header wraps, so its height is auto */              /* 52px of content + its 1px border */
+@media (min-width: 601px) { .top { box-sizing: content-box; height: calc(var(--h) + 20px); } } /* phones: the header wraps, so its height is auto */              /* 52px of content + its 1px border */
 .tabs, .tabstrip { box-sizing: content-box; }                                  /* 40px of content + 1px border: whole-pixel centring */
 /* 5: gentle degrade steps for the response row */
 #respTabs.hide-reason .m-reason { display: none; }
@@ -714,7 +714,7 @@ mark { background: color-mix(in srgb, var(--post) 30%, transparent); color: inhe
 /* 6: in stacked layouts, editors flex to their pane instead of forcing their own minimum */
 :root[data-auto-stack="true"] .split .code-editor, :root[data-layout="stacked"] .split .code-editor,
 :root[data-auto-stack="true"] .split textarea.prose, :root[data-layout="stacked"] .split textarea.prose { min-height: 0; }
-@media (max-width: 1180px) and (min-width: 821px) { .split .code-editor, .split textarea.prose { min-height: 0; } }
+@media (max-width: 1180px) and (min-width: 601px) { .split .code-editor, .split textarea.prose { min-height: 0; } }
 /* 8: no ligatures in any code face (the font shorthand elsewhere would reset them) */
 table.kv input[type="text"], table.kv input[type="password"], .resolved, pre, pre.hint-code, code, kbd, .status-code,
 .find-bar input, .mono, .CodeMirror, .reqbar input, textarea.code { font-variant-ligatures: none !important; font-feature-settings: "liga" 0, "calt" 0 !important; }
@@ -738,16 +738,16 @@ table.kv input[type="text"], table.kv input[type="password"] { text-overflow: el
 #respTools.icons .tool-group .btn svg { display: block; }
 #respTools.icons .tool-group .btn .lbl { display: none; }
 #respTools.icons .tool-group .btn { width: var(--h-sm); padding: 0; justify-content: center; }
-@media (max-width: 820px) { .resp-body { max-height: 70vh; overflow: auto; } #respBody .CodeMirror-scroll { max-height: 68vh; } } /* phones: the editor itself scrolls (an auto-height editor would be clipped) */
+@media (max-width: 600px) { .resp-body { max-height: 70vh; overflow: auto; } #respBody .CodeMirror-scroll { max-height: 68vh; } } /* phones: the editor itself scrolls (an auto-height editor would be clipped) */
 .tabs .tab, .seg-btn { min-height: max(24px, calc(var(--h-sm) * 0.85)); } /* compact extremes stay clickable */
-@media (max-width: 820px) { .tabs .tab { padding: 0 var(--s2); } } /* phones: all six tabs fit at 390px */
+@media (max-width: 600px) { .tabs .tab { padding: 0 var(--s2); } } /* phones: all six tabs fit at 390px */
 /* 24px minimum target for every clickable control, at any density */
 .btn.small, .btn.icon.small, .rtab .x, .tabs .tab, .seg-btn { min-height: 24px; }
 .btn.icon.small, .rtab .x { min-width: 24px; }
 .rtab .x { width: 24px; height: 24px; }
 input[type="range"] { min-height: 24px; }
 /* sidebar on the right: brand stays first, the sidebar toggle sits at the right edge next to the sidebar */
-@media (min-width: 821px) {
+@media (min-width: 601px) {
   :root[data-side="right"] .brand { order: 0; margin-left: 0; }
   :root[data-side="right"] .top-actions { order: 1; }
   :root[data-side="right"] #btnSide { order: 8; }
@@ -760,7 +760,7 @@ input[type="range"] { min-height: 24px; }
 dialog.drawer, dialog.drawer:has(.dlg-body.tall) { margin: 0 0 0 auto; width: min(560px, 100vw); height: 100dvh; max-height: 100dvh; border-radius: 0; border-width: 0 0 0 1px; }
 dialog.drawer::backdrop { background: rgb(10 14 18 / 0.12); }
 dialog.drawer .grid-3 { grid-template-columns: 1fr 1fr; }
-@media (max-width: 820px) { /* phones: 36px touch targets */
+@media (max-width: 600px) { /* phones: 36px touch targets */
   .tabs .tab, .seg-btn, .btn.small, .btn.icon.small, .rtab .x, #btnEnvPeek { min-height: 36px; }
   .btn.icon.small, .rtab .x, #btnEnvPeek { min-width: 36px; }
   .rtab .x { width: 36px; height: 36px; }
@@ -780,7 +780,7 @@ dialog.drawer .grid-3 { grid-template-columns: 1fr 1fr; }
 dialog.drawer, dialog.drawer:has(.dlg-body.tall) { width: min(var(--drawer-w), 100vw); }
 dialog.drawer::backdrop { background: transparent; }
 dialog.drawer .grid-2, dialog.drawer .grid-3 { grid-template-columns: minmax(0, 1fr); }
-@media (min-width: 821px) { :root.drawer-open .app { width: calc(100vw - var(--drawer-w)); } }
+@media (min-width: 601px) { :root.drawer-open .app { width: calc(100vw - var(--drawer-w)); } }
 /* accent tint for the active tab (Settings > Active tab) */
 :root[data-tab-style="accent"] { --seg-on: linear-gradient(180deg, color-mix(in srgb, var(--focus) 40%, var(--panel)) 0%, color-mix(in srgb, var(--focus) 12%, var(--panel)) 100%); }
 /* request bar: show exactly which of method / URL / Send has focus */
@@ -824,7 +824,7 @@ h1.wordmark { font: inherit; margin: 0; }
 #respTools.no-body > .seg, #respTools.no-body .tool-group > .btn, .resp-col:has(#tab-rbody[aria-selected="false"]) #respTools > .seg,
 .resp-col:has(#tab-rbody[aria-selected="false"]) #respTools .tool-group > .btn { display: inline-flex; visibility: hidden; }
 .resp-col:has(#tab-rbody[aria-selected="false"]) #respTools .seg-more:not([hidden]), #respTools.no-body .seg-more:not([hidden]) { display: inline-flex; visibility: hidden; }
-@media (min-width: 821px) { .reqbar .send { width: calc(104px * var(--text-scale)); min-width: 0; padding: 0; } } /* Send and Cancel: one width */
+@media (min-width: 601px) { .reqbar .send { width: calc(104px * var(--text-scale)); min-width: 0; padding: 0; } } /* Send and Cancel: one width */
 .slider-row .unit { flex: none; width: 2.6ch; text-align: left; } /* one unit column, so every slider row lines up */
 .popover .mi.cur { background: var(--hover); }
 .tabstrip.fade-left { -webkit-mask-image: linear-gradient(90deg, transparent, #000 32px); mask-image: linear-gradient(90deg, transparent, #000 32px); }
@@ -833,10 +833,23 @@ h1.wordmark { font: inherit; margin: 0; }
 :root[data-send-style="accent"] .reqbar { --cable: var(--focus); --on-cable: var(--on-accent); }
 :root[data-send-style="accent"] .rtab.on::after { background: var(--focus); }
 .find-bar input { flex: 1 1 auto; min-width: 0; }
-@media (max-width: 820px) { /* phones: touch-size tabs and a full-width environment row (after the desktop rules) */
+@media (max-width: 600px) { /* phones: touch-size tabs and a full-width environment row (after the desktop rules) */
   .tabs .tab, .seg-btn { min-height: 36px; }
   .top .env-picker { flex: 1 1 100%; }
 }
-@media (max-width: 820px) { .tabs { height: auto; min-height: var(--h-bar); } } /* rows grow to fit 36px touch tabs at any density */
+@media (max-width: 600px) { .tabs { height: auto; min-height: var(--h-bar); } } /* rows grow to fit 36px touch tabs at any density */
 #respTools .tool-group { gap: 2px; } /* borderless text actions: their padding already separates them */
 .resp-meta-alt { margin-right: var(--s1); }
+/* round 15 */
+:root { --drawer-w: min(calc(400px * var(--text-scale)), 50vw); } /* the Settings drawer grows with text size, so its footer fits */
+@media (max-width: 600px) { .resp-col .tabs, #reqTabs { flex-wrap: nowrap; } } /* tabs fold into More, never wrap */
+.seg-btn[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+.toast { bottom: auto; top: calc(var(--h) + 28px); transform: translate(-50%, -8px); } /* below the header: never over the response */
+@media (max-width: 600px) { :root { --drawer-w: 100vw; } } /* phones: Settings takes the full screen */
+@media (min-width: 601px) and (max-width: 900px) { /* half-screen windows: header may take a second line, nothing is cut */
+  .top { height: auto; min-height: calc(var(--h) + 20px); flex-wrap: wrap; row-gap: var(--s2); align-content: center; }
+  .brand { width: auto; }
+  .crumb { display: none; }
+  .titlebar .name-input { flex: 1; min-width: 0; max-width: none; }
+}
+@media (min-width: 601px) and (max-width: 900px) { .top .env-picker { flex: 1 1 120px; max-width: 260px; } } /* shrinks before the header wraps */

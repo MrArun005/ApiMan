@@ -11,7 +11,7 @@ python3 server.py                     # opens http://127.0.0.1:5577
 python3 server.py --data ~/my-apis    # keep collections + environments somewhere else
 python3 server.py --ca-file ~/company-root-ca.pem   # trust internal HTTPS certificates
 python3 test_server.py                # server self-check
-node tools/layout-check.mjs           # layout check: 260 width/sidebar/layout/text/density/divider combinations (needs Playwright)
+node tools/layout-check.mjs           # layout check: 384 width/sidebar/layout/text/density/divider combinations (needs Playwright)
 ```
 
 You only need Python 3. There's nothing to install.

@@ -1395,7 +1395,7 @@ function newTab(init) {
   };
 }
 
-const isPhone = () => matchMedia('(max-width: 820px)').matches;
+const isPhone = () => matchMedia('(max-width: 600px)').matches;
 /** The text scale currently applied (a Settings preview included). */
 const cssScale = () => Number(getComputedStyle(document.documentElement).getPropertyValue('--text-scale')) || 1;
 function toggleSidebar() {
@@ -1711,7 +1711,8 @@ function showMenu(anchor, items) {
   const pop = $('#popover');
   const row = anchor.closest('.row');
   pop.setAttribute('role', 'menu');
-  pop.removeAttribute('aria-label');
+  const name = anchor.getAttribute('aria-label') || anchor.textContent.trim();
+  if (name) pop.setAttribute('aria-label', name); else pop.removeAttribute('aria-label');
   pop.replaceChildren(...items.map((it) => (it === '-' ? h('div', { class: 'sep', role: 'separator' })
     : h('button', { class: `mi ${it.danger ? 'danger' : ''} ${it.current ? 'cur' : ''}`, role: 'menuitem', 'aria-current': it.current ? 'true' : null, onclick: () => { hideMenu(); it.onClick(); } }, it.label))));
   placePopover(pop, anchor);
@@ -1731,7 +1732,7 @@ function fitTabs(seg) {
   if (!more) {
     const what = seg.getAttribute('role') === 'radiogroup' ? 'More options' : 'More tabs';
     more = h('button', { type: 'button', class: 'btn icon small seg-more', title: what, 'aria-label': what, 'aria-haspopup': 'menu', 'aria-expanded': 'false' }, icon('dots'));
-    more.addEventListener('click', () => showMenu(more, btns.filter((b) => b.classList.contains('ovf') && !b.disabled).map((b) => {
+    more.addEventListener('click', () => showMenu(more, btns.filter((b) => b.classList.contains('ovf') && !b.disabled && b.getAttribute('aria-disabled') !== 'true').map((b) => {
       const name = [...b.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim() || b.textContent.trim();
       const count = b.querySelector('.count:not(.dot)')?.textContent.trim();
       return { label: count ? `${name} (${count})` : name, onClick: () => { b.click(); requestAnimationFrame(() => requestAnimationFrame(() => b.focus())); } };
@@ -2443,7 +2444,8 @@ function renderResponse() {
   const view = t.bodyView === 'preview' && !previewable ? 'pretty' : t.bodyView; // nothing to preview: show Pretty, keep the choice for HTML
   $$('#respTools .seg-btn').forEach((b) => { const on = b.dataset.view === view; b.classList.toggle('on', on); b.setAttribute('aria-checked', String(on)); });
   const pv = $('#respTools [data-view="preview"]');
-  pv.disabled = !previewable;
+  pv.disabled = false;
+  pv.setAttribute('aria-disabled', String(!previewable));
   pv.title = previewable ? '' : 'Preview shows HTML and images; this response is neither.';
   clearFind();
   if (!$('#findBar').hidden) setTimeout(() => runFind(0), 0); // keep the open Find bar in sync with the new response
@@ -3709,6 +3711,7 @@ function bindEditor() {
   $('#respTools').addEventListener('click', (e) => {
     const b = e.target.closest('.seg-btn');
     if (!b) return;
+    if (b.getAttribute('aria-disabled') === 'true') { toast(b.title); return; } // reachable by keyboard, says why
     cur().bodyView = b.dataset.view;
     renderResponse();
   });
@@ -3966,7 +3969,7 @@ function initResizers() {
   const autoStack = () => {
     // Stack before any tab would be cut off: both panes' needs must fit side by side.
     const [a, b] = paneNeeds();
-    const on = document.documentElement.dataset.layout !== 'stacked' && $('.work').clientWidth - 1 < a + b && !matchMedia('(max-width: 820px)').matches;
+    const on = document.documentElement.dataset.layout !== 'stacked' && $('.work').clientWidth - 1 < a + b && !matchMedia('(max-width: 600px)').matches;
     if ((document.documentElement.dataset.autoStack === 'true') !== on) {
       if (on) document.documentElement.dataset.autoStack = 'true'; else delete document.documentElement.dataset.autoStack;
       if ($('#autoStackNote')) $('#autoStackNote').hidden = !on;
@@ -4024,6 +4027,7 @@ async function start() {
     b.setAttribute('aria-label', text);
     b.replaceChildren(icon(name), h('span', { class: 'lbl' }, text));
   });
+  fitTabs.resp = fitResp;
   new ResizeObserver(fitResp).observe(respRow);
   new MutationObserver(fitResp).observe($('#respStatus'), { childList: true, subtree: true, characterData: true });
   // Tab rows that don't fit fade at whichever edge has more tabs (and scroll), so no tab is ever silently cut off.
@@ -4145,6 +4149,7 @@ async function start() {
   dlgEl.addEventListener('submit', (e) => { if (e.submitter && e.submitter.value === 'cancel') closingSeq = dialogSeq; });
   $('#dlg').addEventListener('close', () => {
     document.documentElement.classList.remove('drawer-open'); // the app takes the full width again
+    requestAnimationFrame(() => requestAnimationFrame(() => fitTabs.resp && fitTabs.resp()));
     const seq = closingSeq ?? dialogSeq;
     closingSeq = null;
     const cb = dialogCloses.get(seq);

@@ -11,7 +11,7 @@ const APP = process.env.APP || 'http://127.0.0.1:5577/';
 const BIG_URL = process.env.BIG_URL || 'http://127.0.0.1:18765/big.json';
 const ONLY = process.env.ONLY; // e.g. ONLY=1280 to run one width
 
-const WIDTHS = [[1440, 900], [1366, 768], [1280, 800], [1024, 768], [390, 844]].filter(([w]) => !ONLY || String(w) === ONLY);
+const WIDTHS = [[1440, 900], [1366, 768], [1280, 800], [1024, 768], [768, 800], [720, 900], [390, 844]].filter(([w]) => !ONLY || String(w) === ONLY);
 const SIDES = ['left', 'right'];
 const LAYOUTS = ['auto', 'stacked'];
 const SCALES = [[1, 1], [0.8, 0.75], [1.5, 1.4], [1.5, 0.75], [0.8, 1.4]]; // [text, density] at the Settings extremes
@@ -37,7 +37,7 @@ const measure = () => page.evaluate(() => {
   const vis = (el) => el && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
   const R = (el) => el.getBoundingClientRect();
   const name = (el) => (el.id ? `#${el.id}` : `${el.tagName.toLowerCase()}.${[...el.classList].join('.')}`) + (el.textContent.trim() ? ` "${el.textContent.trim().slice(0, 18)}"` : '');
-  const phone = innerWidth <= 820;
+  const phone = innerWidth <= 600;
   const stacked = document.documentElement.dataset.layout === 'stacked' || document.documentElement.dataset.autoStack === 'true' || innerWidth <= 1180;
   const de = document.documentElement;
 
@@ -115,7 +115,7 @@ let combos = 0;
 for (const [w, h] of WIDTHS) {
   await page.setViewportSize({ width: w, height: h });
   for (const side of SIDES) for (const layout of LAYOUTS) for (const sc of SCALES) for (const split of SPLITS) {
-    if (w <= 820 && (layout === 'stacked' || split !== 'default')) continue; // phones are always one column
+    if (w <= 600 && (layout === 'stacked' || split !== 'default')) continue; // phones are always one column
     await apply(side, layout, sc);
     await page.evaluate(() => document.querySelector('#splitResizer').dispatchEvent(new MouseEvent('dblclick', { bubbles: true })));
     if (split !== 'default') { await page.focus('#splitResizer'); await page.keyboard.press(split); }
