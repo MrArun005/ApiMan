@@ -897,8 +897,7 @@ h1.wordmark { font: inherit; margin: 0; }
 dialog.drawer.docked { position: fixed; inset: 0 0 0 auto; margin: 0; z-index: 40; } /* non-modal: the app beside it stays usable */
 dialog.drawer:not(.docked)::backdrop { background: rgb(10 14 18 / 0.35); } /* overlaid: dim the app it covers */
 .titlebar .name-input { field-sizing: content; min-width: 6ch; max-width: 100%; flex: 0 1 auto; } /* as wide as the name, clipped only when there is no room */
-@container resp (max-width: 420px) { /* narrow response pane: less frame, slimmer gutter, more code */
-  .resp-col .pane { padding-left: var(--s2); padding-right: var(--s2); }
+@container resp (max-width: 420px) { /* narrow response pane: slimmer gutter, more code (edges stay aligned with the bars) */
   .resp-col .CodeMirror-linenumber { padding: 0 var(--s1) 0 var(--s2); }
 }
 /* round 21 */
@@ -935,3 +934,7 @@ table.kv tr > :nth-child(2) { width: 38%; }
 .top-end { display: flex; align-items: center; gap: var(--s2); flex: none; }
 :root[data-side="right"] .top-end { order: 6; }
 .env-dot { width: 0.6em; height: 0.6em; }
+/* round 24 */
+@media (max-width: 900px) { .titlebar .name-input { margin-left: calc(-1 * var(--s2)); } } /* name text lines up with the URL bar */
+:root.drawer-open .top .env-picker { flex: 1 1 120px; min-width: 0; } /* beside the drawer the picker gives way, the header keeps one row */
+:root.drawer-open .top { flex-wrap: nowrap; }

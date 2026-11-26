@@ -174,7 +174,7 @@ function applyAppearance(s = state.settings) {
   if (initResizers.autoStack) initResizers.autoStack();
   if (initResizers.refresh) initResizers.refresh();
   if (typeof updateDock === 'function') requestAnimationFrame(updateDock); // text size changes the drawer's width
-  if (initResizers.setSide) initResizers.setSide(ls.get('apiman:layout', {}).side || 288); // re-derive from the stored width
+  if (initResizers.showSide) initResizers.showSide(); // re-derive from your stored width; the text-size minimum is applied, never saved
   if (!isPhone()) { $('#btnSide')?.setAttribute('aria-expanded', String(!s.sideHidden)); $('#btnSide')?.setAttribute('aria-label', s.sideHidden ? 'Show sidebar' : 'Hide sidebar'); }
 }
 
@@ -2069,6 +2069,7 @@ function renderUrlHl() {
 }
 function renderResolved() {
   renderUrlHl();
+  requestAnimationFrame(() => { const el = $('#resolved'); if (el) el.title = el.textContent; });
   const t = cur();
   const el = $('#resolved');
   // The line always keeps its height, so the panes below never jump while you type.
@@ -2641,7 +2642,7 @@ function bodyView(res, view) {
   }
   const text = res.body ?? '';
   if (!text) return h('p', { class: 'hint' }, 'The response body is empty.');
-  const wrap = state.settings.wrap !== false;
+  const wrap = document.documentElement.dataset.wrap !== 'off'; // follows the Settings preview too
   const langOf = () => (/json/.test(ct) ? 'json' : /html/.test(ct) ? 'html' : /xml|svg/.test(ct) ? 'xml' : /javascript/.test(ct) ? 'javascript' : 'text');
   if (view === 'pretty') {
     try {
@@ -2720,7 +2721,8 @@ async function send() {
     // Cancel: show it immediately; a late answer from the server is ignored below.
     t.sending.abort();
     t.sending = null;
-    t.out = { error: 'Request cancelled.', tests: [], logs: [], warnings: [] };
+    t.out = t.prevOut || { error: 'Request cancelled.', tests: [], logs: [], warnings: [] };
+    if (t.prevOut) toast('Request cancelled. Showing the previous response.');
     renderResponse();
     return;
   }
@@ -2828,7 +2830,7 @@ function openDialog(opts) {
   renderDialog(opts);
 }
 /** Settings docks beside the app only while the app keeps at least 1000px; otherwise it overlays. */
-function canDock() { const side = $('.side')?.offsetWidth || 0; return innerWidth > 900 && innerWidth - 440 >= side + 480 * cssScale(); }
+function canDock() { const side = $('.side')?.offsetWidth || 0; return innerWidth > 900 && innerWidth - 440 >= side + 2 * 320 * cssScale() + 16; } // panes stay side by side
 function updateDock() {
   const dlg = $('#dlg');
   if (!dlg.open || !dlg.classList.contains('drawer')) return;
@@ -4053,6 +4055,7 @@ function initResizers() {
   side.title = split.title = 'Drag to resize, double-click to reset';
   initResizers.refresh = () => setSplit((stacked() ? layout.reqH || 35 : layout.req || 50), false);
   initResizers.setSide = (px) => setSideW(px);
+  initResizers.showSide = () => setSideW(ls.get('apiman:layout', {}).side || 288, false);
   initResizers.snapshot = () => ({ ...ls.get('apiman:layout', {}) });
   initResizers.restore = (snap) => {
     Object.assign(layout, { side: snap.side, req: snap.req, reqH: snap.reqH });
@@ -4153,6 +4156,11 @@ async function start() {
   });
   new MutationObserver(() => requestAnimationFrame(fitResp)).observe($('#respTabs > .seg'), { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['aria-selected'] });
   $$('.pane-tools .seg').forEach(watchOverflow);
+  new MutationObserver(() => {
+    const rows = $$('#sideBody .row');
+    const keep = rows.find((r) => r.dataset.key && r.dataset.key === state.focusKey) || rows.find((r) => r.classList.contains('active')) || rows[0];
+    rows.forEach((r) => { if (r.tabIndex !== (r === keep ? 0 : -1)) r.tabIndex = r === keep ? 0 : -1; });
+  }).observe($('#sideBody'), { childList: true, subtree: true });
   // Sidebar tree keyboard: Up/Down move, Right/Left open/close, Space activates (Enter is handled per row).
   $('#sideBody').addEventListener('focusin', (e) => {
     const row = e.target.closest('.row');
