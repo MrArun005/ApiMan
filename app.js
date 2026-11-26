@@ -124,7 +124,7 @@ const isLocalHost = (host) => ['localhost', '127.0.0.1', '[::1]'].includes(host)
 const DEFAULT_SETTINGS = {
   theme: 'system', timeout: 60, followRedirects: true, history: true, insecure: false,
   textScale: 1, codeSize: 13, density: 'comfortable', layout: 'auto', wrap: true,
-  densityScale: null, lineHeight: 1.6, tabSize: 2, tabStyle: 'subtle', uiFont: 'geist', codeFont: 'geist-mono', accent: 'blue', accentCustom: '#2560cf',
+  densityScale: null, lineHeight: 1.6, tabSize: 2, tabStyle: 'subtle', sendStyle: 'method', uiFont: 'geist', codeFont: 'geist-mono', accent: 'blue', accentCustom: '#2560cf',
   sidePosition: 'left', sideHidden: false,
 };
 const DENSITY = { compact: 0.875, comfortable: 1, spacious: 1.125 };
@@ -145,9 +145,10 @@ const clampNum = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite
 /** Text size, code size, density, layout and line wrapping: all CSS custom properties, so they apply instantly. */
 function applyAppearance(s = state.settings) {
   const root = document.documentElement;
-  root.style.setProperty('--text-scale', String(clampNum(s.textScale, 0.85, 1.3, 1)));
-  root.style.setProperty('--code-size', `${clampNum(s.codeSize, 11, 20, 13)}px`);
-  root.style.setProperty('--d', String(clampNum(s.densityScale ?? DENSITY[s.density] ?? 1, 0.8, 1.25, 1)));
+  root.style.setProperty('--text-scale', String(clampNum(s.textScale, 0.8, 1.5, 1)));
+  root.style.setProperty('--code-size', `${clampNum(s.codeSize, 10, 24, 13)}px`);
+  root.style.setProperty('--d', String(clampNum(s.densityScale ?? DENSITY[s.density] ?? 1, 0.75, 1.4, 1)));
+  root.dataset.sendStyle = s.sendStyle === 'accent' ? 'accent' : 'method';
   root.style.setProperty('--code-lh', String(clampNum(s.lineHeight, 1.3, 1.9, 1.6)));
   root.style.setProperty('--font-ui', (UI_FONTS[s.uiFont] || UI_FONTS.geist)[1]);
   root.style.setProperty('--font-code', (CODE_FONTS[s.codeFont] || CODE_FONTS['geist-mono'])[1]);
@@ -1962,7 +1963,7 @@ function renderTabs() {
     h('button', { class: 'newtab alltabs', title: 'All open tabs', 'aria-label': 'All open tabs', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
       onclick: (e) => showMenu(e.currentTarget, state.tabs.map((t, i) => ({
         label: h('span', { class: 'mi-tab' }, h('span', { class: `mtag ${t.ed.method}` }, t.ed.method), h('span', { class: 'mi-name' }, t.ed.name, t.dirty ? h('span', { class: 'dirty-dot', 'aria-label': ' (unsaved)' }) : null),
-          h('span', { class: 'mi-sub' }, (t.ed.url || '').replace(/^[a-z]+:\/\//i, '') || 'no URL yet'), i === state.active ? h('span', { class: 'mi-sub' }, 'current') : null),
+          h('span', { class: 'mi-sub' }, (t.ed.url || '').replace(/^[a-z]+:\/\//i, '') || 'no URL yet')),
         current: i === state.active,
         onClick: () => { state.active = i; persistTabs(); renderAll(); requestAnimationFrame(() => $('#tabstrip .rtab.on')?.focus()); },
       }))) }, icon('chevron')));
@@ -2438,14 +2439,15 @@ function renderResponse() {
   // body
   $('#respTools').hidden = false;
   $('#respTools').classList.toggle('no-body', !hasRes);
-  $$('#respTools .seg-btn').forEach((b) => { const on = b.dataset.view === t.bodyView; b.classList.toggle('on', on); b.setAttribute('aria-checked', String(on)); });
   const previewable = hasRes && (/html|xml|svg/.test(contentType(res)) || (res.binary && /^image\//.test(contentType(res))));
+  const view = t.bodyView === 'preview' && !previewable ? 'pretty' : t.bodyView; // nothing to preview: show Pretty, keep the choice for HTML
+  $$('#respTools .seg-btn').forEach((b) => { const on = b.dataset.view === view; b.classList.toggle('on', on); b.setAttribute('aria-checked', String(on)); });
   const pv = $('#respTools [data-view="preview"]');
   pv.disabled = !previewable;
   pv.title = previewable ? '' : 'Preview shows HTML and images; this response is neither.';
   clearFind();
   if (!$('#findBar').hidden) setTimeout(() => runFind(0), 0); // keep the open Find bar in sync with the new response
-  $('#respBody').replaceChildren(...notes, ...(notes.length && hasRes ? [h('div', { class: 'gap' })] : []), ...(hasRes ? [bodyView(res, t.bodyView)] : []));
+  $('#respBody').replaceChildren(...notes, ...(notes.length && hasRes ? [h('div', { class: 'gap' })] : []), ...(hasRes ? [bodyView(res, view)] : []));
   // headers
   $('#respHeaders').replaceChildren(...(hasRes ? [h('thead', null, h('tr', null, h('th', null, 'Name'), h('th', null, 'Value'))),
     h('tbody', null, res.headers.map(([k, v]) => h('tr', null, h('td', null, k), h('td', { class: 'mono' }, v))))] : []));
@@ -2812,6 +2814,7 @@ function renderDialog({ title, body, buttons = [], wide = false, confirm = false
   dialogCloses.set(dialogSeq, onClose || null);
   if (!dlg.open) dlg.showModal();
   if (onOpen) onOpen(); // before focus: it may enable/disable buttons
+  requestAnimationFrame(() => $$('#dlgBody .seg').forEach((sg) => fitTabs(sg)));
   // Start on the first field, not on the close button (or on what the dialog asks for).
   const first = [...$('#dlgBody').querySelectorAll('input:not([type=checkbox]):not([type=file]):not([type=range]):not([type=color]):not([disabled]):not([readonly]), select, textarea')].find((el) => el.getClientRects().length); // first visible field
   if (focus) ($(focus) || dlg).focus();
@@ -3050,6 +3053,8 @@ function peekVariables(anchor) {
   pop.setAttribute('role', 'dialog'); // a table and buttons, not a menu
   pop.setAttribute('aria-label', 'Variables in use');
   placePopover(pop, anchor);
+  showMenu.anchor = anchor;
+  (peek.querySelector('button') || pop).focus();
 }
 
 // ---------- import ----------
@@ -3581,13 +3586,14 @@ function openSettings(initial = null, layoutSnap = null) {
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Theme'), seg('theme', [['system', 'Match system'], ['light', 'Light'], ['dark', 'Dark']], 'Theme')),
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Accent colour'), swatches)),
     h('div', { class: 'grid-2' },
-      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Active tab'), seg('tabStyle', [['subtle', 'Subtle'], ['accent', 'Accent tint']], 'Active tab style'))),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Active tab'), seg('tabStyle', [['subtle', 'Subtle'], ['accent', 'Accent tint']], 'Active tab style')),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Send button'), seg('sendStyle', [['method', 'Method colour'], ['accent', 'Accent']], 'Send button colour'))),
     h('div', { class: 'grid-2' }, select('uiFont', UI_FONTS, 'Interface font'), select('codeFont', CODE_FONTS, 'Code font')),
     h('div', { class: 'grid-2' },
-      slider('textScale', 0.85, 1.3, 0.05, '%', 'Interface text size', 100),
-      slider('codeSize', 11, 20, 1, 'px', 'Code and body text size')),
+      slider('textScale', 0.8, 1.5, 0.05, '%', 'Interface text size', 100),
+      slider('codeSize', 10, 24, 1, 'px', 'Code and body text size')),
     h('div', { class: 'grid-2' },
-      slider('densityScale', 0.8, 1.25, 0.05, '%', 'Density (spacing and control height)', 100),
+      slider('densityScale', 0.75, 1.4, 0.05, '%', 'Density (spacing and control height)', 100),
       slider('lineHeight', 1.3, 1.9, 0.05, '×', 'Code line height')),
     h('div', { class: 'grid-2' },
       h('div', { class: 'field' }, h('span', { class: 'label' }, 'Tab width in editors'), seg('tabSize', [[2, '2 spaces'], [4, '4 spaces'], [8, '8 spaces']], 'Tab width')),
@@ -3621,7 +3627,7 @@ function openSettings(initial = null, layoutSnap = null) {
     buttons: [
       { label: 'Restore defaults', left: true, onClick: () => {
         // Only the form is reset and previewed; nothing is stored until Save, and Cancel brings everything back.
-        const defaults = { ...draft, theme: DEFAULT_SETTINGS.theme, textScale: 1, codeSize: 13, density: 'comfortable', densityScale: 1, layout: 'auto', wrap: true, tabStyle: 'subtle',
+        const defaults = { ...draft, theme: DEFAULT_SETTINGS.theme, textScale: 1, codeSize: 13, density: 'comfortable', densityScale: 1, layout: 'auto', wrap: true, tabStyle: 'subtle', sendStyle: 'method',
           lineHeight: 1.6, tabSize: 2, uiFont: 'geist', codeFont: 'geist-mono', accent: 'blue', sidePosition: 'left', sideHidden: false };
         reopening = true;
         applyAppearance(defaults);                             // defaults first, so minimums use the default text size
@@ -3633,7 +3639,7 @@ function openSettings(initial = null, layoutSnap = null) {
         Object.assign(s, {
           theme: draft.theme, textScale: draft.textScale, codeSize: draft.codeSize, density: draft.density, layout: draft.layout, wrap: draft.wrap,
           densityScale: draft.densityScale, lineHeight: draft.lineHeight, tabSize: Number(draft.tabSize) || 2, uiFont: draft.uiFont, codeFont: draft.codeFont,
-          accent: draft.accent, accentCustom: draft.accentCustom, tabStyle: draft.tabStyle, sidePosition: draft.sidePosition, sideHidden: !!draft.sideHidden,
+          accent: draft.accent, accentCustom: draft.accentCustom, tabStyle: draft.tabStyle, sendStyle: draft.sendStyle, sidePosition: draft.sidePosition, sideHidden: !!draft.sideHidden,
           timeout: Math.max(1, Math.min(600, Number(timeout.value) || 60)),
           followRedirects: follow.checked, history: hist.checked, insecure: backend.mode === 'local' && insecure.checked,
         });
@@ -3851,7 +3857,7 @@ function initResizers() {
     px = clamp(Math.round(px), sideMin(), 640);
     root.style.setProperty('--side-w', `${px}px`);
     Object.assign(side.dataset, { now: px });
-    side.setAttribute('aria-valuenow', String(px)); side.setAttribute('aria-valuemin', String(sideMin())); side.setAttribute('aria-valuemax', '640');
+    side.setAttribute('aria-valuenow', String(px)); side.setAttribute('aria-valuetext', `${px} pixels`); side.setAttribute('aria-valuemin', String(sideMin())); side.setAttribute('aria-valuemax', '640');
     if (persist) save('side', px);
     if (initResizers.autoStack) requestAnimationFrame(() => initResizers.autoStack()); // the work area just changed width
   };
@@ -3864,9 +3870,11 @@ function initResizers() {
     // request bars + a few rows, the response bars + 120px of body.
     const body = $('#respBody'), col = $('.resp-col');
     const respBars = body && body.offsetHeight ? col.offsetHeight - body.offsetHeight : $('#respTabs').offsetHeight + 40 * cssScale();
-    const [reqMin, respMin] = stacked() ? [120 * cssScale(), respBars + 140] : paneNeeds(); // stacked: response keeps 140px of body
+    const [reqMin, respMin] = stacked() ? [120 * cssScale(), respBars + 180] : paneNeeds(); // stacked: response keeps 180px of body
     const lo = Math.max(15, (reqMin / total) * 100), hi = Math.min(85, 100 - (respMin / total) * 100);
-    return lo <= hi ? [lo, hi] : [50, 50];
+    if (lo <= hi) return [lo, hi];
+    const give = Math.max(15, 100 - (respMin / total) * 100); // both minimums can't fit: the request gives way, the response keeps its room
+    return [Math.min(lo, give), Math.min(lo, give)];
   };
   const setSplit = (pct, persist = true) => {
     const [lo, hi] = splitBounds();
@@ -3875,7 +3883,7 @@ function initResizers() {
     root.style.setProperty(stacked() ? '--req-h' : '--req-w', `${pct}%`);
     split.dataset.now = pct;
     split.setAttribute('aria-orientation', stacked() ? 'horizontal' : 'vertical');
-    split.setAttribute('aria-valuenow', String(Math.round(pct))); split.setAttribute('aria-valuemin', String(Math.floor(lo))); split.setAttribute('aria-valuemax', String(Math.ceil(hi))); // the real limits
+    split.setAttribute('aria-valuenow', String(Math.round(pct))); split.setAttribute('aria-valuetext', `${Math.round(pct)} percent`); split.setAttribute('aria-valuemin', String(Math.floor(lo))); split.setAttribute('aria-valuemax', String(Math.ceil(hi))); // the real limits
     if (persist) save(key, pct);
   };
   setSideW(layout.side || 288, false);
@@ -3883,6 +3891,7 @@ function initResizers() {
   if (layout.req) root.style.setProperty('--req-w', `${layout.req}%`);
   if (layout.reqH) root.style.setProperty('--req-h', `${layout.reqH}%`);
   matchMedia('(max-width: 1180px)').addEventListener('change', () => setSplit((stacked() ? layout.reqH || 35 : layout.req || 50), false));
+  window.addEventListener('resize', () => requestAnimationFrame(() => setSplit(Number(split.dataset.now) || 50, false))); // re-clamp to the new window
 
   const drag = (el, onMove) => el.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;

@@ -14,7 +14,7 @@ const ONLY = process.env.ONLY; // e.g. ONLY=1280 to run one width
 const WIDTHS = [[1440, 900], [1366, 768], [1280, 800], [1024, 768], [390, 844]].filter(([w]) => !ONLY || String(w) === ONLY);
 const SIDES = ['left', 'right'];
 const LAYOUTS = ['auto', 'stacked'];
-const SCALES = [[1, 1], [0.85, 0.8], [1.3, 1.25], [1.3, 0.8], [0.85, 1.25]]; // [text, density]
+const SCALES = [[1, 1], [0.8, 0.75], [1.5, 1.4], [1.5, 0.75], [0.8, 1.4]]; // [text, density] at the Settings extremes
 const SPLITS = ['default', 'Home', 'End'];
 
 const browser = await chromium.launch(process.env.CHROMIUM ? { executablePath: process.env.CHROMIUM } : {});
