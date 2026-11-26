@@ -2589,7 +2589,7 @@ function stepFind(dir, start = null) {
   if (find.current) find.current.clear();
   const hit = find.hits[find.i];
   find.current = cm.markText(hit.from, hit.to, { className: 'cm-find-current' });
-  cm.scrollIntoView({ from: hit.from, to: hit.to }, 60);
+  cm.scrollIntoView({ from: hit.from, to: hit.to }, Math.max(60, cm.getScrollInfo().clientHeight / 2 - 20)); // centred
   $('#findCount').textContent = `${find.i + 1} of ${n}${n >= 5000 ? '+' : ''}`;
 }
 
@@ -2802,7 +2802,10 @@ function renderDialog({ title, body, buttons = [], wide = false, confirm = false
   dlg.classList.toggle('confirm', confirm);
   $('#dlgBody').classList.toggle('tall', tall); // dialogs with tabs keep one height, so nothing jumps under the cursor
   $('#dlg').classList.toggle('drawer', drawer); // docked at the side: the app shrinks beside it, so previews stay visible
-  document.documentElement.classList.toggle('drawer-open', drawer);
+  const drawerW = Math.min(400 * cssScale(), innerWidth);
+  const docked = drawer && innerWidth - drawerW >= 1000; // the app keeps a representative width beside it
+  document.documentElement.classList.toggle('drawer-open', docked);
+  dlg.classList.toggle('docked', docked);
   // Every dialog gets the same footer: [destructive/left actions]  ...  Cancel  Primary
   if (cancel && !buttons.some((b) => b.label === 'Cancel')) {
     const at = buttons.findIndex((b) => b.primary || b.solid);
@@ -2823,7 +2826,7 @@ function renderDialog({ title, body, buttons = [], wide = false, confirm = false
   }, b.label)));
   dialogSeq += 1;
   dialogCloses.set(dialogSeq, onClose || null);
-  if (!dlg.open) dlg.showModal();
+  if (!dlg.open) { if (dlg.classList.contains('docked')) dlg.show(); else dlg.showModal(); } // docked: the app stays usable beside it
   if (onOpen) onOpen(); // before focus: it may enable/disable buttons
   requestAnimationFrame(() => $$('#dlgBody .seg').forEach((sg) => fitTabs(sg)));
   // Start on the first field, not on the close button (or on what the dialog asks for).
@@ -3411,7 +3414,7 @@ function openCode() {
                 get textContent() { return viewer.cm ? viewer.cm.getValue() : viewer.querySelector('pre').textContent; } };
   const tabsBar = h('div', { class: 'seg dlg-tabs', role: 'tablist' });
   const draw = () => {
-    tabsBar.replaceChildren(...Object.entries(GENERATORS).map(([k, g]) => h('button', {
+    tabsBar.replaceChildren(...['curl', 'httpie', 'powershell', 'fetch', 'python', 'java', 'go'].filter((k) => GENERATORS[k]).map((k) => [k, GENERATORS[k]]).map(([k, g]) => h('button', {
       type: 'button', class: `seg-btn ${k === lang ? 'on' : ''}`, role: 'tab', 'aria-selected': String(k === lang), onclick: () => { lang = k; ls.set('apiman:codeLang', k); draw(); tabsBar.querySelector('.on')?.focus(); },
     }, g.label)));
     const r = codeWire(mask.checked);
@@ -4177,6 +4180,12 @@ async function start() {
     if (!e.target.closest || !e.target.closest('.resp-col')) return;
     e.preventDefault(); closeFind();
   });
+  document.addEventListener('keydown', (e) => {
+    const dlg = $('#dlg');
+    if (e.key !== 'Escape' || !dlg.open || !dlg.classList.contains('docked') || !$('#popover').hidden) return;
+    if (e.target.closest && e.target.closest('.CodeMirror')) return;
+    e.preventDefault(); closeDialog();
+  });
   // Phones: Escape closes the open sidebar drawer.
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || $('#dlg').open || !$('#popover').hidden || !$('.app').classList.contains('side-open')) return;
@@ -4217,6 +4226,8 @@ async function start() {
   dlgEl.addEventListener('submit', (e) => { if (e.submitter && e.submitter.value === 'cancel') closingSeq = dialogSeq; });
   $('#dlg').addEventListener('close', () => {
     document.documentElement.classList.remove('drawer-open'); // the app takes the full width again
+    $('#dlg').classList.remove('docked');
+    requestAnimationFrame(() => initResizers.refresh && initResizers.refresh());
     requestAnimationFrame(() => requestAnimationFrame(() => fitTabs.resp && fitTabs.resp()));
     const seq = closingSeq ?? dialogSeq;
     closingSeq = null;

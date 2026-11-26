@@ -893,3 +893,12 @@ h1.wordmark { font: inherit; margin: 0; }
 .pane-tools > .hint.one-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1 1 0; align-self: center; }
 .toast { bottom: calc(var(--s4) + 56px); } /* above the sidebar footer */
 @media (max-width: 600px) { .toast { bottom: var(--s4); } }
+/* round 20 */
+dialog.drawer.docked { position: fixed; inset: 0 0 0 auto; margin: 0; z-index: 40; } /* non-modal: the app beside it stays usable */
+dialog.drawer:not(.docked)::backdrop { background: rgb(10 14 18 / 0.35); } /* overlaid: dim the app it covers */
+.titlebar .name-input { field-sizing: content; min-width: 6ch; max-width: 100%; flex: 0 1 auto; } /* as wide as the name, clipped only when there is no room */
+@container resp (max-width: 420px) { /* narrow response pane: less frame, slimmer gutter, more code */
+  .resp-col .pane { padding-left: var(--s2); padding-right: var(--s2); }
+  .resp-col .CodeMirror-linenumber { padding: 0 var(--s1) 0 var(--s2); }
+  #respTools { padding-left: var(--s2); padding-right: var(--s2); }
+}
