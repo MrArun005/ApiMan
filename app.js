@@ -187,6 +187,11 @@ const ui = {
       actions.length ? ui.actions(...actions) : null);
   },
   progress(tone = '') { return h('div', { class: cx('bar', toneOf(tone)) }, h('div', { style: 'width:0%' })); },
+  /** Chart: bars oldest to newest. bars: [{ value 0..1, tone, title }]. */
+  chart(bars, { label = '' } = {}) {
+    return h('div', { class: 'chart', role: 'img', 'aria-label': label || null },
+      ...bars.map((b) => h('div', { class: toneOf(b.tone) || null, style: `height:${Math.max(0, Math.min(1, b.value)) * 100}%`, title: b.title || null })));
+  },
 };
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID()
@@ -2523,6 +2528,9 @@ function fitTabs(seg) {
   if (btns.every((b) => !b.classList.contains('ovf') || b.disabled || b.getAttribute('aria-disabled') === 'true')) more.hidden = true;
 }
 function placePopover(pop, anchor) {
+  // A modal dialog is in the top layer: a popover opened from inside it must live in it too, or it opens underneath
+  const host = anchor.closest('dialog[open]') || document.body;
+  if (pop.parentElement !== host) host.append(pop);
   pop.hidden = false;
   const r = anchor.getBoundingClientRect();
   const pw = pop.offsetWidth, ph = pop.offsetHeight;
@@ -2531,6 +2539,7 @@ function placePopover(pop, anchor) {
 }
 function hideMenu(refocus = false) {
   $('#popover').hidden = true;
+  if ($('#popover').parentElement !== document.body) document.body.append($('#popover')); // never left in a closed dialog
   if (showMenu.row) { showMenu.row.classList.remove('menu-open'); showMenu.row = null; }
   if (showMenu.anchor) {
     showMenu.anchor.setAttribute('aria-expanded', 'false');
@@ -2778,7 +2787,8 @@ function renderWelcome() {
     ui.actions(
       ui.button({ label: 'New request', variant: 'primary', 'data-act': 'new-request' }), // the welcome screen's one primary action
       ui.button({ label: 'Import collection', 'data-act': 'import' }),
-      ui.button({ label: 'Paste cURL', 'data-act': 'import-curl' })),
+      ui.button({ label: 'Paste cURL', 'data-act': 'import-curl' }),
+      backend && backend.mode === 'local' ? ui.button({ label: 'Run automation', 'data-act': 'automation' }) : null),
     h('p', { class: 'hint shortcuts' }, h('span', null, kbd('/'), ' filter requests, ', kbd(MOD), ' + ', kbd('Enter'), ' send, ', kbd(MOD), ' + ', kbd('S'), ' save, ', kbd(MOD), ' + ', kbd('B'), ' sidebar')),
     ...(cols.length ? [h('div', { class: 'welcome-cols' }, ...cols)] : [])); // replaceChildren would print a null as "null"
 }
@@ -4096,9 +4106,10 @@ function updateDock() {
   if (focused && dlg.contains(focused)) focused.focus({ preventScroll: true });
 }
 window.addEventListener('resize', () => requestAnimationFrame(updateDock));
-function renderDialog({ title, body, buttons = [], wide = false, confirm = false, tall = false, drawer = false, cancel = 'Cancel', onClose, focus, onOpen }) {
+function renderDialog({ title, body, buttons = [], wide = false, full = false, confirm = false, tall = false, drawer = false, cancel = 'Cancel', onClose, focus, onOpen }) {
   const dlg = $('#dlg');
   dlg.classList.toggle('wide', wide);
+  dlg.classList.toggle('full', full);
   dlg.classList.toggle('confirm', confirm);
   $('#dlgBody').classList.toggle('tall', tall); // dialogs with tabs keep one height, so nothing jumps under the cursor
   $('#dlg').classList.toggle('drawer', drawer); // docked at the side: the app shrinks beside it, so previews stay visible
@@ -5372,6 +5383,396 @@ async function headlessRun(job) {
   }
 }
 
+// =====================================================================================================
+// Automation: Robot Framework projects (UI with the Browser library, API with RequestsLibrary), run live
+// =====================================================================================================
+/** A run file (screenshot, log.html) as a blob URL or text: /api needs the session token, so <img src> can't fetch it. */
+async function runFile(runId, name, as = 'url') {
+  const r = await fetch(`/api/robot/runs/${encodeURIComponent(runId)}/files/${name.split('/').map(encodeURIComponent).join('/')}`, { headers: API_TOKEN ? { 'X-ApiMan-Token': API_TOKEN } : {} });
+  if (!r.ok) throw new Error(`Couldn't open ${name} (${r.status}).`);
+  return as === 'text' ? r.text() : URL.createObjectURL(await r.blob());
+}
+
+const runTone = (st) => ({ PASS: 'ok', passed: 'ok', FAIL: 'err', failed: 'err', SKIP: 'muted', stopped: 'warn', running: '' }[st] || 'muted');
+const fmtWhen = (t) => new Date(t * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+async function openAutomation() {
+  const projects = await api('GET', '/api/robot/projects');
+  if (!projects.length) {
+    openDialog({ title: 'Automation', wide: true, cancel: 'Close', body: ui.emptyPane({
+      icon: 'folder', title: 'No Robot Framework project yet',
+      text: `Put a project folder (one with .robot files) in your data folder, ${state.dataDir || ''}, then open Automation again. ApiMan finds its suites, tests, tags and test data, and suggests environment keys from the variables it uses.`,
+      example: 'my-project/\n  tests/ui/*.robot      Browser library (Playwright)\n  tests/api/*.robot     RequestsLibrary\n  resources/*.resource\n  testdata/*.json, *.csv',
+    }) });
+    return;
+  }
+  const saved = ls.get('apiman:automation', {});
+  const remember = (k, v) => { saved[k] = v; ls.set('apiman:automation', saved); };
+  let project = null;      // the open project's details
+  let run = null;          // { id, offset, timer, meta } of the run shown
+  let shotUrl = null;      // blob URL of the screenshot shown
+  let http = [];           // HTTP calls of the run shown
+  let dataText = saved.data || '{\n  \n}';
+
+  // ---- controls ----
+  const projSel = ui.select(projects.map((p) => [p.id, p.name]), { value: projects.some((p) => p.id === saved.project) ? saved.project : projects[0].id,
+    onChange: () => { remember('project', projSel.value); loadProject().catch((e) => toast(e.message, 'err')); } });
+  const targetSel = ui.select([['', 'Everything']], { onChange: () => remember('target', targetSel.value) });
+  const envSel = ui.select([], { onChange: () => { remember('env', envSel.value); renderKeys(); } });
+  // ApiMan environments, then the project's own variable files (env/qa.yaml, config/prod.py) as "file:<path>"
+  const fillEnvs = () => {
+    const keep = envSel.value || saved.env || state.activeEnv || '';
+    const files = project ? project.varfiles : [];
+    envSel.replaceChildren(...ui.select([['', 'No environment'],
+      ...(state.envList.length ? [{ group: 'ApiMan environments', options: state.envList.map((e) => [e.id, e.name]) }] : []),
+      ...(files.length ? [{ group: 'Project variable files', options: files.map((f) => [`file:${f}`, f]) }] : [])], { value: keep }).childNodes);
+    envSel.value = [...envSel.options].some((o) => o.value === keep) ? keep : '';
+  };
+  fillEnvs();
+  const tagsIn = ui.input({ code: true, placeholder: 'e.g. smoke, api (empty: every test)', value: saved.include || '', spellcheck: 'false', onInput: () => remember('include', tagsIn.value) });
+  const speedSel = ui.select([['watch', 'Watch: each browser step stays on screen'], ['full', 'Full speed']], { value: saved.speed || 'watch', onChange: () => remember('speed', speedSel.value) });
+
+  // ---- Live tab ----
+  const summary = ui.meta([h('span', null, 'Choose what to run, then Run.')]);
+  const bar = ui.progress();
+  const shotImg = h('img', { class: 'preview', alt: 'The browser as the last UI step left it', hidden: true });
+  const shotEmpty = ui.hint('The browser appears here, step by step, as soon as a UI test (Browser library) opens a page. Suite setup (starting servers, API calls) comes first.');
+  const shotCaption = ui.hint('', { oneLine: true });
+  const steps = h('div', { class: 'console scroll', role: 'log', 'aria-label': 'Steps', tabindex: '0' });
+  const failures = h('div', { class: 'dlg-after', hidden: true });
+  const live = [summary, bar, h('div', { class: 'grid-2 lead' },
+    h('div', null, ui.sectionHead('Browser', null, null), shotEmpty, shotImg, shotCaption),
+    h('div', null, ui.sectionHead('Steps', null, null), steps)), failures];
+  /** A failed test: its error and, for UI tests, the screen at the moment it failed. */
+  const addFailure = (e, runId) => {
+    if (failures.hidden) { failures.hidden = false; failures.replaceChildren(ui.sectionHead('Failures', 'the screen when each UI test failed', null)); }
+    const img = h('img', { class: 'preview', alt: `The browser when "${e.name}" failed`, hidden: true });
+    failures.append(ui.result('err', 'Fail', `${e.name}`, `${e.suite ? `${e.suite}: ` : ''}${e.message || 'Failed'}`), img);
+    if (e.shot) runFile(runId, e.shot).then((url) => { img.src = url; img.hidden = false; }).catch(() => {});
+  };
+
+  // ---- API calls tab ----
+  const httpBody = h('tbody');
+  const httpDetail = h('div', { class: 'dlg-after' });
+  const httpEmpty = ui.hint('Every HTTP call the tests make through requests (RequestsLibrary or your own Python keywords) is listed here as it happens: request, response and errors.');
+  const apiPane = [httpEmpty, h('table', { class: 'grid boxed', hidden: true }, h('thead', null, h('tr', null,
+    h('th', { class: 'tight' }, '#'), h('th', null, 'Request'), h('th', null, 'Test'), ...['Status', 'Time'].map((x) => h('th', { class: 'num' }, x)))), httpBody), httpDetail];
+  const showHttp = (e, i) => {
+    $$('tr', httpBody).forEach((tr) => tr.classList.toggle('on', tr.dataset.i === String(i)));
+    const pretty = (t) => { try { return JSON.stringify(JSON.parse(t), null, 2); } catch { return t || ''; } };
+    const heads = (o) => Object.entries(o || {}).map(([k, v]) => `${k}: ${v}`).join('\n');
+    httpDetail.replaceChildren(
+      ui.sectionHead('Request', `${e.method} ${e.url}`, null),
+      codeEditor({ value: [heads(e.reqHeaders), e.reqBody ? `\n${pretty(e.reqBody)}` : ''].join('\n').trim(), mode: e.reqBody && /^\s*[[{]/.test(e.reqBody) ? 'json' : 'text', readOnly: true, label: 'Request', cls: 'short', fold: true }),
+      ui.sectionHead('Response', e.error ? e.error : `${e.status} ${e.reason || ''} · ${fmtMs(e.ms)}${e.size != null ? ` · ${fmtSize(e.size)}` : ''}`, null),
+      e.error ? ui.note(e.error, 'err') : codeEditor({ value: `${heads(e.resHeaders)}\n\n${pretty(e.resBody)}`, mode: /^\s*[[{]/.test(e.resBody || '') ? 'json' : 'text', readOnly: true, label: 'Response', fold: true }));
+  };
+  const addHttp = (e) => {
+    http.push(e);
+    const i = http.length - 1;
+    apiPane[1].hidden = false; httpEmpty.hidden = true;
+    httpBody.append(h('tr', { tabindex: '0', 'data-i': String(i), onclick: () => showHttp(e, i), onkeydown: (ev) => { if (ev.key === 'Enter') showHttp(e, i); } },
+      h('td', { class: 'tight' }, String(i + 1)),
+      h('td', { class: 'mono' }, ui.method(e.method), ' ', e.url),
+      h('td', null, e.test || '–'),
+      h('td', { class: 'num' }, e.error ? ui.status(null) : ui.status(e.status, { small: true })),
+      h('td', { class: 'num' }, e.ms != null ? fmtMs(e.ms) : '–')));
+  };
+
+  // ---- Variables tab ----
+  const keysPane = h('div');
+  function renderKeys() {
+    if (!project) return;
+    const env = envSel.value && !envSel.value.startsWith('file:') ? state.envs[envSel.value] : null;
+    const values = new Map((env ? env.values : []).filter((v) => v.enabled !== false).map((v) => [v.key.replace(/[\s_]/g, '').toLowerCase(), v]));
+    const missing = project.keys.filter((k) => !values.has(k.name.replace(/[\s_]/g, '').toLowerCase()));
+    const secretish = (k) => /pass|secret|token|key/i.test(k);
+    keysPane.replaceChildren(...[ // replaceChildren would print a null as "null"
+      ui.hint(`Variables this project uses but never defines. They come from the environment you pick (Robot matches names ignoring case, spaces and underscores, so BASE_URL is baseUrl), and Test data can override them for one run.`),
+      project.keys.length ? h('table', { class: 'grid boxed' }, h('thead', null, h('tr', null, h('th', null, 'Variable'), h('th', null, 'Used in'), h('th', null, env ? `Value in ${env.name}` : 'Value'))),
+        h('tbody', null, ...project.keys.map((k) => {
+          const v = values.get(k.name.replace(/[\s_]/g, '').toLowerCase());
+          return h('tr', null, h('td', { class: 'mono' }, `\${${k.name}}`), h('td', null, k.files.join(', ')),
+            h('td', { class: 'mono' }, v ? (v.type === 'secret' || secretish(k.name) ? '•••' : String(v.value)) : ui.pill(env ? 'Missing' : 'Not set', 'warn')));
+        }))) : ui.note('This project defines every variable it uses: nothing to fill in.', 'ok'),
+      project.envVars.length ? ui.hint(`It also reads these operating-system environment variables: ${project.envVars.map((x) => `%{${x}}`).join(', ')}.`) : null,
+      ui.actions(...[
+        env && missing.length ? ui.button({ label: `Add ${missing.length} missing to ${env.name}`, size: 'small', onClick: () => addKeys(env, missing).catch((e) => toast(e.message, 'err')) }) : null,
+        !env && !envSel.value && project.keys.length ? ui.button({ label: 'Create an environment with these keys', size: 'small', onClick: () => createEnv().catch((e) => toast(e.message, 'err')) }) : null,
+        env ? ui.button({ label: `Edit ${env.name}`, size: 'small', onClick: () => aside(() => editEnvironment(envSel.value)) }) : null,
+      ].filter(Boolean))].filter(Boolean));
+  }
+  async function addKeys(env, missing) {
+    await mutateDoc('environments', envSel.value, (doc) => { doc.values.push(...missing.map((k) => ({ key: k.name, value: '', type: /pass|secret|token|key/i.test(k.name) ? 'secret' : 'default', enabled: true }))); return true; });
+    renderKeys();
+    toast(`Added ${missing.length} key${missing.length > 1 ? 's' : ''} to ${env.name}: fill in their values.`, 'ok');
+    aside(() => editEnvironment(envSel.value));
+  }
+  async function createEnv() {
+    const doc = { name: project.name, values: project.keys.map((k) => ({ key: k.name, value: '', type: /pass|secret|token|key/i.test(k.name) ? 'secret' : 'default', enabled: true })), _postman_variable_scope: 'environment' };
+    const id = await backend.environments.create(doc);
+    await refreshEnvironments();
+    renderEnvPicker();
+    fillEnvs();
+    envSel.value = id; remember('env', id);
+    renderKeys();
+    toast(`Created the ${project.name} environment: fill in its values.`, 'ok');
+    aside(() => editEnvironment(id));
+  }
+
+  /** Another dialog (the environment editor) over Automation: close Automation, open it, and reopen Automation after. */
+  async function aside(open) {
+    const dlg = $('#dlg');
+    const closed = new Promise((r) => dlg.addEventListener('close', r, { once: true }));
+    dlg.close();
+    await closed;
+    await open();
+    openAutomation().catch((e) => toast(e.message, 'err')); // queued: shown when the editor closes
+  }
+
+  // ---- Test data tab ----
+  const dataEd = codeEditor({ value: dataText, mode: 'json', label: 'Test data for this run (JSON)', onChange: (v) => { dataText = v; remember('data', v); }, cls: 'short' });
+  const filesPane = h('div');
+  const fileView = h('div', { class: 'dlg-after' });
+  function renderFiles() {
+    filesPane.replaceChildren(
+      ui.sectionHead('Test data files', project.data.length ? `${project.data.length} in ${project.name}` : null, null),
+      project.data.length ? h('table', { class: 'grid boxed' }, h('tbody', null, ...project.data.map((f) => h('tr', null,
+        h('td', { class: 'mono' }, f.path), h('td', { class: 'num' }, fmtSize(f.size)),
+        h('td', { class: 'tight' }, /\.xlsx?$/i.test(f.path) ? ui.hint('Excel: open it in Excel') : ui.button({ label: 'Open', variant: 'ghost', size: 'small', onClick: () => openFile(f.path).catch((e) => toast(e.message, 'err')) })))))) : ui.hint('No JSON, CSV, YAML or XML files in this project.'));
+  }
+  async function openFile(path) {
+    const f = await api('GET', `/api/robot/projects/${encodeURIComponent(project.id)}/file?path=${encodeURIComponent(path)}`);
+    let text = f.text;
+    const mode = /\.json$/i.test(path) ? 'json' : /\.xml$/i.test(path) ? 'xml' : 'text';
+    fileView.replaceChildren(
+      ui.toolbar([ui.sectionHead(path, null, null)], [ui.button({ label: 'Save', variant: 'ghost', size: 'small', onClick: async () => {
+        try {
+          if (mode === 'json') JSON.parse(text);
+          await api('PUT', `/api/robot/projects/${encodeURIComponent(project.id)}/file?path=${encodeURIComponent(path)}`, { text });
+          toast(`Saved ${path}.`, 'ok');
+        } catch (e) { toast(e instanceof SyntaxError ? `${path} isn't valid JSON: ${e.message}` : e.message, 'err'); }
+      } })]),
+      codeEditor({ value: text, mode, label: path, onChange: (v) => { text = v; }, fold: true }));
+  }
+
+  // ---- History tab ----
+  const historyPane = h('div');
+  async function renderHistory() {
+    const runs = await api('GET', `/api/robot/runs?project=${encodeURIComponent(project.id)}`);
+    const done = runs.filter((r) => r.status !== 'running');
+    if (!done.length) { historyPane.replaceChildren(ui.hint('Every run is kept here, with its report and log, so you can see trends: pass rate, slow tests and flaky ones.')); return; }
+    const rate = (r) => { const n = (r.passed || 0) + (r.failed || 0); return n ? r.passed / n : 0; };
+    const dur = (r) => (r.ended && r.started ? Math.round((r.ended - r.started) * 1000) : 0);
+    const byTest = new Map();
+    for (const r of done) for (const t of r.tests || []) {
+      const k = `${t.suite} › ${t.name}`;
+      const e = byTest.get(k) || { name: t.name, suite: t.suite, pass: 0, fail: 0, ms: [] };
+      if (t.status === 'PASS') e.pass++; else if (t.status === 'FAIL') e.fail++;
+      if (t.ms != null) e.ms.push(t.ms);
+      byTest.set(k, e);
+    }
+    const flaky = [...byTest.values()].filter((e) => e.pass && e.fail).sort((a, b) => b.fail - a.fail);
+    const failing = [...byTest.values()].filter((e) => !e.pass && e.fail);
+    const slow = [...byTest.values()].map((e) => ({ ...e, avg: e.ms.length ? Math.round(e.ms.reduce((a, b) => a + b, 0) / e.ms.length) : 0 })).sort((a, b) => b.avg - a.avg).slice(0, 5);
+    const total = done.reduce((a, r) => a + (r.passed || 0) + (r.failed || 0), 0);
+    const passed = done.reduce((a, r) => a + (r.passed || 0), 0);
+    const chartRuns = done.slice(0, 40).reverse();
+    historyPane.replaceChildren(
+      ui.meta([
+        h('span', null, ui.value(String(done.length)), done.length === 1 ? ' run' : ' runs'),
+        h('span', null, 'Pass rate ', ui.value(total ? `${Math.round((passed / total) * 100)}%` : '–', passed === total ? 'ok' : 'warn')),
+        h('span', null, 'Average run ', ui.value(fmtMs(Math.round(done.reduce((a, r) => a + dur(r), 0) / done.length)))),
+        h('span', null, ui.value(String(flaky.length), flaky.length ? 'warn' : 'muted'), flaky.length === 1 ? ' flaky test' : ' flaky tests'),
+        h('span', null, 'API calls ', ui.value(String(done.reduce((a, r) => a + (r.http || 0), 0)))),
+      ]),
+      ui.sectionHead('Pass rate per run', `last ${chartRuns.length}, oldest first`, null),
+      ui.chart(chartRuns.map((r) => ({ value: rate(r) || 0.02, tone: runTone(r.status), title: `${fmtWhen(r.started)}: ${r.passed || 0} passed, ${r.failed || 0} failed` })), { label: 'Pass rate per run' }),
+      ui.sectionHead('Duration per run', null, null),
+      ui.chart(chartRuns.map((r) => ({ value: dur(r) / Math.max(1, ...chartRuns.map(dur)), tone: 'muted', title: `${fmtWhen(r.started)}: ${fmtMs(dur(r))}` })), { label: 'Duration per run' }),
+      h('div', { class: 'grid-2' },
+        h('div', null, ui.sectionHead('Flaky and failing', null, null),
+          ...(flaky.length || failing.length ? [...flaky.map((e) => ui.result('warn', 'Flaky', e.name, `${e.suite}: failed ${e.fail} of ${e.pass + e.fail} runs`)),
+            ...failing.map((e) => ui.result('err', 'Failing', e.name, `${e.suite}: failed all ${e.fail} runs`))] : [ui.note('Every test that ran passed every time.', 'ok')])),
+        h('div', null, ui.sectionHead('Slowest tests', 'average', null),
+          ...slow.map((e) => ui.result('muted', fmtMs(e.avg), e.name, e.suite)))),
+      ui.sectionHead('Runs', null, null),
+      h('table', { class: 'grid boxed' }, h('thead', null, h('tr', null, h('th', null, 'Started'), h('th', null, 'Ran'), h('th', null, 'Environment'), h('th', null, 'Result'), h('th', { class: 'num' }, 'Time'), h('th', { class: 'tight' }, ''))),
+        h('tbody', null, ...done.map((r) => h('tr', null,
+          h('td', null, fmtWhen(r.started)),
+          h('td', { class: 'mono' }, [r.target === '.' ? 'Everything' : r.target, r.test && ` › ${r.test}`, r.include && ` [${r.include}]`].filter(Boolean).join('')),
+          h('td', null, r.env || '–'),
+          h('td', null, ui.pill(r.status === 'stopped' ? 'Stopped' : r.status === 'passed' ? 'Passed' : r.failed ? `${r.failed} failed` : 'Error', runTone(r.status)), ' ', `${r.passed || 0} passed`),
+          h('td', { class: 'num' }, fmtMs(dur(r))),
+          h('td', { class: 'tight' }, ui.button({ label: 'Show', variant: 'ghost', size: 'small', onClick: () => follow(r.id, true) }),
+            ui.button({ label: 'Report', variant: 'ghost', size: 'small', onClick: () => showRobotPage(r.id, 'report.html') }),
+            ui.button({ label: 'Log', variant: 'ghost', size: 'small', onClick: () => showRobotPage(r.id, 'log.html') })))))));
+  }
+  async function showRobotPage(runId, name) {
+    try {
+      const html = await runFile(runId, name, 'text');
+      // Robot's own page, here in the History tab and sandboxed: its scripts run, but it can't reach ApiMan's API or storage
+      historyPane.replaceChildren(
+        ui.toolbar([ui.sectionHead(name === 'log.html' ? 'Robot log' : 'Robot report', runId, null)],
+          [ui.button({ label: 'Back to history', variant: 'ghost', size: 'small', onClick: () => renderHistory().catch((e) => toast(e.message, 'err')) })]),
+        h('iframe', { class: 'preview tall', sandbox: 'allow-scripts', srcdoc: html, title: name }));
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  let loading = null; // the project being loaded: Run waits for it
+  const [tabBar, ...panes] = ui.tabs([
+    { key: 'live', label: 'Live', content: live },
+    { key: 'api', label: 'API calls', content: apiPane },
+    { key: 'keys', label: 'Variables', content: keysPane },
+    { key: 'data', label: 'Test data', content: [ui.field('Data for this run (JSON)', dataEd, { hint: 'Each key becomes a ${variable} for the run, over the environment\'s value. Saved with the run.' }), filesPane, fileView] },
+    { key: 'history', label: 'History', content: historyPane },
+  ], (k) => { if (k === 'history') renderHistory().catch((e) => toast(e.message, 'err')); }, { cls: 'dlg-tabs' });
+  const pythonNote = h('div');
+
+  function loadProject() { loading = loadProjectNow(); return loading; }
+  async function loadProjectNow() {
+    project = await api('GET', `/api/robot/projects/${encodeURIComponent(projSel.value)}`);
+    const tests = project.suites.reduce((a, s) => a + s.tests.length, 0);
+    targetSel.replaceChildren(...ui.select([['', `Everything (${tests} tests)`], ...project.suites.map((s) => ({ group: s.path, options: [
+      [s.path, `All of ${s.name} (${s.tests.length})`], ...s.tests.map((t) => [`${s.path}::${t.name}`, `${t.name}${t.tags.length ? `  [${t.tags.join(', ')}]` : ''}`])] }))], { value: saved.target || '' }).childNodes);
+    targetSel.value = [...targetSel.options].some((o) => o.value === saved.target) ? saved.target : '';
+    pythonNote.replaceChildren(project.python.error ? ui.note(project.python.error, 'err')
+      : ui.hint(`Robot Framework ${project.python.version} · ${project.python.path}`, { oneLine: true, title: project.python.path }));
+    fillEnvs();
+    if (!saved.env) { // first time: the environment that has most of this project's keys
+      const norm = (k) => k.replace(/[\s_]/g, '').toLowerCase();
+      const want = new Set(project.keys.map((k) => norm(k.name)));
+      const best = state.envList.map((e) => [e.id, ((state.envs[e.id] || {}).values || []).filter((v) => want.has(norm(v.key))).length]).sort((a, b) => b[1] - a[1])[0];
+      if (best && best[1]) envSel.value = best[0];
+    }
+    renderKeys();
+    renderFiles();
+    fileView.replaceChildren();
+  }
+
+  // ---- running and following a run ----
+  const resetLive = () => {
+    http = []; httpBody.replaceChildren(); httpDetail.replaceChildren(); apiPane[1].hidden = true; httpEmpty.hidden = false;
+    steps.replaceChildren(); failures.hidden = true; failures.replaceChildren(); shotImg.hidden = true; shotEmpty.hidden = false; shotCaption.textContent = '';
+    if (shotUrl) URL.revokeObjectURL(shotUrl), (shotUrl = null);
+    bar.firstChild.style.width = '0%'; bar.classList.remove('err', 'warn');
+  };
+  const counts = { tests: 0, done: 0, pass: 0, fail: 0, skip: 0 };
+  const line = (src, text, tone = '') => {
+    const atEnd = steps.scrollTop + steps.clientHeight >= steps.scrollHeight - 24;
+    steps.append(ui.logLine(src, text, tone));
+    while (steps.childElementCount > 1500) steps.firstChild.remove();
+    if (atEnd) steps.scrollTop = steps.scrollHeight;
+  };
+  let latestShot = null;
+  function apply(e) {
+    if (e.t === 'suite_start' && !counts.tests) counts.tests = e.tests || 0;
+    else if (e.t === 'suite_start') line('Suite', e.longname, 'muted');
+    else if (e.t === 'test_start') line('Test', e.name);
+    else if (e.t === 'kw_end' && e.depth <= 3 && e.kind !== 'SETUP' || e.t === 'kw_end' && e.status === 'FAIL' && e.depth <= 3) {
+      line(fmtMs(e.ms || 0), `${'  '.repeat(Math.max(0, e.depth - 1))}${e.lib ? `${e.lib}.` : ''}${e.name}`, e.status === 'FAIL' ? 'err' : e.status === 'PASS' ? '' : 'muted');
+    } else if (e.t === 'test_end') {
+      counts.done++; if (e.status === 'PASS') counts.pass++; else if (e.status === 'FAIL') counts.fail++; else counts.skip++;
+      line(e.status, `${e.name}${e.message ? `: ${e.message}` : ''}`, runTone(e.status));
+      if (e.status === 'FAIL' && run) addFailure(e, run.id);
+    } else if (e.t === 'log') line(e.level, e.text, e.level === 'WARN' ? 'warn' : 'err');
+    else if (e.t === 'http') { addHttp(e); line(e.error ? 'HTTP error' : String(e.status), `${e.method} ${e.url}${e.error ? `: ${e.error}` : ''}`, e.error || e.status >= 500 ? 'err' : e.status >= 400 ? 'warn' : 'muted'); }
+    if (e.shot) latestShot = { name: e.shot, step: e.name };
+  }
+  function renderSummary(meta, console) {
+    const running = meta.status === 'running';
+    const total = counts.tests || (meta.passed || 0) + (meta.failed || 0) + (meta.skipped || 0);
+    bar.firstChild.style.width = `${total ? Math.min(100, (counts.done / total) * 100) : running ? 5 : 100}%`;
+    bar.classList.toggle('err', counts.fail > 0 || meta.status === 'failed');
+    bar.classList.toggle('warn', meta.status === 'stopped');
+    const elapsed = Math.round(((meta.ended || Date.now() / 1000) - meta.started) * 1000);
+    summary.replaceChildren(...[
+      h('span', null, ui.pill(running ? 'Running' : meta.status === 'stopped' ? 'Stopped' : meta.status === 'failed' ? 'Failed' : 'Passed', runTone(meta.status))),
+      h('span', null, ui.value(`${counts.done}${total ? ` of ${total}` : ''}`), ' tests'),
+      h('span', null, ui.value(`${counts.pass} passed`, counts.pass ? 'ok' : 'muted'), ' ', ui.value(`${counts.fail} failed`, counts.fail ? 'err' : 'muted'), counts.skip ? ' ' : null, counts.skip ? ui.value(`${counts.skip} skipped`, 'muted') : null),
+      h('span', null, ui.value(String(http.length)), ' API calls'),
+      h('span', null, running ? 'for ' : 'in ', fmtMs(elapsed)),
+      meta.env ? h('span', null, 'Environment ', ui.value(meta.env)) : null].filter(Boolean));
+    if (!running && !counts.done && meta.exitCode) line('Robot', (console || '').trim().split('\n').slice(-12).join('\n') || `Robot exited with code ${meta.exitCode}.`, 'err');
+  }
+  async function follow(runId, replay = false) {
+    if (run && run.timer) clearTimeout(run.timer);
+    resetLive();
+    Object.assign(counts, { tests: 0, done: 0, pass: 0, fail: 0, skip: 0 });
+    run = { id: runId, offset: 0, timer: null, meta: null };
+    if (replay) $$('.seg-btn', tabBar)[0].click();
+    const tick = async () => {
+      if (!run || run.id !== runId || !$('#dlg').open) return;
+      let res;
+      try { res = await api('GET', `/api/robot/runs/${encodeURIComponent(runId)}?from=${run.offset}`); } catch (e) {
+        if (!run.failedOnce) toast(`Lost track of the run for a moment: ${e.message}`, 'warn');
+        run.failedOnce = true;
+        run.timer = setTimeout(tick, 1000); // try again: the run goes on regardless
+        return;
+      }
+      if (!run || run.id !== runId) return;
+      latestShot = null;
+      res.events.forEach(apply);
+      run.offset = res.next; run.meta = res.meta;
+      if (latestShot) {
+        const shot = latestShot;
+        runFile(runId, shot.name).then((url) => {
+          if (!run || run.id !== runId) return URL.revokeObjectURL(url);
+          if (shotUrl) URL.revokeObjectURL(shotUrl);
+          shotUrl = url; shotImg.src = url; shotImg.hidden = false; shotEmpty.hidden = true;
+          shotCaption.textContent = `After: ${shot.step}`;
+        }).catch(() => {});
+      }
+      renderSummary(res.meta, res.console);
+      const running = res.meta.status === 'running';
+      setRunButton(running);
+      if (running || res.events.length) run.timer = setTimeout(tick, running ? 250 : 50);
+      else if (!replay) {
+        const st = res.meta.status;
+        toast(st === 'passed' ? `All ${counts.pass} tests passed.` : st === 'stopped' ? 'Run stopped.'
+          : counts.done ? `${counts.fail} of ${counts.done} tests failed.` : 'The run ended before any test ran: see Steps for why.', st === 'passed' ? 'ok' : st === 'stopped' ? 'muted' : 'err');
+      }
+    };
+    await tick();
+  }
+  const setRunButton = (running) => { const b = $('#dlgFoot .btn.primary'); if (b) b.textContent = running ? 'Stop' : 'Run'; };
+  async function start() {
+    if (run && run.meta && run.meta.status === 'running') {
+      const { stopped } = await api('POST', `/api/robot/runs/${encodeURIComponent(run.id)}/stop`);
+      if (stopped) return;
+      run.meta.status = 'stopped'; // the server isn't running it any more: start a new run
+    }
+    await loading;
+    let data = null;
+    if (dataText.trim()) {
+      try { data = JSON.parse(dataText); } catch (e) { throw new Error(`Test data isn't valid JSON: ${e.message}`); }
+      if (data === null || typeof data !== 'object' || Array.isArray(data)) throw new Error('Test data must be a JSON object: each key becomes a ${variable}.');
+    }
+    const cut = targetSel.value.indexOf('::');
+    const [suite, test] = cut < 0 ? [targetSel.value, ''] : [targetSel.value.slice(0, cut), targetSel.value.slice(cut + 2)];
+    const file = envSel.value.startsWith('file:') ? envSel.value.slice(5) : '';
+    const meta = await api('POST', '/api/robot/runs', { project: project.id, suite: suite || '.', test: test || '', include: tagsIn.value, envId: file ? '' : envSel.value, varfile: file, data, speed: speedSel.value });
+    $$('.seg-btn', tabBar)[0].click();
+    summary.scrollIntoView({ block: 'start', behavior: 'smooth' }); // the live browser and steps fill the view
+    await follow(meta.id);
+  }
+
+  openDialog({
+    title: 'Automation', full: true, tall: true, cancel: 'Close',
+    body: [
+      h('div', { class: 'grid-3' }, ui.field('Project', projSel), ui.field('Run', targetSel), ui.field('Environment', envSel)),
+      h('div', { class: 'grid-3' }, ui.field('Only tests tagged', tagsIn), ui.field('Speed', speedSel), h('div', { class: 'field' }, pythonNote)),
+      tabBar, ...panes,
+    ],
+    onClose: () => { if (run && run.timer) clearTimeout(run.timer); run = null; if (shotUrl) URL.revokeObjectURL(shotUrl); },
+    buttons: [{ label: 'Run', primary: true, onClick: () => { start().catch((e) => toast(e.message, 'err')); return false; } }],
+  });
+  await loadProject();
+  // a run still going (started before this window opened): show it
+  const active = (await api('GET', `/api/robot/runs?project=${encodeURIComponent(project.id)}`)).find((r) => r.status === 'running');
+  if (active) follow(active.id).catch(() => {});
+}
+
 // ---------- settings ----------
 function openSettings(initial = null, layoutSnap = null) {
   const s = state.settings;
@@ -5634,7 +6035,14 @@ function bindChrome() {
     { label: 'Request from cURL', onClick: () => openImport('curl') },
   ]));
   $('#btnImport').addEventListener('click', () => openImport());
-  $('#btnRunner').addEventListener('click', () => openRunner(cur() && cur().cid, null));
+  // Run: the collection runner, and in local mode Automation (Robot Framework projects)
+  $('#btnRunner').addEventListener('click', (e) => {
+    if (!backend || backend.mode !== 'local') { openRunner(cur() && cur().cid, null); return; }
+    showMenu(e.currentTarget, [
+      { label: 'Collection runner', onClick: () => openRunner(cur() && cur().cid, null) },
+      { label: 'Automation (Robot Framework)', onClick: () => openAutomation().catch((err) => toast(err.message, 'err')) },
+    ]);
+  });
   $('#btnSettings').addEventListener('click', () => openSettings());
   $('#btnTheme').addEventListener('click', () => {
     state.settings.theme = effectiveTheme() === 'dark' ? 'light' : 'dark';
@@ -5653,6 +6061,7 @@ function bindChrome() {
     if (act.dataset.act === 'new-request') openTab(newTab());
     if (act.dataset.act === 'import') openImport();
     if (act.dataset.act === 'import-curl') openImport('curl');
+    if (act.dataset.act === 'automation') openAutomation().catch((err) => toast(err.message, 'err'));
   });
 
   document.addEventListener('keydown', (e) => {
@@ -6190,6 +6599,8 @@ async function start() {
     badge.className = 'pill ok';
     badge.title = 'Requests go out from this computer, through your VPN, with no CORS limits.';
     const info = await api('GET', '/api/info');
+    state.dataDir = info.dataDir;
+    $('#btnRunner').setAttribute('aria-haspopup', 'menu'); // local mode: Run opens a menu with Automation
     // one line: "Data folder: …/end/of/the/path", the whole path in the tooltip
     $('#dataDir').replaceChildren(h('span', null, 'Data folder:'), ' ', h('span', { class: 'dd-path', title: info.dataDir }, h('bdi', null, info.dataDir)));
   } else {

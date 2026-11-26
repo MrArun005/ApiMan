@@ -398,6 +398,18 @@ class TooLarge(ValueError):
     pass
 
 
+def private_dir(root):
+    """<data>/.apiman: ApiMan's own folder, owner-only and ignored by git (history, tabs and run logs can hold tokens)."""
+    d = Path(root) / ".apiman"
+    if not d.is_dir():
+        d.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)  # mkdir's mode is masked by the umask
+    ignore = d / ".gitignore"
+    if not ignore.exists():
+        ignore.write_text("# ApiMan's private, local-only state\n*\n", "utf-8")
+    return d
+
+
 class StateStore:
     """Workspace state: one JSON object in <data>/.apiman/state.json, ApiMan's private, local-only folder."""
 
@@ -424,12 +436,7 @@ class StateStore:
     def put(self, data):
         data = self.clean(data)
         with self._lock:
-            if not self.dir.is_dir():
-                self.dir.mkdir(mode=0o700, exist_ok=True)
-                os.chmod(self.dir, 0o700)  # mkdir's mode is masked by the umask
-            ignore = self.dir / ".gitignore"
-            if not ignore.exists():  # history and tabs can hold tokens: never let git pick this folder up
-                ignore.write_text("# ApiMan's private, local-only state\n*\n", "utf-8")
+            private_dir(self.dir.parent)
             # Atomic, owner-only: history and tabs can hold tokens. mkstemp creates the file 0600.
             fd, tmp = tempfile.mkstemp(dir=self.dir, suffix=".tmp")
             try:
@@ -595,6 +602,548 @@ def send(spec):
     }
 
 
+# =====================================================================================================
+# Automation: Robot Framework projects in the data folder
+# =====================================================================================================
+# A project is a folder with .robot files: the data folder itself, or any folder directly inside it. ApiMan lists
+# its suites, tests, tags and test data, suggests environment keys from the variables it uses but never defines,
+# and runs it with the project's own Python. A listener (robot_listener.py) streams every step, HTTP call and
+# browser screenshot to <data>/.apiman/runs/<run>/events.jsonl, which the page reads as the run goes.
+ROBOT_SKIP_DIRS = {"node_modules", "venv", ".venv", "results", "output", "outputs", "reports", "__pycache__", "site-packages"}
+DATA_EXTS = {".json", ".csv", ".yaml", ".yml", ".xlsx", ".xls", ".txt", ".xml", ".tsv"}
+MAX_PROJECT_FILES = 3000      # files looked at per project
+MAX_DATA_FILE = 2 * 1024 * 1024  # test data opened in the app
+RUN_ID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{6}$")
+RUN_FILE_RE = re.compile(r"^(shots/)?[\w.-]{1,120}$")
+ROBOT_BUILTIN_VARS = {"curdir", "tempdir", "execdir", "outputdir", "outputfile", "logfile", "reportfile", "debugfile",
+                      "testname", "testtags", "testdocumentation", "teststatus", "testmessage", "prevtestname",
+                      "prevteststatus", "prevtestmessage", "suitename", "suitesource", "suitedocumentation",
+                      "suitemetadata", "suitestatus", "suitemessage", "keywordstatus", "keywordmessage", "loglevel",
+                      "options", "empty", "space", "true", "false", "none", "null", "/", ":", "\\n"}
+RUNS = {}  # run id -> Popen (None while starting) of runs this server is running, until their final meta.json
+STOPPING = set()  # run ids the user stopped
+RUNS_LOCK = threading.Lock()
+
+
+def robot_norm(name):
+    """Robot matches variable names ignoring case, spaces and underscores: ${BASE_URL} is ${baseUrl}."""
+    return re.sub(r"[\s_]", "", name).lower()
+
+
+def robot_walk(top):
+    """Files below a project folder, skipping hidden folders, virtualenvs, outputs and links."""
+    count = 0
+    for dirpath, dirs, files in os.walk(top):
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d.lower() not in ROBOT_SKIP_DIRS
+                         and not os.path.islink(os.path.join(dirpath, d)))
+        for f in sorted(files):
+            p = Path(dirpath) / f
+            if f.startswith(".") or p.is_symlink():
+                continue
+            count += 1
+            if count > MAX_PROJECT_FILES:
+                return
+            yield p
+
+
+VARFILE_DIRS = {"env", "envs", "environment", "environments", "config", "configs", "variables", "vars", "settings"}
+PROJECT_MARKERS = {".git", "requirements.txt", "requirements-dev.txt", "pyproject.toml", "robot.toml", "tests", "test",
+                   "testcases", "test_cases", "suites", "resources", "keywords", "libraries"}
+PROJECT_DEPTH = 4  # folder levels searched for projects
+
+
+def robot_subdirs(d):
+    try:
+        return sorted(e for e in d.iterdir() if e.is_dir() and not e.is_symlink() and not e.name.startswith(".")
+                      and e.name.lower() not in ROBOT_SKIP_DIRS and FOLDER_RE.fullmatch(e.name))
+    except OSError:
+        return []
+
+
+def robot_projects(root):
+    """Every Robot Framework project in the data folder. A project is the first folder, going down, that has .robot
+    files of its own or looks like a project root (.git, requirements.txt, tests/, resources/...) with .robot files
+    below it; a folder holding several such repos gives one project each."""
+    root = Path(root).resolve()
+    out = []
+
+    def visit(d, depth):
+        try:
+            names = {e.name.lower() for e in d.iterdir()}
+        except OSError:
+            return
+        own = any(n.endswith(".robot") for n in names)
+        if own or (names & PROJECT_MARKERS and any(p.suffix == ".robot" for p in robot_walk(d))):
+            rel = d.relative_to(root).as_posix()
+            out.append({"id": rel if rel != "." else ".", "name": d.name if rel != "." else (d.name or "Data folder"),
+                        "path": rel})
+            return
+        if depth < PROJECT_DEPTH:
+            for sub in robot_subdirs(d):
+                visit(sub, depth + 1)
+
+    visit(root, 0)
+    return out
+
+
+def robot_project_dir(root, pid):
+    root = Path(root).resolve()
+    if pid == ".":
+        return root
+    segs = (pid or "").split("/")
+    if len(segs) > PROJECT_DEPTH or not all(FOLDER_RE.fullmatch(x) for x in segs):
+        raise ValueError("Invalid project")
+    p = (root / pid).resolve()
+    if root not in p.parents or not p.is_dir():
+        raise FileNotFoundError(pid)
+    return p
+
+
+def robot_inside(project, rel):
+    """A path given by the page, resolved strictly inside the project."""
+    p = (project / rel).resolve()
+    if project != p and project not in p.parents:
+        raise ValueError("Path outside the project")
+    return p
+
+
+SECTION_RE = re.compile(r"^\*+\s*(settings?|variables?|test cases?|tasks?|keywords?|comments?)\b", re.I)
+VAR_USE_RE = re.compile(r"[$@&%]\{([^{}]+)\}")
+CELL_SPLIT = re.compile(r" {2,}|\t| \| ")
+
+
+def robot_var_name(inner):
+    """The variable an ${...} refers to: ${user.name} and ${row}[id] are ${user} and ${row}; None for ${1}, ${{expr}}."""
+    if re.fullmatch(r"[\d.eE+-]+|0[xob]\w+|\{.*", inner):
+        return None
+    return re.split(r"[.\[+\-*/=!<>()]", inner.strip(), maxsplit=1)[0].strip() or None
+
+
+def robot_parse(text):
+    """Suites, tests, tags and variables from Robot source: a light parser, enough to list and suggest.
+    Returns (tests, used, defined, env_vars): `used` are variables read somewhere without being set in that same
+    test or keyword (arguments, assignments and FOR variables only count in their own block); `defined` are set for
+    everyone (Variables section, Set Suite/Global Variable).
+    ponytail: regex, not robot.api.get_model (needs Robot in ApiMan's own Python); swap in if it misjudges."""
+    tests, used, defined, envs, suite_tags = [], {}, set(), set(), []
+    section, current = None, None
+    block_uses, block_locals = [], set()
+
+    def flush():
+        for norm, name in block_uses:
+            if norm not in block_locals:
+                used.setdefault(norm, name)
+        block_uses.clear()
+        block_locals.clear()
+
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.rstrip()
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        m = SECTION_RE.match(line)
+        if m:
+            flush()
+            section = m.group(1).lower().rstrip("s").replace("test case", "test").replace("task", "test")
+            current = None
+            continue
+        cells = [c for c in CELL_SPLIT.split(line.strip()) if c]
+        if section == "comment" or not cells:
+            continue
+        first = cells[0]
+        low = [robot_norm(c) for c in cells]
+        uses = [(mm.group(0)[0], mm.group(1)) for c in cells for mm in VAR_USE_RE.finditer(c)]
+        if section == "setting" and low[0] in ("testtags", "forcetags", "defaulttags", "tasktags"):
+            suite_tags += cells[1:]
+        if section == "variable":
+            m = re.match(r"^[$@&]\{([^{}]+)\}", first)
+            if m:
+                defined.add(robot_norm(m.group(1)))
+                uses = [u for u in uses if u[1] != m.group(1)]
+        if section in ("test", "keyword") and not raw[:1].isspace():
+            flush()  # a new test or keyword starts
+            if section == "test":
+                current = {"name": first, "tags": [], "line": n}
+                tests.append(current)
+            else:  # embedded arguments in a keyword name are its arguments
+                block_locals.update(robot_norm(v) for v in VAR_USE_RE.findall(first))
+            continue
+        if current is not None and low[0] == "[tags]":
+            current["tags"] += cells[1:]
+        if low[0] == "[arguments]":
+            block_locals.update(robot_norm(v.split("=")[0]) for c in cells[1:] for v in VAR_USE_RE.findall(c.split("=")[0] + "}" if "=" in c else c))
+        elif low[0] in ("for", "var"):
+            block_locals.update(robot_norm(v) for v in VAR_USE_RE.findall(cells[1] if len(cells) > 1 else ""))
+        elif low[0] in ("setsuitevariable", "setglobalvariable", "settestvariable", "settaskvariable") and len(cells) > 1:
+            target = re.sub(r"^\\", "", cells[1])
+            for v in VAR_USE_RE.findall(target):
+                defined.add(robot_norm(v))
+            uses = uses[1:] if uses else uses
+        for i, c in enumerate(cells):  # ${x}=  or  ${x}  =   assignments
+            m = re.match(r"^[$@&]\{([^{}]+)\}\s*=?$", c)
+            if m and (c.endswith("=") or cells[i + 1:i + 2] == ["="]):
+                block_locals.add(robot_norm(m.group(1)))
+        for sigil, inner in uses:
+            name = robot_var_name(inner)
+            if not name:
+                continue
+            if sigil == "%":
+                envs.add(name)
+            else:
+                block_uses.append((robot_norm(name), name))
+    flush()
+    for t in tests:
+        t["tags"] = sorted(set(t["tags"] + suite_tags), key=str.lower)
+    return tests, used, defined, envs
+
+
+def robot_varfile_names(path):
+    """Variable names defined by a variable file (.py NAME = ..., .yaml/.json top-level keys)."""
+    try:
+        text = path.read_text("utf-8", errors="replace")
+    except OSError:
+        return set()
+    if path.suffix == ".json":
+        try:
+            data = json.loads(text)
+            return {robot_norm(k) for k in data} if isinstance(data, dict) else set()
+        except ValueError:
+            return set()
+    pat = r"^([A-Za-z_]\w*)\s*=" if path.suffix == ".py" else r"^([A-Za-z_][\w ]*)\s*:"
+    return {robot_norm(re.sub(r"^(LIST|DICT)__", "", m)) for m in re.findall(pat, text, re.M)}
+
+
+def robot_project(root, pid):
+    project = robot_project_dir(root, pid)
+    suites, data, used, defined, envs, uses, varfiles = [], [], {}, set(), set(), {}, []
+    for p in robot_walk(project):
+        rel = p.relative_to(project).as_posix()
+        ext = p.suffix.lower()
+        if ext in (".robot", ".resource"):
+            try:
+                text = p.read_text("utf-8", errors="replace")
+            except OSError:
+                continue
+            tests, u, d, e = robot_parse(text)
+            for k, name in u.items():
+                used.setdefault(k, name)
+                uses.setdefault(k, []).append(rel)
+            defined |= d
+            envs |= e
+            for m in re.finditer(r"^Variables\s{2,}(\S+(?: \S+)*)", text, re.M):
+                vf = (p.parent / m.group(1).replace("${CURDIR}", ".")).resolve()
+                if vf.is_file():
+                    defined |= robot_varfile_names(vf)
+            if ext == ".robot" and tests:
+                suites.append({"path": rel, "name": p.stem.replace("_", " "), "tests": tests})
+        elif ext in DATA_EXTS and not p.name.lower().startswith("requirements"):
+            try:
+                data.append({"path": rel, "size": p.stat().st_size})
+            except OSError:
+                pass
+        if ext in (".py", ".yaml", ".yml", ".json") and set(p.relative_to(project).parts[:-1]) & VARFILE_DIRS:
+            names = robot_varfile_names(p)
+            if names:  # a variable file of the project's own (env/qa.yaml, config/prod.py): offered as an environment
+                defined |= names
+                varfiles.append(rel)
+    keys = sorted((name for k, name in used.items() if k not in defined and k not in ROBOT_BUILTIN_VARS),
+                  key=str.lower)
+    return {
+        "id": pid, "name": project.name, "path": str(project), "suites": suites, "data": data,
+        "keys": [{"name": k, "files": sorted(set(uses[robot_norm(k)]))[:5]} for k in keys],
+        "envVars": sorted(envs, key=str.lower), "varfiles": varfiles, "python": robot_python(project, root, probe=False),
+    }
+
+
+def robot_python(project, root, probe=True):
+    """The interpreter that runs a project's tests: its own virtualenv first, then ApiMan's, then the system's.
+    {"path", "version"} or {"error"}. probe=False (listing a project) runs nothing: a project's own Python is
+    project code, so it only runs once you click Run; until then the first interpreter found is named."""
+    bins = ("Scripts/python.exe",) if os.name == "nt" else ("bin/python",)
+    cands = [os.environ.get("APIMAN_ROBOT_PYTHON")]
+    root = Path(root).resolve()
+    bases = [project] + ([project.parent] if project != root else []) + [HERE]  # never above the data folder
+    for base in bases:
+        for venv in (".venv", "venv", ".venv-robot"):
+            cands += [str(base / venv / b) for b in bins]
+    cands += [shutil.which("python3"), shutil.which("python"), None if getattr(sys, "frozen", False) else sys.executable]
+    found = list(dict.fromkeys(x for x in cands if x and Path(x).is_file()))
+    if not probe:
+        return {"path": found[0], "version": None} if found else {"error": "No Python found to run Robot Framework."}
+    for c in found:
+        try:
+            v = subprocess.run([c, "-c", "import robot; print(robot.__version__)"], capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if v.returncode == 0:
+            return {"path": c, "version": v.stdout.strip()}
+    pip = ".venv/bin/pip" if os.name != "nt" else r".venv\Scripts\pip"
+    reqs = next((r for r in ("requirements.txt", "requirements-dev.txt") if (project / r).is_file()), None)
+    install = f"-r {reqs}" if reqs else "robotframework robotframework-browser robotframework-requests"
+    return {"error": f"Robot Framework isn't installed for this project. In {project}, run: python3 -m venv .venv && "
+                     f"{pip} install {install}" + (" && .venv/bin/rfbrowser init" if not reqs or "browser" in
+                     (project / reqs).read_text("utf-8", "replace").lower() else "") + " (or set APIMAN_ROBOT_PYTHON)."}
+
+
+def runs_dir(root, create=False):
+    return (private_dir(root) if create else Path(root) / ".apiman") / "runs"
+
+
+def robot_start(root, stores, body):
+    if not isinstance(body, dict):
+        raise ValueError("Invalid request body")
+    pid = str(body.get("project") or "")
+    project = robot_project_dir(root, pid)
+    target = robot_inside(project, str(body.get("suite") or "."))
+    if not target.exists():
+        raise FileNotFoundError(str(body.get("suite")))
+    project_varfile = None
+    if body.get("varfile"):  # the project's own variable file (env/qa.yaml)
+        project_varfile = robot_inside(project, str(body["varfile"]))
+        if not project_varfile.is_file():
+            raise FileNotFoundError(str(body["varfile"]))
+    py = robot_python(project, root)
+    if "error" in py:
+        raise ValueError(py["error"])
+    variables, env_name = {}, ""
+    if body.get("envId"):
+        env = stores["environments"].get(str(body["envId"]))
+        env_name = env.get("name", "")
+        variables.update({v["key"]: v.get("value", "") for v in env.get("values", [])
+                          if isinstance(v, dict) and v.get("key") and v.get("enabled", True) is not False})
+    data = body.get("data")
+    if data not in (None, ""):
+        if not isinstance(data, dict):
+            raise ValueError("Test data must be a JSON object: each key becomes a ${variable}.")
+        variables.update(data)
+    run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
+    out = runs_dir(root, create=True) / run_id
+    out.mkdir(parents=True)
+    (out / "shots").mkdir()
+    # Secrets go through a file only this user can read (never the command line), deleted when the run ends.
+    # A Python variable file (get_variables) works on every Robot version; JSON ones need Robot 6.1+.
+    values = json.dumps({k: v for k, v in variables.items() if isinstance(k, str) and k.strip()})
+    fd, varfile = tempfile.mkstemp(suffix=".py", prefix="apiman_vars_")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(f"import json\n\n\ndef get_variables():\n    return json.loads({values!r})\n")
+    cmd = [py["path"], "-m", "robot", "--listener", f"{HERE / 'robot_listener.py'};{out}",
+           "--variablefile", varfile, "--outputdir", str(out), "--consolecolors", "off", "--consolewidth", "100"]
+    if project_varfile:  # after ApiMan's, so test data still wins (the first variable file wins)
+        cmd += ["--variablefile", str(project_varfile)]
+        env_name = project_varfile.relative_to(project).as_posix()
+    if body.get("test"):
+        # one argv entry with "=": a name starting with "-" stays a name; * ? [ are escaped so it's not a pattern
+        cmd.append("--test=" + re.sub(r"([*?\[])", r"[\1]", str(body["test"])))
+    for tag in [t.strip() for t in str(body.get("include") or "").split(",") if t.strip()]:
+        cmd.append(f"--include={tag}")
+    cmd.append(str(target))
+    meta = {"id": run_id, "project": pid, "projectName": project.name, "target": target.relative_to(project).as_posix(),
+            "test": body.get("test") or "", "include": body.get("include") or "", "env": env_name,
+            "speed": "full" if body.get("speed") == "full" else "watch",
+            "started": time.time(), "status": "running", "robot": py["version"]}
+    with RUNS_LOCK:
+        RUNS[run_id] = None  # before meta.json says running, so a poll never takes it for an interrupted run
+    write_meta(out, meta)
+    log = open(out / "console.txt", "wb")
+    try:
+        watch = body.get("speed", "watch") == "watch"  # Watch: each browser step stays on screen a moment
+        proc = subprocess.Popen(cmd, cwd=project, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                env={**os.environ, "APIMAN_STEP_DELAY": "0.6" if watch else "0"},
+                                **({"start_new_session": True} if os.name != "nt" else {}))
+    except OSError as e:
+        log.close()
+        os.unlink(varfile)
+        meta.update(status="failed", ended=time.time(), error=str(e))
+        write_meta(out, meta)
+        with RUNS_LOCK:
+            RUNS.pop(run_id, None)
+        raise
+    print(f"\n[automation] {project.name}: running {meta['target']} with {py['path']} (Robot Framework {py['version']})", flush=True)
+    tee = threading.Thread(target=robot_tee, args=(proc, log, meta), daemon=True)
+    tee.start()
+    with RUNS_LOCK:
+        RUNS[run_id] = proc
+    threading.Thread(target=robot_finish, args=(out, proc, tee, varfile, meta), daemon=True).start()
+    return meta
+
+
+def robot_events(out):
+    events = []
+    try:
+        with open(out / "events.jsonl", "rb") as f:
+            for line in f:
+                try:
+                    events.append(json.loads(line))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return events
+
+
+def robot_summary(events):
+    tests = [e for e in events if e.get("t") == "test_end"]
+    count = lambda s: sum(1 for t in tests if t.get("status") == s)
+    http = [e for e in events if e.get("t") == "http"]
+    return {"passed": count("PASS"), "failed": count("FAIL"), "skipped": count("SKIP"), "http": len(http),
+            "httpErrors": sum(1 for e in http if e.get("error") or (e.get("status") or 0) >= 400),
+            "tests": [{"name": t.get("name"), "suite": t.get("suite", ""), "status": t.get("status"),
+                       "ms": t.get("ms"), "message": (t.get("message") or "")[:300]} for t in tests]}
+
+
+def robot_tee(proc, log, meta):
+    """Robot's console output goes to the run's console.txt and to the terminal ApiMan runs in."""
+    for line in iter(proc.stdout.readline, b""):
+        log.write(line)
+        log.flush()
+        try:
+            sys.stdout.write(line.decode("utf-8", "replace"))
+            sys.stdout.flush()
+        except (OSError, ValueError, AttributeError):
+            pass  # no terminal (desktop app): the file still has it
+    log.close()
+
+
+def robot_finish(out, proc, tee, varfile, meta):
+    code = proc.wait()
+    tee.join(10)  # console.txt complete before the run is reported done
+    try:
+        os.unlink(varfile)
+    except OSError:
+        pass
+    with RUNS_LOCK:
+        stopped = meta["id"] in STOPPING
+    s = robot_summary(robot_events(out))
+    # Robot exits 0 only when every test passed: 1-250 failures, 251+ errors, negative when killed
+    meta.update(s, ended=time.time(), exitCode=code, status="stopped" if stopped else "passed" if code == 0 else "failed")
+    write_meta(out, meta)
+    with RUNS_LOCK:  # only now: until the final meta.json is written, the run is still this server's
+        RUNS.pop(meta["id"], None)
+        STOPPING.discard(meta["id"])
+    print(f"[automation] {meta['projectName']}: {meta['status']}, {s['passed']} passed, {s['failed']} failed, "
+          f"{s['http']} API calls. Report: {out / 'report.html'}", flush=True)
+
+
+def write_meta(out, meta):
+    """meta.json, written atomically: a page polling the run never reads half a file."""
+    fd, tmp = tempfile.mkstemp(dir=out, suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+    os.replace(tmp, out / "meta.json")
+
+
+def read_meta(out):
+    """A run's meta.json. A run still marked running that this server isn't running was cut short (ApiMan was
+    stopped or crashed mid-run): it's recorded as stopped, so it never blocks a new run or shows as running forever."""
+    meta = json.loads((out / "meta.json").read_text("utf-8"))
+    if meta.get("status") == "running":
+        with RUNS_LOCK:
+            alive = meta.get("id") in RUNS
+        if not alive:
+            meta.update(robot_summary(robot_events(out)), status="stopped", interrupted=True,
+                        ended=meta.get("ended") or (out / "meta.json").stat().st_mtime)
+            write_meta(out, meta)
+    return meta
+
+
+def robot_stop(run_id):
+    with RUNS_LOCK:
+        proc = RUNS.get(run_id)
+        if not proc or run_id in STOPPING:
+            return False
+        STOPPING.add(run_id)
+    try:
+        if os.name != "nt":
+            os.killpg(proc.pid, 15)  # the whole group: Robot and the browser it started
+        else:
+            proc.terminate()
+    except OSError:
+        pass
+    return True
+
+
+def robot_run_dir(root, run_id):
+    if not RUN_ID_RE.fullmatch(run_id or ""):
+        raise ValueError("Invalid run")
+    out = runs_dir(root) / run_id
+    if not out.is_dir():
+        raise FileNotFoundError(run_id)
+    return out
+
+
+def robot_runs(root, pid=None, limit=60):
+    out = []
+    d = runs_dir(root)
+    for p in sorted(d.iterdir(), reverse=True) if d.is_dir() else []:
+        if not RUN_ID_RE.fullmatch(p.name):
+            continue
+        try:
+            meta = read_meta(p)
+        except (OSError, ValueError):
+            continue
+        if pid is None or meta.get("project") == pid:
+            out.append(meta)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def robot_events_since(root, run_id, offset):
+    """New complete event lines from byte `offset`, so the page can follow a run by polling."""
+    out = robot_run_dir(root, run_id)
+    events, nxt = [], offset
+    try:
+        with open(out / "events.jsonl", "rb") as f:
+            f.seek(offset)
+            chunk = f.read(4 * 1024 * 1024)
+        end = chunk.rfind(b"\n") + 1
+        for line in chunk[:end].splitlines():
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                pass
+        nxt = offset + end
+    except OSError:
+        pass
+    meta = read_meta(out)
+    try:
+        console = (out / "console.txt").read_bytes()[-6000:].decode("utf-8", "replace")
+    except OSError:
+        console = ""
+    return {"events": events, "next": nxt, "meta": meta, "console": console}
+
+
+
+def robot_data_file(root, pid, rel, text=None):
+    """Read (or, with text, save) one test-data file of a project."""
+    project = robot_project_dir(root, pid)
+    p = robot_inside(project, rel)
+    if p.suffix.lower() not in DATA_EXTS or p.suffix.lower() in (".xlsx", ".xls") or not p.is_file():
+        raise ValueError("Only text test-data files (JSON, CSV, YAML, XML, TXT) open here.")
+    if p.stat().st_size > MAX_DATA_FILE or (text is not None and len(text.encode()) > MAX_DATA_FILE):
+        raise ValueError("This file is too large to open here (limit 2 MB).")
+    if text is None:
+        return {"path": rel, "text": p.read_text("utf-8", errors="replace")}
+    fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.chmod(tmp, p.stat().st_mode & 0o777)
+    os.replace(tmp, p)
+    return {"ok": True}
+
+
+RUN_FILE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".html": "text/html",
+                  ".xml": "application/xml", ".txt": "text/plain", ".jsonl": "application/json"}
+
+
+def robot_run_file(root, run_id, name):
+    out = robot_run_dir(root, run_id)
+    if not RUN_FILE_RE.fullmatch(name) or name.split("/")[-1].startswith("."):
+        raise ValueError("Invalid file")
+    p = (out / name).resolve()
+    if out.resolve() not in p.parents or p.suffix.lower() not in RUN_FILE_TYPES:
+        raise ValueError("Invalid file")
+    return p.read_bytes(), RUN_FILE_TYPES[p.suffix.lower()]
+
 class Handler(BaseHTTPRequestHandler):
     stores = None  # set in main()
     timeout = 30   # seconds a client may stall mid-request
@@ -638,6 +1187,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200, {"state": state.get()})
                 state.put(self.read_json(MAX_STATE))
                 return self.reply(200, {"ok": True})
+            if path.startswith("/api/robot/"):
+                return self.robot_route(method, path)
             m = re.match(r"^/api/(collections|environments)(?:/(.+))?$", path)
             if m:
                 store, doc_id = self.stores[m.group(1)], m.group(2) and urllib.parse.unquote(m.group(2))
@@ -677,6 +1228,45 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {"error": str(e)})
         except (TypeError, AttributeError, KeyError):
             return self.reply(400, {"error": "Invalid request body"})
+
+    def robot_route(self, method, path):
+        root = self.stores["collections"].root
+        query = {k: v[-1] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).items()}
+        parts = [urllib.parse.unquote(x) for x in path[len("/api/robot/"):].split("/")]
+        if parts == ["projects"] and method == "GET":
+            return self.reply(200, robot_projects(root))
+        if len(parts) == 2 and parts[0] == "projects" and method == "GET":
+            return self.reply(200, robot_project(root, parts[1]))
+        if len(parts) == 3 and parts[0] == "projects" and parts[2] == "file" and method in ("GET", "PUT"):
+            text = None
+            if method == "PUT":
+                body = self.read_json(MAX_DATA_FILE * 2)
+                text = body.get("text") if isinstance(body, dict) else None
+                if not isinstance(text, str):
+                    raise ValueError("Invalid request body")
+            return self.reply(200, robot_data_file(root, parts[1], query.get("path", ""), text))
+        if parts == ["runs"] and method == "GET":
+            return self.reply(200, robot_runs(root, query.get("project")))
+        if parts == ["runs"] and method == "POST":
+            return self.reply(201, robot_start(root, self.stores, self.read_json()))
+        if len(parts) == 2 and parts[0] == "runs" and method == "GET":
+            return self.reply(200, robot_events_since(root, parts[1], max(0, int(query.get("from") or 0))))
+        if len(parts) == 3 and parts[0] == "runs" and parts[2] == "stop" and method == "POST":
+            robot_run_dir(root, parts[1])
+            return self.reply(200, {"stopped": robot_stop(parts[1])})
+        if len(parts) >= 4 and parts[0] == "runs" and parts[2] == "files" and method == "GET":
+            data, ctype = robot_run_file(root, parts[1], "/".join(parts[3:]))
+            return self.reply_bytes(data, ctype)
+        return self.reply(404, {"error": "Not found"})
+
+    def reply_bytes(self, data, ctype):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(data)
 
     def do_GET(self): self.route("GET")
     def do_POST(self): self.route("POST")

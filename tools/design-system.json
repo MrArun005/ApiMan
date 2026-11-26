@@ -48,6 +48,7 @@
       "grow",
       "grid-2",
       "grid-3",
+      "lead",
       "field-row",
       "secret-field",
       "slider-row",
@@ -138,7 +139,8 @@
     "Log": [
       "console",
       "line",
-      "src"
+      "src",
+      "scroll"
     ],
     "Table": [
       "kv",
@@ -171,7 +173,8 @@
       "j-key",
       "j-str",
       "j-num",
-      "j-lit"
+      "j-lit",
+      "tall"
     ],
     "EmptyState": [
       "empty-state",
@@ -182,6 +185,7 @@
     "Dialog": [
       "confirm",
       "wide",
+      "full",
       "drawer",
       "docked",
       "dlg-shell",
@@ -223,6 +227,9 @@
       "url-hl",
       "send",
       "resolved"
+    ],
+    "Chart": [
+      "chart"
     ]
   },
   "regions": [

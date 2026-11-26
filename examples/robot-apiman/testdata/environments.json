@@ -1,0 +1,4 @@
+[
+  { "name": "Robot Staging", "baseUrl": "https://staging.example.test" },
+  { "name": "Robot Prod", "baseUrl": "https://api.example.test" }
+]

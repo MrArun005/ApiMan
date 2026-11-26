@@ -300,6 +300,75 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.call("GET", "/?code=x&state=y", headers=nav)[0], 403)  # the app itself stays same-site only
         self.assertEqual(self.call("GET", "/oauth-callback.html", headers={"Host": "attacker.example:5577"})[0], 403)
 
+    # ---------- automation (Robot Framework) ----------
+
+    def test_robot_projects_are_found_and_described(self):
+        root = server.Handler.stores["collections"].root
+        proj = root / "work" / "shop-tests"              # nested: "work" is just a folder of repos
+        (proj / "tests" / "api").mkdir(parents=True)
+        (proj / "resources").mkdir()
+        (proj / "env").mkdir()
+        (proj / "testdata").mkdir()
+        (proj / "node_modules" / "x").mkdir(parents=True)
+        (proj / "requirements.txt").write_text("robotframework\n")
+        (proj / "env" / "qa.yaml").write_text("API_KEY: abc\n")
+        (proj / "testdata" / "users.csv").write_text("name\nann\n")
+        (proj / "resources" / "common.resource").write_text(
+            "*** Variables ***\n${TIMEOUT}    5s\n\n*** Keywords ***\nLogin As ${user}\n    [Arguments]    ${password}\n"
+            "    ${token}=    Get Token    ${BASE_URL}    ${user}    ${password}\n    RETURN    ${token}\n")
+        (proj / "tests" / "api" / "orders.robot").write_text(
+            "*** Settings ***\nResource    ../../resources/common.resource\nTest Tags    api\n\n*** Test Cases ***\n"
+            "Place An Order\n    [Tags]    smoke\n    ${t}=    Login As ann    ${PASSWORD}\n    Log    ${CURDIR} ${TIMEOUT} ${API_KEY} %{HOME} ${1} ${t}\n"
+            "    FOR    ${row}    IN    @{ROWS}\n        Log    ${row}[id]\n    END\n\nList Orders\n    Log    ${BASE URL}\n")
+        (proj / "node_modules" / "x" / "skip.robot").write_text("*** Test Cases ***\nHidden\n    Log    ${NOPE}\n")
+        projects = self.call("GET", "/api/robot/projects")[1]
+        self.assertIn("work/shop-tests", [x["id"] for x in projects])
+        status, d = self.call("GET", "/api/robot/projects/" + urllib.parse.quote("work/shop-tests", safe=""))
+        self.assertEqual(status, 200, d)
+        suite = d["suites"][0]
+        self.assertEqual(suite["path"], "tests/api/orders.robot")
+        self.assertEqual([t["name"] for t in suite["tests"]], ["Place An Order", "List Orders"])
+        self.assertEqual(suite["tests"][0]["tags"], ["api", "smoke"])
+        # used but never defined: BASE_URL (also written ${BASE URL}), PASSWORD, ROWS; not TIMEOUT, user, password,
+        # token, t, row (defined), CURDIR (built in), API_KEY (env/qa.yaml), numbers, or anything in node_modules
+        self.assertEqual(sorted(k["name"] for k in d["keys"]), ["BASE_URL", "PASSWORD", "ROWS"])
+        self.assertEqual(d["envVars"], ["HOME"])
+        self.assertEqual(d["varfiles"], ["env/qa.yaml"])
+        self.assertIn("testdata/users.csv", [f["path"] for f in d["data"]])
+        pq = urllib.parse.quote("work/shop-tests", safe="")
+        self.assertEqual(self.call("GET", f"/api/robot/projects/{pq}/file?path=testdata/users.csv")[1]["text"], "name\nann\n")
+        self.assertEqual(self.call("PUT", f"/api/robot/projects/{pq}/file?path=testdata/users.csv", {"text": "name\nbob\n"})[0], 200)
+        self.assertEqual((proj / "testdata" / "users.csv").read_text(), "name\nbob\n")
+        for bad in ("../../../etc/passwd", "../../../../x.csv", "tests/api/orders.robot"):  # outside, or not test data
+            self.assertEqual(self.call("GET", f"/api/robot/projects/{pq}/file?path={urllib.parse.quote(bad)}")[0], 400, bad)
+
+    def test_robot_ids_and_run_files_cannot_escape(self):
+        for bad in ("..", "..%2F..", ".git", "a%2F..%2F..%2Fetc"):
+            self.assertIn(self.call("GET", f"/api/robot/projects/{bad}")[0], (400, 404), bad)
+        for bad in ("../x", "20261127-000000-abcdef%2F..", "nope"):
+            self.assertIn(self.call("GET", f"/api/robot/runs/{bad}")[0], (400, 404), bad)
+        runs = server.runs_dir(server.Handler.stores["collections"].root, create=True) / "20261127-000000-abcdef"
+        (runs / "shots").mkdir(parents=True)
+        (runs / "meta.json").write_text('{"id": "20261127-000000-abcdef", "project": "p", "status": "passed", "started": 1}')
+        (runs / "shots" / "shot-00001.png").write_bytes(b"\x89PNG")
+        (runs / "secret.json").write_text("{}")
+        self.assertEqual(self.call("GET", "/api/robot/runs/20261127-000000-abcdef/files/shots/shot-00001.png")[1], b"\x89PNG")
+        for bad in ("secret.json", "..%2Fmeta.json", "shots%2F..%2F..%2Fx.png", ".hidden.png"):
+            self.assertEqual(self.call("GET", f"/api/robot/runs/20261127-000000-abcdef/files/{bad}")[0], 400, bad)
+        self.assertEqual([r["id"] for r in self.call("GET", "/api/robot/runs?project=p")[1]], ["20261127-000000-abcdef"])
+        status, res = self.call("POST", "/api/robot/runs", {"project": "..", "suite": "."})
+        self.assertEqual(status, 400, res)
+
+    def test_a_run_cut_short_is_reported_stopped_not_running_forever(self):
+        out = server.runs_dir(server.Handler.stores["collections"].root, create=True) / "20261127-000001-abcdef"
+        out.mkdir(parents=True)
+        (out / "meta.json").write_text('{"id": "20261127-000001-abcdef", "project": "q", "status": "running", "started": 1}')
+        (out / "events.jsonl").write_text('{"t": "test_end", "name": "A", "status": "PASS"}\n')
+        self.assertEqual(self.call("GET", "/api/robot/runs?project=q")[1][0]["status"], "stopped")  # server never ran it
+        res = self.call("GET", "/api/robot/runs/20261127-000001-abcdef")[1]
+        self.assertEqual((res["meta"]["status"], res["meta"]["passed"]), ("stopped", 1))
+        self.assertEqual(self.call("POST", "/api/robot/runs/20261127-000001-abcdef/stop")[1], {"stopped": False})
+
     def test_only_whitelisted_static_files_are_served(self):
         self.assertEqual(self.call("GET", "/server.py")[0], 404)
         self.assertEqual(self.call("GET", "/../server.py")[0], 404)
