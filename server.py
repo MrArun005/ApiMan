@@ -871,6 +871,7 @@ def build_run_job(args, has_env, rows):
     return {"cid": "collection.json", "envId": "env.json" if has_env else "", "folder": args.folder,
             "iterations": iterations, "delay": max(0, args.delay), "bail": args.bail,
             "iterationData": rows[:iterations] if rows else None,
+            "dataFile": Path(args.iteration_data).name if rows else None,  # shown in the HTML report
             "report": {"html": bool(args.html), "bodies": bool(args.html and args.report_bodies)}}
 
 
@@ -949,6 +950,10 @@ def junit_report(results, suite_name, path, iterations=1, with_data=False):
                 ET.SubElement(tc, "failure", message=(t["error"] or "failed")[:500]).text = t["error"] or "failed"
             elif t["passed"] is None:
                 ET.SubElement(tc, "skipped")
+        if not cases and r.get("skipped"):  # skipped by a script: reported as skipped, not as a pass
+            cases = 1
+            tc = ET.SubElement(suite, "testcase", classname=classname, name=f"{r['method']} skipped{tag}", time="0")
+            ET.SubElement(tc, "skipped", message="pm.execution.skipRequest()")
         if not cases:  # a request without tests still shows up, passing if it got a response
             cases = 1
             ET.SubElement(suite, "testcase", classname=classname, name=f"{r['method']} responded {r['status']}{tag}", time=f"{secs:.3f}")
@@ -1065,7 +1070,12 @@ def run_main(argv):
 
     def show(r):
         where = " / ".join([*r["path"], r["name"]])
-        status = paint("31", f"ERROR {r['error']}") if r["error"] else paint("32" if r["status"] < 400 else "33" if r["status"] < 500 else "31", f"{r['status']} {r['reason']}".strip())
+        if r.get("skipped"):  # pm.execution.skipRequest(): never sent, so no status
+            status = paint("2", "SKIPPED (not sent)")
+        elif r["error"] or not isinstance(r.get("status"), int):
+            status = paint("31", f"ERROR {r['error'] or 'no response'}")
+        else:
+            status = paint("32" if r["status"] < 400 else "33" if r["status"] < 500 else "31", f"{r['status']} {r['reason']}".strip())
         timing = f"  {r['timeMs']} ms" if r["timeMs"] is not None else ""
         which = iteration_label(r, iterations, with_data)
         print(f"\n{paint('1', where)}" + (f"  ({which})" if which else ""))
@@ -1117,7 +1127,9 @@ def run_main(argv):
         print(paint("33", f"warning: {report_warning}"))
     if outcome["type"] == "fatal":
         print(paint("31", f"Run failed: {outcome['error']}"))
-    summary = f"{len(results)} request{'s' * (len(results) != 1)}, {errors} not sent · tests: {passed} passed, {failed} failed · {elapsed:.1f} s"
+    skipped = sum(1 for r in results if r.get("skipped"))
+    summary = (f"{len(results)} request{'s' * (len(results) != 1)}, {errors} failed to send"
+               + (f", {skipped} skipped by scripts" if skipped else "") + f" · tests: {passed} passed, {failed} failed · {elapsed:.1f} s")
     print(paint("31" if failed or errors else "32", summary))
     tmp.cleanup()
     return 2 if outcome["type"] == "fatal" else 1 if failed or errors else 0

@@ -660,7 +660,7 @@ class RunDataAndReportsTest(unittest.TestCase):
         self.assertIsNone(a.iterations)
         self.assertEqual(server.build_run_job(a, True, rows), {
             "cid": "collection.json", "envId": "env.json", "folder": "Smoke", "iterations": 3, "delay": 5, "bail": True,
-            "iterationData": rows, "report": {"html": True, "bodies": True}})
+            "iterationData": rows, "dataFile": "rows.csv", "report": {"html": True, "bodies": True}})
         job = server.build_run_job(self.args(["c.json", "--iteration-data", "x.json", "-n", "2"]), False, rows)
         self.assertEqual((job["envId"], job["iterations"], job["iterationData"]), ("", 2, rows[:2]))
         self.assertEqual(job["report"], {"html": False, "bodies": False})
@@ -749,6 +749,15 @@ class RunDataAndReportsTest(unittest.TestCase):
         suite = ET.parse(path).getroot().find("testsuite")
         self.assertEqual((suite.get("name"), suite.find("properties"), suite.find("testcase").get("name")),
                          ("Orders / Get order", None, "status is 200"))
+
+    def test_skipped_request_is_reported_as_skipped(self):
+        import xml.etree.ElementTree as ET
+        path = self.dir / "junit-skip.xml"
+        skipped = {**self.result(1, 1), "status": None, "reason": "", "timeMs": None, "tests": [], "skipped": True}
+        server.junit_report([skipped], "Orders API", str(path), 1, True)
+        case = ET.parse(path).getroot().find("testsuite/testcase")
+        self.assertEqual(case.get("name"), "GET skipped [iteration 1, data row 1]")
+        self.assertIsNotNone(case.find("skipped"))
 
     def test_console_label(self):
         self.assertEqual(server.iteration_label({"iteration": 1, "dataRow": None}, 1, False), "")

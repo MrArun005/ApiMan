@@ -1035,7 +1035,8 @@ function scopesFor(cid, envId = state.activeEnv) {
     local: {},
   };
 }
-const merged = (sc) => ({ ...sc.globals, ...sc.collection, ...sc.environment, ...sc.local });
+// Postman's precedence: local > iteration data (Runner data file) > environment > collection > globals
+const merged = (sc) => ({ ...sc.globals, ...sc.collection, ...sc.environment, ...(sc.data || {}), ...sc.local });
 
 const FIRST = ['Ada', 'Lin', 'Sam', 'Ravi', 'Mia', 'Noah', 'Zoe', 'Omar'];
 function dynamicVar(name) {
@@ -1108,7 +1109,8 @@ self.onmessage = async (e) => {
   const V = ctx.vars;
   const str = (v) => (v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
   const VAR_RE = /{{\s*([^{}]+?)\s*}}/g;
-  const all = () => Object.assign({}, V.globals, V.collection, V.environment, V.local);
+  // Postman's precedence: local > iteration data > environment > collection > globals
+  const all = () => Object.assign({}, V.globals, V.collection, V.environment, V.data || {}, V.local);
   const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
   const replaceIn = (s) => String(s).replace(VAR_RE, (m, k) => { const a = all(); return own(a, k) ? a[k] : m; });
   const scope = (o, extra) => Object.assign({
@@ -1290,6 +1292,20 @@ self.onmessage = async (e) => {
     return p;
   }
 
+  // ---------- iteration data (read-only: the row of the Runner's data file for this iteration) ----------
+  const rowData = ctx.iterationData && typeof ctx.iterationData === 'object' ? ctx.iterationData : {};
+  const iterationData = {
+    get: (k) => rowData[k], has: (k) => own(rowData, k), toObject: () => Object.assign({}, rowData), toJSON: () => Object.assign({}, rowData), replaceIn,
+  };
+
+  // ---------- flow control (used by the Runner; a single Send ignores setNextRequest) ----------
+  let next = null, skip = false;
+  const setNextRequest = (x) => { next = { to: x == null ? null : typeof x === 'object' && x.id != null ? String(x.id) : String(x) }; };
+  const execution = {
+    setNextRequest,
+    skipRequest: () => { if (ctx.info && ctx.info.eventName === 'prerequest') skip = true; else cons.warn('pm.execution.skipRequest() only works in a pre-request script.'); },
+  };
+
   const pm = {
     environment: scope(V.environment, { name: ctx.envName }),
     collectionVariables: scope(V.collection),
@@ -1298,6 +1314,7 @@ self.onmessage = async (e) => {
       get: (k) => { const a = all(); return a[k]; }, set: (k, v) => { V.local[k] = str(v); }, unset: (k) => { delete V.local[k]; },
       has: (k) => own(all(), k), toObject: all, replaceIn,
     },
+    iterationData, execution,
     request, response,
     info: ctx.info,
     expect,
@@ -1317,6 +1334,7 @@ self.onmessage = async (e) => {
   const postman = {
     setEnvironmentVariable: pm.environment.set, getEnvironmentVariable: pm.environment.get, clearEnvironmentVariable: pm.environment.unset,
     setGlobalVariable: pm.globals.set, getGlobalVariable: pm.globals.get, clearGlobalVariable: pm.globals.unset,
+    setNextRequest,
   };
   const req2 = (m) => { throw new Error("require('" + m + "') isn't available in ApiMan scripts."); };
 
@@ -1335,7 +1353,7 @@ self.onmessage = async (e) => {
     error = String(err && err.message || err);
   }
   for (const [name, ok] of Object.entries(legacyTests)) tests.push({ name, passed: !!ok, error: ok ? '' : 'failed' });
-  postMessage({ vars: V, request: req, tests, logs, error });
+  postMessage({ vars: V, request: req, tests, logs, error, next, skip });
 };`;
 
 const SANDBOX_FRAME = `<!doctype html><meta charset="utf-8">
@@ -1431,7 +1449,8 @@ function runScript(code, ctx, { onSendRequest = null } = {}) {
       const vars = data.vars || {};
       const rq = data.request && typeof data.request === 'object' ? data.request : ctx.request;
       resolve({
-        vars: { globals: cleanStrMap(vars.globals), collection: cleanStrMap(vars.collection), environment: cleanStrMap(vars.environment), local: cleanStrMap(vars.local) },
+        // iteration data comes from the app (the user's data file), never back from the script
+        vars: { globals: cleanStrMap(vars.globals), collection: cleanStrMap(vars.collection), environment: cleanStrMap(vars.environment), local: cleanStrMap(vars.local), data: cleanStrMap(ctx.vars.data) },
         request: {
           method: METHODS.includes(String(rq.method).toUpperCase()) ? String(rq.method).toUpperCase() : ctx.request.method,
           url: String(rq.url ?? ctx.request.url),
@@ -1445,6 +1464,8 @@ function runScript(code, ctx, { onSendRequest = null } = {}) {
           level: ['log', 'info', 'warn', 'error', 'debug'].includes(l && l.level) ? l.level : 'log', text: String(l && l.text || ''),
         })),
         error: String(data.error || ''),
+        next: data.next && typeof data.next === 'object' ? { to: data.next.to == null ? null : String(data.next.to).slice(0, 500) } : null,
+        skip: data.skip === true,
       });
     };
     const onMsg = (e) => {
@@ -1845,19 +1866,29 @@ async function guardVarChanges(cid, ed, before, after, ask, logs) {
  * Runs the whole pipeline for an editor model. Used by Send (ask = confirm dialog) and by the
  * collection runner (ask = null: anything that needs approval is blocked).
  */
-async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true, ask = null, runScopes = null, envId = state.activeEnv }) {
+async function execute({ ed, cid, itemId, iteration = 0, iterationCount = 1, iterationData = null, inRun = false, signal, persist = true, ask = null, runScopes = null, envId = state.activeEnv }) {
   // envId: the environment active when the request started (variable changes go there), or the one a Diff compares with
+  // iterationData: this iteration's row of the Runner's data file (the user chose it, so it counts as saved values)
   const logs = [], tests = [], warnings = [];
+  const dataVars = dataRowVars(iterationData);
   const before = runScopes ? JSON.parse(JSON.stringify(runScopes)) : scopesFor(cid, envId);
+  delete before.data;
   let scopes = JSON.parse(JSON.stringify(before));
   scopes.local = {};
+  scopes.data = dataVars;
   let req = requestSnapshot(ed);
-  // The destination baseline always comes from the SAVED (user-approved) variables, never from values
-  // scripts carried over in memory during a run.
-  const trusted = merged(scopesFor(cid, envId));
+  // The destination baseline always comes from the SAVED (user-approved) variables and the user's data file,
+  // never from values scripts carried over in memory during a run.
+  const trusted = merged({ ...scopesFor(cid, envId), data: dataVars });
   const plannedOrigin = originOf(resolve(ed.url, trusted));
   const preScripts = scriptChain(cid, itemId, ed, 'prerequest');
-  const info = { requestName: ed.name, requestId: itemId || '', iteration, eventName: 'prerequest' };
+  const info = { requestName: ed.name, requestId: itemId || '', iteration, iterationCount, eventName: 'prerequest' };
+  let next = null; // pm.execution.setNextRequest: the last call wins
+  const noteNext = (out, src) => {
+    if (!out.next) return;
+    next = out.next;
+    if (!inRun) logs.push({ level: 'info', text: `pm.execution.setNextRequest(${next.to === null ? 'null' : JSON.stringify(next.to)}) only applies in the Runner, so it was ignored.`, src });
+  };
   const envName = envId && state.envs[envId] ? state.envs[envId].name : '';
   if (!itemId && !ed._approvalId) ed._approvalId = uid();
   // pm.sendRequest: allowed destinations come from the saved variables, like plannedOrigin
@@ -1873,18 +1904,32 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
     return { ...out, sent };
   };
 
+  let skip = false;
   for (const s of preScripts) {
-    const out = await runWithSend(s.code, { vars: scopes, request: req, response: null, info, envName }, `pre-request ${s.src}`);
+    const out = await runWithSend(s.code, { vars: scopes, request: req, response: null, info, envName, iterationData }, `pre-request ${s.src}`);
     scopes = out.vars;
     req = out.request;
     logs.push(...out.logs.map((l) => ({ ...l, src: `pre-request (${s.src})` })), ...out.sent);
     tests.push(...out.tests);
+    noteNext(out, `pre-request (${s.src})`);
     if (out.error) {
       logs.push({ level: 'error', text: out.error, src: `pre-request (${s.src})` });
       return { error: `Pre-request script (${s.src}) failed: ${out.error.replace(/\.$/, '')}. The request was not sent.`, logs, tests, warnings };
     }
+    if (out.skip) { skip = true; break; } // later pre-request scripts don't run either
   }
   if (signal && signal.aborted) return { error: 'Request cancelled.', logs, tests, warnings };
+  if (skip) {
+    logs.push({ level: 'info', text: 'Skipped: a pre-request script called pm.execution.skipRequest(), so the request was not sent.', src: 'ApiMan' });
+    if (persist) {
+      try {
+        scopes = await guardVarChanges(cid, ed, before, scopes, ask, logs);
+        await persistScopes(cid, before, scopes, logs, envId);
+      } catch (e) { logs.push({ level: 'error', text: `Couldn't save variable changes: ${e.message}`, src: 'ApiMan' }); }
+    }
+    // in the Runner a skip is not a failure; a single Send shows it like a request that wasn't sent
+    return { skipped: true, error: inRun ? '' : 'Skipped: a pre-request script called pm.execution.skipRequest(), so the request was not sent.', logs, tests, warnings, scopes, next: inRun ? next : null };
+  }
 
   const vars = merged(scopes);
   let authInfo = effectiveAuth(ed, cid, itemId);
@@ -1940,9 +1985,10 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
     // but not the auth ApiMan added to it.
     const sentReq = { method: wire.method, url: built.shown.url, headers: built.shown.headers, body: wire.body.kind === 'text' ? wire.body.text : req.body };
     for (const s of scriptChain(cid, itemId, ed, 'test')) {
-      const out = await runWithSend(s.code, { vars: scopes, request: sentReq, response, info, envName }, `tests ${s.src}`);
+      const out = await runWithSend(s.code, { vars: scopes, request: sentReq, response, info, envName, iterationData }, `tests ${s.src}`);
       scopes = out.vars;
       logs.push(...out.logs.map((l) => ({ ...l, src: `tests (${s.src})` })), ...out.sent);
+      noteNext(out, `tests (${s.src})`);
       tests.push(...out.tests);
       if (out.error) {
         logs.push({ level: 'error', text: out.error, src: `tests (${s.src})` });
@@ -1956,7 +2002,7 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
       await persistScopes(cid, before, scopes, logs, envId);
     } catch (e) { logs.push({ level: 'error', text: `Couldn't save variable changes: ${e.message}`, src: 'ApiMan' }); }
   }
-  return { res, wire, tests, logs, warnings, error: res.error || '', scopes };
+  return { res, wire, tests, logs, warnings, error: res.error || '', scopes, next: inRun ? next : null };
 }
 
 // =====================================================================================================
@@ -5362,6 +5408,325 @@ function openCode() {
   });
 }
 
+// ---------- runner: iteration data (data files) ----------
+const DATA_ROWS_MAX = 100000; // iterations a data file may drive (as `server.py run -d` allows)
+const DATA_FILE_MAX = 20 * 1024 * 1024;
+const STEP_MAX = 10000; // requests per run beyond a plain run's count: pm.execution.setNextRequest loops end here
+
+/** A data row as {{variable}} values: strings, like every other scope. */
+function dataRowVars(row) {
+  if (!row || typeof row !== 'object') return {};
+  return Object.fromEntries(Object.entries(row).map(([k, v]) => [k, v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v)]));
+}
+
+/** RFC 4180 CSV: a header row, then one row per iteration. Quoted values may hold commas, quotes ("") and line breaks. */
+function parseCsv(text) {
+  text = String(text).replace(/^\uFEFF/, '');
+  const records = []; // { line, cells }
+  let cells = [], cell = '', quoted = false, wasQuoted = false, line = 1, start = 1;
+  const endCell = () => { cells.push(cell); cell = ''; wasQuoted = false; };
+  const endRow = () => { endCell(); if (!(cells.length === 1 && cells[0] === '' )) records.push({ line: start, cells }); cells = []; };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else quoted = false; }
+      else { if (c === '\n') line++; cell += c; }
+      continue;
+    }
+    if (c === '"' && cell === '' && !wasQuoted) { quoted = true; wasQuoted = true; continue; }
+    if (c === '"') throw new Error(`Line ${line}: a quote inside a value that isn't quoted. Put the value in quotes and double the quote ("").`);
+    if (wasQuoted && c !== ',' && c !== '\r' && c !== '\n') throw new Error(`Line ${line}: text after a closing quote. Put the whole value in quotes.`);
+    if (c === ',') { endCell(); continue; }
+    if (c === '\r' || c === '\n') { if (c === '\r' && text[i + 1] === '\n') i++; endRow(); line++; start = line; continue; }
+    cell += c;
+  }
+  if (quoted) throw new Error(`Line ${start}: a quoted value is never closed.`);
+  if (cell !== '' || cells.length || wasQuoted) endRow();
+  if (!records.length) throw new Error('The file is empty.');
+  const columns = records[0].cells.map((x) => x.trim());
+  columns.forEach((c, i) => {
+    if (!c) throw new Error(`The header row (line ${records[0].line}) has an empty column name (column ${i + 1}).`);
+    if (columns.indexOf(c) !== i) throw new Error(`The header row has the column "${c}" twice.`);
+  });
+  const rows = records.slice(1).map(({ line: ln, cells: cs }) => {
+    if (cs.length !== columns.length) throw new Error(`Line ${ln} has ${cs.length} value${cs.length === 1 ? '' : 's'}, but the header has ${columns.length} column${columns.length === 1 ? '' : 's'}.`);
+    return Object.fromEntries(columns.map((c, i) => [c, cs[i]]));
+  });
+  return { rows, columns };
+}
+
+/** Checks rows (from a JSON file, or sent by `server.py run`): an array of flat objects. */
+function normalizeDataRows(data) {
+  if (!Array.isArray(data)) throw new Error('A JSON data file must hold an array of objects, one per iteration: [{ "id": 1 }, { "id": 2 }].');
+  const columns = [];
+  const rows = data.map((row, i) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error(`Item ${i + 1} isn't an object. Each item is one iteration: { "column": value, … }.`);
+    for (const [k, v] of Object.entries(row)) {
+      if (v && typeof v === 'object') throw new Error(`Item ${i + 1}, "${k}": nested objects and lists aren't supported. Use flat values (text, numbers, true/false, null).`);
+      if (!columns.includes(k)) columns.push(k);
+    }
+    return { ...row };
+  });
+  return { rows, columns };
+}
+
+/** A data file's text → { rows, columns, format }. CSV or JSON, by extension, else by content. Throws a readable error. */
+function parseIterationData(text, filename = '') {
+  const t = String(text).replace(/^\uFEFF/, '');
+  const ext = (String(filename).match(/\.([a-z0-9]+)$/i) || [])[1];
+  const isJson = ext ? ext.toLowerCase() === 'json' : /^\s*\[/.test(t);
+  let out;
+  if (isJson) {
+    let data;
+    try { data = JSON.parse(t); } catch (e) { throw new Error(`Not valid JSON: ${e.message}`); }
+    out = { ...normalizeDataRows(data), format: 'JSON' };
+  } else out = { ...parseCsv(t), format: 'CSV' };
+  if (!out.rows.length) throw new Error(isJson ? 'The list is empty: add one object per iteration.' : 'There is a header row but no data rows.');
+  if (out.rows.length > DATA_ROWS_MAX) throw new Error(`${out.rows.length} rows is more than a run can take (${DATA_ROWS_MAX}).`);
+  return out;
+}
+function dataSummary(d) {
+  const cols = d.columns.length > 8 ? `${d.columns.slice(0, 8).join(', ')} and ${d.columns.length - 8} more` : d.columns.join(', ');
+  return `${d.rows.length} row${d.rows.length === 1 ? '' : 's'} · columns: ${cols || 'none'}`;
+}
+
+// ---------- runner: results and reports ----------
+// Reports are built from data by our code: every value (names, URLs, messages, bodies) is escaped, and secret headers are masked.
+const REPORT_BODY_MAX = 64 * 1024; // per body kept for "Include headers and bodies"
+const REPORT_BODIES_BUDGET = 40 * 1024 * 1024; // per run; later results keep no bodies
+const REPORT_MASK = '•••';
+const REPORT_SECRET_HEADER = /^(authorization|proxy-authorization|cookie|set-cookie)$|token|secret|password|passwd|api[-_]?key|session/i;
+const REPORT_SECRET_PARAM = /token|secret|password|passwd|api[-_]?key|^key$|signature|^sig$|session|^auth/i;
+const maskHeaders = (hs) => (Array.isArray(hs) ? hs : []).map(([k, v]) => [String(k), REPORT_SECRET_HEADER.test(String(k)) ? REPORT_MASK : String(v ?? '')]);
+/** The URL with the password and secret-looking query values (token, api_key, …) replaced. */
+function maskUrl(u) {
+  const s = String(u ?? '');
+  let x;
+  try { x = new URL(s); } catch { return s; }
+  let changed = false;
+  if (x.password) { x.password = 'x'; changed = true; }
+  const parts = x.search.slice(1).split('&').filter(Boolean).map((p) => {
+    const [k, ...v] = p.split('=');
+    let name = k;
+    try { name = decodeURIComponent(k.replace(/\+/g, ' ')); } catch { /* keep the raw name */ }
+    if (v.length && REPORT_SECRET_PARAM.test(name)) { changed = true; return `${k}=${REPORT_MASK}`; }
+    return p;
+  });
+  if (!changed) return s;
+  const auth = x.username ? `${x.username}${x.password ? `:${REPORT_MASK}` : ''}@` : '';
+  return `${x.protocol}//${auth}${x.host}${x.pathname}${parts.length ? `?${parts.join('&')}` : ''}${x.hash}`;
+}
+function wireBodyText(wire) {
+  const b = wire && wire.body;
+  if (!b || b.kind === 'none') return '';
+  if (b.kind === 'text') return String(b.text ?? '');
+  if (b.kind === 'formdata') return (b.fields || []).map((f) => `${f.key}=${f.file ? `@${f.file.name || 'file'}` : f.value}`).join('\n');
+  if (b.kind === 'file') return `(file ${b.file ? b.file.name : ''})`;
+  return '';
+}
+
+/** One finished request of a run, as the reports and `server.py run` see it. budget: { left } bytes for bodies. */
+function runResultRecord({ it, dataRow, parents, ed, out }, budget = null) {
+  const ok = !!(out.res && !out.error);
+  let request = null, response = null;
+  if (budget && budget.left > 0 && out.wire) {
+    const cut = (t) => (t.length > REPORT_BODY_MAX ? `${t.slice(0, REPORT_BODY_MAX)}\n… (cut at ${fmtSize(REPORT_BODY_MAX)})` : t);
+    request = { headers: out.wire.headers.map(([k, v]) => [String(k), String(v)]), body: cut(wireBodyText(out.wire)) };
+    if (ok) response = { headers: (out.res.headers || []).map(([k, v]) => [String(k), String(v)]), body: out.res.binary ? `(binary, ${fmtSize(out.res.size || 0)})` : cut(String(out.res.body ?? '')) };
+    budget.left -= (request.body.length + (response ? response.body.length : 0)) * 2 + 2048;
+  }
+  return {
+    iteration: it + 1, dataRow: dataRow ?? null, name: ed.name, path: parents.map((p) => p.name),
+    method: out.wire ? out.wire.method : ed.method, url: out.wire ? out.wire.url : ed.url,
+    status: ok ? out.res.status : null, reason: ok ? (out.res.reason || REASONS[out.res.status] || '') : '',
+    timeMs: ok ? out.res.timeMs : null, size: ok ? out.res.size : null, error: out.error || '', skipped: !!out.skipped,
+    warnings: out.warnings || [], tests: out.tests.map((x) => ({ name: x.name, passed: x.passed, error: x.error || '' })),
+    logs: (out.logs || []).filter((l) => l.level === 'error' || l.level === 'warn').map((l) => `${l.src ? `${l.src}: ` : ''}${l.text}`).slice(0, 20),
+    request, response,
+  };
+}
+/** What leaves the app (CLI events, JSON report): URL secrets masked; headers and bodies only with bodies, masked. */
+function publicResult(r, bodies = false) {
+  const { request, response, ...rest } = r;
+  const out = { ...rest, url: maskUrl(r.url) };
+  if (bodies) {
+    out.request = request ? { headers: maskHeaders(request.headers), body: request.body } : null;
+    out.response = response ? { headers: maskHeaders(response.headers), body: response.body } : null;
+  }
+  return out;
+}
+function runStats(run) {
+  const R = run.results;
+  const tests = R.flatMap((r) => r.tests);
+  const sent = R.filter((r) => !r.error && !r.skipped && r.status != null);
+  const totalMs = sent.reduce((a, r) => a + (r.timeMs || 0), 0);
+  const classes = { '2xx': 0, '3xx': 0, '4xx': 0, '5xx': 0, other: 0 };
+  for (const r of sent) { const k = `${String(r.status)[0]}xx`; if (k in classes) classes[k]++; else classes.other++; }
+  return {
+    requests: R.length, sent: sent.length, errors: R.filter((r) => r.error).length, skipped: R.filter((r) => r.skipped).length,
+    pass: tests.filter((t) => t.passed === true).length, fail: tests.filter((t) => t.passed === false).length, skippedTests: tests.filter((t) => t.passed === null).length,
+    totalMs, avgMs: sent.length ? Math.round(totalMs / sent.length) : null, classes,
+  };
+}
+
+/** One self-contained HTML file: no scripts, no external assets, a CSP that allows only its own styles. */
+function runReportHtml(run, { bodies = false, onlyFailed = false, note = '' } = {}) {
+  const e = (x) => escapeHtml(String(x ?? ''));
+  const st = runStats(run);
+  const when = run.startedAt ? new Date(run.startedAt) : new Date();
+  const facts = [
+    run.environment ? ['Environment', run.environment] : null,
+    run.folder ? ['Folder', run.folder] : null,
+    run.dataFile ? ['Data file', `${run.dataFile.name} (${run.dataFile.rows} row${run.dataFile.rows === 1 ? '' : 's'})`] : null,
+    ['Iterations', run.iterations ?? 1],
+    ['Started', when.toLocaleString()],
+    run.durationMs != null ? ['Duration', fmtMs(run.durationMs)] : null,
+  ].filter(Boolean);
+  const card = (label, big, tone, lines) => `<section data-card${tone ? ` data-tone="${tone}"` : ''}><h3>${e(label)}</h3><p data-big>${e(big)}</p>${lines.map((l) => `<p>${e(l)}</p>`).join('')}</section>`;
+  const statusTone = (s) => (s == null ? 'err' : s >= 500 ? 'err' : s >= 400 ? 'warn' : s >= 300 ? 'redirect' : 'ok');
+  const kv = (hs) => (hs.length ? `<table>${hs.map(([k, v]) => `<tr><th>${e(k)}</th><td>${e(v)}</td></tr>`).join('')}</table>` : '<p data-muted>No headers</p>');
+  const pre = (t) => (t ? `<pre>${e(t)}</pre>` : '<p data-muted>No body</p>');
+  const items = run.results.map((r, i) => {
+    if (onlyFailed && !(r.error || r.tests.some((t) => t.passed === false))) return '';
+    const pr = publicResult(r, bodies);
+    const status = r.skipped ? '<span data-pill data-tone="muted">Skipped</span>'
+      : r.error ? '<span data-pill data-tone="err">Not sent</span>'
+        : `<span data-pill data-tone="${statusTone(r.status)}">${e(`${r.status} ${r.reason || ''}`.trim())}</span>`;
+    const where = [`#${i + 1}`, `Iteration ${r.iteration}`, r.dataRow != null ? `Data row ${r.dataRow}` : null,
+      r.timeMs != null ? fmtMs(r.timeMs) : null, r.size != null ? fmtSize(r.size) : null].filter(Boolean).join(' · ');
+    const tests = r.tests.length ? `<ul>${r.tests.map((t) => {
+      const [tone, word] = t.passed === true ? ['ok', 'Pass'] : t.passed === false ? ['err', 'Fail'] : ['muted', 'Skip'];
+      return `<li><span data-pill data-tone="${tone}">${word}</span> <span>${e(t.name)}</span>${t.passed === false && t.error ? `<span data-msg>${e(t.error)}</span>` : ''}</li>`;
+    }).join('')}</ul>` : '<p data-muted>No tests</p>';
+    const notes = [...(r.error ? [['err', r.error]] : []), ...r.warnings.map((w) => ['warn', w]), ...r.logs.map((l) => ['warn', l])]
+      .map(([tone, t]) => `<p data-note data-tone="${tone}">${e(t)}</p>`).join('');
+    const detail = bodies ? `<details><summary>Request headers and body</summary>${pr.request ? kv(pr.request.headers) + pre(pr.request.body) : '<p data-muted>Not kept</p>'}</details>`
+      + `<details><summary>Response headers and body</summary>${pr.response ? kv(pr.response.headers) + pre(pr.response.body) : '<p data-muted>No response</p>'}</details>` : '';
+    const failed = r.error || r.tests.some((t) => t.passed === false);
+    return `<article${failed ? ' data-failed' : ''}><header><span data-method="${e(r.method)}">${e(r.method)}</span> <h3>${e(r.name)}</h3>${r.path.length ? ` <span data-muted>${e(r.path.join(' / '))}</span>` : ''} ${status}</header>`
+      + `<p data-url><code>${e(pr.url)}</code></p><p data-muted>${e(where)}</p>${notes}${tests}${detail}</article>`;
+  }).filter(Boolean).join('\n');
+  const statusLine = Object.entries(st.classes).filter(([, n]) => n).map(([k, n]) => `${n} × ${k}`).join(' · ') || 'No responses';
+  const title = `${run.collection || 'Collection'}: run report`;
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<meta name="generator" content="ApiMan">
+<title>${e(title)}</title>
+<style>
+:root { --bg: #eef1f4; --panel: #fbfcfd; --line: #d6dce2; --ink: #17212b; --muted: #5b6875; --sunken: #e5e9ee;
+  --ok: #1b7044; --warn: #a04c00; --err: #c2352b; --redirect: #756000; color-scheme: light dark; }
+@media (prefers-color-scheme: dark) { :root { --bg: #12171d; --panel: #181f27; --line: #29333f; --ink: #dce3ea; --muted: #8b99a8; --sunken: #0f141a;
+  --ok: #4cc38a; --warn: #f59b45; --err: #ff6b5e; --redirect: #e3c54f; } }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1080px; margin: 0 auto; }
+h1 { font-size: 24px; margin: 0 0 4px; overflow-wrap: anywhere; }
+h2 { font-size: 16px; margin: 32px 0 12px; }
+h3 { font-size: 14px; margin: 0; display: inline; overflow-wrap: anywhere; }
+code, pre, [data-method] { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; }
+dl { display: flex; flex-wrap: wrap; gap: 4px 20px; margin: 8px 0 0; color: var(--muted); }
+dl div { display: flex; gap: 6px; } dt::after { content: ":"; } dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+[data-cards] { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 20px; }
+[data-card] { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; }
+[data-card] h3 { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+[data-card] p { margin: 2px 0 0; color: var(--muted); } [data-card] p[data-big] { font-size: 22px; font-weight: 600; color: var(--ink); }
+[data-card][data-tone="err"] p[data-big] { color: var(--err); } [data-card][data-tone="ok"] p[data-big] { color: var(--ok); }
+article { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin-bottom: 10px; }
+article[data-failed] { border-left: 4px solid var(--err); }
+article header { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+article p { margin: 6px 0 0; }
+[data-url] code { overflow-wrap: anywhere; }
+[data-muted] { color: var(--muted); }
+[data-method] { font-weight: 600; }
+[data-pill] { display: inline-block; border-radius: 999px; padding: 0 8px; font-size: 12px; font-weight: 600; border: 1px solid currentColor; }
+[data-tone="ok"] { color: var(--ok); } [data-tone="warn"] { color: var(--warn); } [data-tone="err"] { color: var(--err); }
+[data-tone="redirect"] { color: var(--redirect); } [data-tone="muted"] { color: var(--muted); }
+[data-card][data-tone] { color: inherit; }
+[data-note] { overflow-wrap: anywhere; }
+ul { list-style: none; padding: 0; margin: 8px 0 0; }
+li { display: flex; flex-wrap: wrap; gap: 2px 8px; padding: 3px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+li [data-msg] { flex-basis: 100%; color: var(--err); font-size: 13px; padding-left: 4px; }
+details { margin-top: 8px; } summary { cursor: pointer; color: var(--muted); }
+table { border-collapse: collapse; width: 100%; margin-top: 6px; font-size: 12.5px; }
+th, td { text-align: left; vertical-align: top; padding: 3px 8px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+th { width: 30%; font-weight: 600; }
+pre { background: var(--sunken); border-radius: 6px; padding: 8px 12px; overflow: auto; max-height: 480px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; }
+footer { margin-top: 32px; color: var(--muted); font-size: 12px; }
+</style></head>
+<body><main>
+<h1>${e(run.collection || 'Collection')}</h1>
+<p data-muted>ApiMan run report</p>
+<dl>${facts.map(([k, v]) => `<div><dt>${e(k)}</dt><dd>${e(v)}</dd></div>`).join('')}</dl>
+${run.error ? `<p data-note data-tone="err">Run stopped: ${e(run.error)}</p>` : run.stopped ? '<p data-note data-tone="warn">The run was stopped before the end.</p>' : ''}
+<div data-cards>
+${card('Requests', st.requests, st.errors ? 'err' : '', [`${st.sent} sent`, ...(st.errors ? [`${st.errors} not sent`] : []), ...(st.skipped ? [`${st.skipped} skipped`] : [])])}
+${card('Assertions', `${st.pass} / ${st.pass + st.fail}`, st.fail ? 'err' : st.pass ? 'ok' : '', [`${st.pass} passed, ${st.fail} failed`, ...(st.skippedTests ? [`${st.skippedTests} skipped`] : [])])}
+${card('Time', fmtMs(st.totalMs), '', [`Average ${st.avgMs != null ? fmtMs(st.avgMs) : '–'} per request`])}
+${card('Status classes', statusLine, '', [])}
+</div>
+<h2>Requests</h2>
+${note ? `<p data-note data-tone="warn">${e(note)}</p>` : ''}
+${items || '<p data-muted>No requests ran.</p>'}
+<footer>${bodies ? 'Headers and bodies included; secret headers (Authorization, Cookie, tokens, secrets, passwords, API keys) are masked.' : 'Headers and bodies are not included.'} Secret-looking URL query values are masked.</footer>
+</main></body></html>
+`;
+}
+/** The HTML report within maxBytes (UTF-8): without bodies if needed, then only the requests that failed. */
+const REPORT_HTML_MAX = 50 * 1024 * 1024;
+function reportWithin(run, bodies, maxBytes) {
+  const size = (t) => new Blob([t]).size;
+  let html = runReportHtml(run, { bodies });
+  if (size(html) <= maxBytes) return html;
+  if (bodies) { html = runReportHtml(run, { bodies: false, note: 'Headers and bodies were left out: with them the report would be too large.' }); if (size(html) <= maxBytes) return html; }
+  return runReportHtml(run, { bodies: false, onlyFailed: true, note: 'Only the requests that failed are listed: the full report would be too large.' });
+}
+function runReportJson(run, { bodies = false } = {}) {
+  const st = runStats(run);
+  return JSON.stringify({
+    collection: run.collection, environment: run.environment || null, folder: run.folder || null,
+    dataFile: run.dataFile || null, iterations: run.iterations, startedAt: run.startedAt, seconds: run.durationMs != null ? run.durationMs / 1000 : null,
+    passed: st.pass, failed: st.fail, requestErrors: st.errors, skippedRequests: st.skipped, stopped: !!run.stopped,
+    ...(run.error ? { error: run.error } : {}),
+    results: run.results.map((r) => publicResult(r, bodies)),
+  }, null, 2);
+}
+/** JUnit XML (CI test tabs): one testsuite per request run, labelled with its iteration and data row. */
+function runReportJunit(run) {
+  const x = (s) => String(s ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+  const tot = { tests: 0, failures: 0, errors: 0, skipped: 0, time: 0 };
+  const multi = (run.iterations || 1) > 1;
+  const suites = run.results.map((r) => {
+    const secs = (r.timeMs || 0) / 1000;
+    const label = [...r.path, r.name].join(' / ') + (multi || r.dataRow != null ? ` (iteration ${r.iteration}${r.dataRow != null ? `, data row ${r.dataRow}` : ''})` : '');
+    const classname = [...r.path, r.name].map((p) => String(p).replace(/[^\w-]+/g, '_')).join('.') || 'request';
+    const cases = [];
+    let failures = 0, errors = 0, skipped = 0;
+    if (r.error) { errors++; cases.push(`<testcase classname="${x(classname)}" name="${x(`${r.method} request`)}" time="${secs.toFixed(3)}"><error message="${x(r.error.slice(0, 500))}">${x(r.error)}</error></testcase>`); }
+    for (const t of r.tests) {
+      if (t.passed === false) { failures++; cases.push(`<testcase classname="${x(classname)}" name="${x(t.name)}" time="0"><failure message="${x((t.error || 'failed').slice(0, 500))}">${x(t.error || 'failed')}</failure></testcase>`); }
+      else if (t.passed === null) { skipped++; cases.push(`<testcase classname="${x(classname)}" name="${x(t.name)}" time="0"><skipped/></testcase>`); }
+      else cases.push(`<testcase classname="${x(classname)}" name="${x(t.name)}" time="0"/>`);
+    }
+    if (r.skipped && !cases.length) { skipped++; cases.push(`<testcase classname="${x(classname)}" name="${x(`${r.method} request`)}" time="0"><skipped message="pm.execution.skipRequest()"/></testcase>`); }
+    if (!cases.length) cases.push(`<testcase classname="${x(classname)}" name="${x(`${r.method} responded ${r.status}`)}" time="${secs.toFixed(3)}"/>`);
+    tot.tests += cases.length; tot.failures += failures; tot.errors += errors; tot.skipped += skipped; tot.time += secs;
+    const props = `<properties><property name="iteration" value="${r.iteration}"/>${r.dataRow != null ? `<property name="dataRow" value="${r.dataRow}"/>` : ''}<property name="url" value="${x(maskUrl(r.url))}"/></properties>`;
+    return `  <testsuite name="${x(label)}" tests="${cases.length}" failures="${failures}" errors="${errors}" skipped="${skipped}" time="${secs.toFixed(3)}">\n    ${props}\n    ${cases.join('\n    ')}\n  </testsuite>`;
+  });
+  return `<?xml version="1.0" encoding="utf-8"?>\n<testsuites name="${x(run.collection || 'Collection')}" tests="${tot.tests}" failures="${tot.failures}" errors="${tot.errors}" skipped="${tot.skipped}" time="${tot.time.toFixed(3)}">\n${suites.join('\n')}\n</testsuites>\n`;
+}
+/** The run as the reports describe it; results are added by the caller. */
+function newRunRecord({ cid, folderId, iterations, dataFile = null }) {
+  const col = state.cols[cid];
+  const folder = folderId && col ? locate(col, folderId) : null;
+  const env = state.activeEnv && state.envs[state.activeEnv];
+  return {
+    collection: col ? String(col.info && col.info.name || 'Collection') : 'Collection', folder: folder ? folder.item.name : null,
+    environment: env ? env.name : '', dataFile, iterations, startedAt: new Date().toISOString(), results: [], stopped: false, error: '',
+  };
+}
+
 // ---------- runner ----------
 async function openRunner(cid, folderId) {
   if (!state.colList.length) { toast('Create or import a collection first.', 'warn'); return; }
@@ -5382,11 +5747,53 @@ async function openRunner(cid, folderId) {
   colSel.addEventListener('change', () => { folderId = null; fillFolders(); });
   fillFolders();
 
+  // Data file: one iteration per row; its columns are {{variables}} and pm.iterationData
+  let data = null; // { name, rows, columns, format }
+  const DATA_NONE = 'None: every iteration uses the same values. A CSV or JSON file runs once per row.';
+  const dataInfo = h('div', null, ui.hint(DATA_NONE));
+  const dataPick = ui.input({ type: 'file', hidden: true, accept: '.csv,.json,text/csv,application/json', 'aria-label': 'Data file' });
+  const dataBtn = ui.button({ label: 'Choose file', size: 'small', onClick: () => dataPick.click() });
+  const dataClear = ui.button({ label: 'Remove', size: 'small', hidden: true, onClick: () => setData(null) });
+  const setData = (d, err = null, name = '') => {
+    data = d;
+    dataBtn.textContent = d ? 'Change file' : 'Choose file';
+    dataClear.hidden = !d && !err;
+    iterIn.max = d ? String(d.rows.length) : '1000';
+    iterIn.value = d ? String(d.rows.length) : '1';
+    dataInfo.replaceChildren(err ? ui.note(`${name}: ${err}`, 'err') : d ? ui.hint(`${d.name} · ${dataSummary(d)}`, { title: d.name }) : ui.hint(DATA_NONE));
+    if (!d) dataPick.value = '';
+  };
+  dataPick.addEventListener('change', async () => {
+    const f = dataPick.files[0];
+    if (!f) return;
+    try {
+      if (f.size > DATA_FILE_MAX) throw new Error(`The file is larger than ${fmtSize(DATA_FILE_MAX)}.`);
+      setData({ name: f.name, ...parseIterationData(await f.text(), f.name) });
+    } catch (e) { setData(null, e.message, f.name); }
+  });
+  const dataField = ui.field('Data file', h('div', { class: 'field-row' }, dataBtn, dataClear, dataPick));
+  dataField.append(dataInfo);
+
   const summary = ui.meta([]);
   const bar = ui.progress();
   const tbody = h('tbody');
-  const results = h('div', { id: 'runResults', hidden: true }, summary, bar,
-    h('table', { class: 'grid' }, h('thead', null, h('tr', null, h('th', { class: 'tight' }, '#'), h('th', null, 'Request'), ...['Status', 'Time', 'Tests'].map((x) => h('th', { class: 'num' }, x)))), tbody));
+  const head = h('tr');
+  let lastRun = null;
+  const fmtSel = ui.select([['html', 'HTML report'], ['json', 'JSON'], ['junit', 'JUnit XML']], { size: 'small', 'aria-label': 'Report format' });
+  const bodiesCheck = ui.check({ label: 'Include headers and bodies (secrets masked)' });
+  fmtSel.addEventListener('change', () => { bodiesCheck.hidden = fmtSel.value === 'junit'; });
+  const exportReport = () => {
+    if (!lastRun) return;
+    const bodies = bodiesCheck.input.checked;
+    const base = String(lastRun.collection).replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'run';
+    const [text, ext, type] = fmtSel.value === 'json' ? [runReportJson(lastRun, { bodies }), 'json', 'application/json']
+      : fmtSel.value === 'junit' ? [runReportJunit(lastRun), 'xml', 'application/xml'] : [runReportHtml(lastRun, { bodies }), 'html', 'text/html'];
+    download(`${base}-report.${ext}`, text, `${type};charset=utf-8`);
+    toast(lastRun.bodiesCut && bodies ? 'Report exported. Later requests have no bodies: the run was too large to keep them all.' : 'Report exported', lastRun.bodiesCut && bodies ? 'warn' : 'ok');
+  };
+  const exportBar = ui.toolbar([fmtSel, bodiesCheck], [ui.button({ label: 'Export report', icon: 'download', variant: 'ghost', size: 'small', onClick: exportReport })], { hidden: true });
+  const results = h('div', { id: 'runResults', hidden: true }, summary, bar, exportBar,
+    h('table', { class: 'grid' }, h('thead', null, head), tbody));
   let ctrl = null;
 
   openDialog({
@@ -5395,6 +5802,7 @@ async function openRunner(cid, folderId) {
     body: [
       h('div', { class: 'grid-2' }, ui.field('Collection', colSel), ui.field('Folder', folderSel)),
       h('div', { class: 'grid-2' }, ui.field('Iterations', iterIn), ui.field('Delay between requests (ms)', delayIn)),
+      dataField,
       keepCheck,
       stopCheck,
       results,
@@ -5410,40 +5818,57 @@ async function openRunner(cid, folderId) {
 
   async function run() {
     const runCid = colSel.value;
-    const iterations = Math.max(1, Math.min(1000, Number(iterIn.value) || 1));
+    const rows = data ? data.rows : null;
+    const iterations = Math.max(1, Math.min(rows ? rows.length : 1000, Number(iterIn.value) || (rows ? rows.length : 1)));
     const runBtn = $('#dlgFoot .btn.primary');
     ctrl = new AbortController();
     runBtn.textContent = 'Stop';
     results.hidden = false;
+    exportBar.hidden = true;
     tbody.replaceChildren();
+    head.replaceChildren(h('th', { class: 'tight' }, '#'), ...(rows ? [h('th', { class: 'tight' }, 'Row')] : []), h('th', null, 'Request'),
+      ...['Status', 'Time', 'Tests'].map((x) => h('th', { class: 'num' }, x)));
+    const record = newRunRecord({ cid: runCid, folderId: folderSel.value || null, iterations, dataFile: data ? { name: data.name, rows: data.rows.length, columns: data.columns } : null });
+    const budget = { left: REPORT_BODIES_BUDGET };
     const started = performance.now();
     let t = null;
     try {
       t = await runCollection({
-        cid: runCid, folderId: folderSel.value || null, iterations, delay: Number(delayIn.value) || 0,
+        cid: runCid, folderId: folderSel.value || null, iterations, delay: Number(delayIn.value) || 0, iterationData: rows,
         stopOnFail: stopOnFail.checked, keepVars: keepVars.checked, signal: ctrl.signal,
-        onResult: ({ it, idx, ed, out, tp, totals }) => {
-          const { n, pass, fail, errors, totalMs, ok, c4, c5, total } = totals;
+        onResult: (r) => {
+          const { it, step, dataRow, ed, out, tp, totals } = r;
+          record.results.push(runResultRecord(r, budget));
+          if (budget.left <= 0) record.bodiesCut = true;
+          const { n, pass, fail, errors, skipped, totalMs, ok, c4, c5, total } = totals;
           tbody.append(h('tr', null,
-            h('td', { class: 'tight' }, iterations > 1 ? `${it + 1}.${idx + 1}` : String(n)),
+            h('td', { class: 'tight' }, iterations > 1 ? `${it + 1}.${step + 1}` : String(n)),
+            ...(rows ? [h('td', { class: 'tight' }, String(dataRow))] : []),
             h('td', null, ui.method(ed.method), ' ', ed.name,
               ...out.tests.filter((x) => x.passed === false).map((x) => ui.result('err', 'Fail', `${x.name}: ${x.error}`, null, { compact: true })),
+              out.skipped ? ui.result('muted', 'Skipped', 'pm.execution.skipRequest() in a pre-request script', null, { compact: true }) : null,
               out.error ? ui.result('err', 'Error', out.error, null, { compact: true }) : null),
-            h('td', { class: 'num' }, (out.error ? '–' : ui.status(out.res.status))),
+            h('td', { class: 'num' }, (out.error || out.skipped ? '–' : ui.status(out.res.status))),
             h('td', { class: 'num' }, out.res && !out.error ? fmtMs(out.res.timeMs) : '–'),
             h('td', { class: 'num' }, out.tests.length ? `${tp}/${out.tests.length}` : '–')));
-          bar.firstChild.style.width = `${(n / total) * 100}%`;
+          bar.firstChild.style.width = `${Math.min(100, (n / total) * 100)}%`;
           bar.classList.toggle('err', fail + errors + c5 > 0);
           bar.classList.toggle('warn', !(fail + errors + c5) && c4 > 0);
-          const outcome = [`${ok} succeeded`, ...(c4 ? [`${c4} returned 4xx`] : []), ...(c5 ? [`${c5} returned 5xx`] : []), ...(errors ? [`${errors} not sent`] : [])].join(', ');
+          const outcome = [`${ok} succeeded`, ...(c4 ? [`${c4} returned 4xx`] : []), ...(c5 ? [`${c5} returned 5xx`] : []), ...(errors ? [`${errors} not sent`] : []), ...(skipped ? [`${skipped} skipped`] : [])].join(', ');
+          const sent = n - errors - skipped;
           summary.replaceChildren(
-            h('span', null, ui.value(`${n} of ${total}`), ` requests: ${outcome}`),
+            h('span', null, ui.value(n > total ? String(n) : `${n} of ${total}`), ` requests: ${outcome}`),
             h('span', null, 'Tests: ', ui.value(`${pass} passed`, pass ? 'ok' : 'muted'), ' ', ui.value(`${fail} failed`, fail ? 'err' : 'muted')),
-            h('span', null, `Average ${n - errors ? fmtMs(Math.round(totalMs / Math.max(1, n - errors))) : '–'}`));
+            h('span', null, `Average ${sent ? fmtMs(Math.round(totalMs / Math.max(1, sent))) : '–'}`));
         },
       });
     } finally {
-      summary.append(h('span', null, `${t && !t.stopped ? 'Finished' : 'Stopped'} in ${fmtMs(Math.round(performance.now() - started))}`));
+      const ms = Math.round(performance.now() - started);
+      if (t && t.error) summary.append(h('span', null, ui.value(t.error, 'err')));
+      summary.append(h('span', null, `${t && !t.stopped ? 'Finished' : 'Stopped'} in ${fmtMs(ms)}`));
+      Object.assign(record, { durationMs: ms, stopped: !t || t.stopped, error: t ? t.error || '' : '' });
+      lastRun = record;
+      exportBar.hidden = !record.results.length;
       ctrl = null;
       runBtn.textContent = 'Run again';
       if (state.view === 'environments') renderSidebar();
@@ -5455,24 +5880,41 @@ async function openRunner(cid, folderId) {
 /**
  * Runs a collection or folder: the Runner dialog and `python3 server.py run` both use this.
  * Values set by scripts carry through the whole run (like Postman), saved to files only with keepVars.
+ * iterationData: rows of a data file, one per iteration (iterations = rows; a given count caps it).
+ * Scripts steer the order with pm.execution.setNextRequest(name or id) (null ends the iteration, as in Postman)
+ * and skip a request with pm.execution.skipRequest(). totals.error says why a run stopped early.
  */
-async function runCollection({ cid, folderId = null, iterations = 1, delay = 0, stopOnFail = false, keepVars = false, signal, onResult = () => {} }) {
+async function runCollection({ cid, folderId = null, iterations = 1, delay = 0, stopOnFail = false, keepVars = false, iterationData = null, signal, onResult = () => {} }) {
   const col = state.cols[cid] || await withCol(cid);
   const folder = folderId ? locate(col, folderId) : null;
   if (folderId && !folder) throw new Error('That folder no longer exists.');
   const items = [];
   eachRequest(folder ? folder.item.item : col.item, (item, parents) => items.push({ item, parents: [...(folder ? [...folder.parents, folder.item] : []), ...parents] }));
   if (!items.length) throw new Error('There are no requests to run here.');
-  iterations = Math.max(1, Math.min(1000, iterations | 0 || 1));
+  const rows = iterationData == null ? null : normalizeDataRows(iterationData).rows;
+  if (rows && !rows.length) throw new Error('The data file has no rows.');
+  if (rows) iterations = Math.min(rows.length, DATA_ROWS_MAX, iterations == null ? rows.length : Math.max(1, iterations | 0 || rows.length));
+  else iterations = Math.max(1, Math.min(1000, iterations | 0 || 1));
   delay = Math.max(0, Math.min(60000, delay | 0));
-  const totals = { n: 0, pass: 0, fail: 0, errors: 0, totalMs: 0, ok: 0, c4: 0, c5: 0, total: items.length * iterations, stopped: false };
+  const totals = { n: 0, pass: 0, fail: 0, errors: 0, skipped: 0, totalMs: 0, ok: 0, c4: 0, c5: 0, total: items.length * iterations, iterations, stopped: false, error: '' };
+  const maxSteps = items.length * iterations + STEP_MAX;
   let runScopes = scopesFor(cid);
   outer: for (let it = 0; it < iterations; it++) {
-    for (const [idx, { item, parents }] of items.entries()) {
+    const row = rows ? rows[it] : null;
+    let idx = 0, step = 0;
+    while (idx < items.length) {
       if (signal && signal.aborted) { totals.stopped = true; break outer; }
+      if (totals.n >= maxSteps) {
+        totals.stopped = true;
+        totals.error = `Stopped after ${totals.n} requests: pm.execution.setNextRequest() kept the run going (a loop that never calls setNextRequest(null)?).`;
+        break outer;
+      }
+      const { item, parents } = items[idx];
       const ed = fromItem(item);
-      const out = await execute({ ed, cid, itemId: item.id, iteration: it, signal, persist: keepVars, runScopes: keepVars ? null : runScopes });
+      const out = await execute({ ed, cid, itemId: item.id, iteration: it, iterationCount: iterations, iterationData: row, inRun: true,
+        signal, persist: keepVars, runScopes: keepVars ? null : runScopes });
       if (!keepVars && out.scopes) {
+        delete out.scopes.data; // the next iteration brings its own row
         // carry script values to the next request, except ones that decide where requests go (URL/Host)
         // (path and query values like /orders/{{id}} do carry: they can't change the server)
         const written = ['environment', 'collection', 'globals'].flatMap((sc) => Object.entries(out.scopes[sc]).map(([key, value]) => ({ key, value })));
@@ -5491,14 +5933,32 @@ async function runCollection({ cid, folderId = null, iterations = 1, delay = 0, 
       const tp = out.tests.filter((x) => x.passed === true).length;
       const tf = out.tests.filter((x) => x.passed === false).length;
       totals.pass += tp; totals.fail += tf;
-      if (out.error) totals.errors++;
+      if (out.skipped) totals.skipped++;
+      else if (out.error) totals.errors++;
       else if (out.res.status >= 500) totals.c5++;
       else if (out.res.status >= 400) totals.c4++;
       else totals.ok++;
       if (out.res && !out.error) totals.totalMs += out.res.timeMs;
-      await onResult({ it, idx, item, parents, ed, out, tp, tf, totals });
+      await onResult({ it, idx, step, dataRow: rows ? it + 1 : null, item, parents, ed, out, tp, tf, totals });
+      step++;
       if (stopOnFail && (tf || out.error)) { totals.stopped = true; break outer; }
+      let nextIdx = idx + 1;
+      if (out.next) {
+        if (out.next.to === null) nextIdx = items.length; // setNextRequest(null): this iteration ends here
+        else {
+          const to = out.next.to;
+          let j = items.findIndex((x) => x.item.id === to);
+          if (j < 0) j = items.findIndex((x) => String(x.item.name ?? '') === to);
+          if (j < 0) {
+            totals.stopped = true;
+            totals.error = `pm.execution.setNextRequest(${JSON.stringify(to)}) in "${ed.name}": no request with that name or id in this run.`;
+            break outer;
+          }
+          nextIdx = j;
+        }
+      }
       if (delay) await new Promise((r) => { const tm = setTimeout(r, delay); if (signal) signal.addEventListener('abort', () => { clearTimeout(tm); r(); }, { once: true }); });
+      idx = nextIdx;
     }
   }
   return totals;
@@ -5518,17 +5978,24 @@ async function headlessRun(job) {
       if (!hits.length) throw new Error(`No folder named "${job.folder}" in this collection.`);
       folderId = hits[0].id;
     }
+    const rows = job.iterationData == null ? null : normalizeDataRows(job.iterationData).rows;
+    const report = job.report && typeof job.report === 'object' ? job.report : {};
+    const iterations = rows ? (job.iterations == null ? rows.length : Math.min(rows.length, Math.max(1, job.iterations | 0))) : job.iterations;
+    const record = newRunRecord({ cid: job.cid, folderId, iterations, dataFile: rows ? { name: String(job.dataFile || 'data'), rows: rows.length, columns: normalizeDataRows(rows).columns } : null });
+    const budget = report.html && report.bodies ? { left: REPORT_BODIES_BUDGET } : null;
+    const started = performance.now();
     const totals = await runCollection({
-      cid: job.cid, folderId, iterations: job.iterations, delay: job.delay, stopOnFail: !!job.bail, keepVars: false,
-      onResult: ({ it, item, parents, ed, out }) => post({ type: 'result', result: {
-        iteration: it + 1, name: ed.name, path: parents.map((p) => p.name), method: ed.method, url: out.wire ? out.wire.url : ed.url,
-        status: out.res && !out.error ? out.res.status : null, reason: out.res && !out.error ? (out.res.reason || REASONS[out.res.status] || '') : '',
-        timeMs: out.res && !out.error ? out.res.timeMs : null, size: out.res && !out.error ? out.res.size : null, error: out.error || '',
-        warnings: out.warnings || [], tests: out.tests.map((x) => ({ name: x.name, passed: x.passed, error: x.error || '' })),
-        logs: (out.logs || []).filter((l) => l.level === 'error' || l.level === 'warn').map((l) => `${l.src ? `${l.src}: ` : ''}${l.text}`).slice(0, 20),
-      } }),
+      cid: job.cid, folderId, iterations, delay: job.delay, stopOnFail: !!job.bail, keepVars: false, iterationData: rows,
+      onResult: (r) => {
+        const rec = runResultRecord(r, budget);
+        record.results.push(rec);
+        return post({ type: 'result', result: publicResult(rec) });
+      },
     });
-    await post({ type: 'done', totals });
+    Object.assign(record, { durationMs: Math.round(performance.now() - started), stopped: totals.stopped, error: totals.error || '' });
+    if (report.html) await post({ type: 'report', html: reportWithin(record, !!report.bodies, REPORT_HTML_MAX) });
+    if (totals.error) await post({ type: 'fatal', error: totals.error });
+    else await post({ type: 'done', totals });
   } catch (e) {
     await post({ type: 'fatal', error: e.message });
   }
