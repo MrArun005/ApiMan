@@ -15,6 +15,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import io
 import ipaddress
 import json
 import secrets
@@ -33,6 +34,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+import zipfile
+import concurrent.futures
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -683,13 +686,62 @@ def robot_projects(root):
                 visit(sub, depth + 1)
 
     visit(root, 0)
+    for lid, path in robot_links(root).items():
+        out.append({"id": lid, "name": Path(path).name, "path": path, "linked": True, "missing": not Path(path).is_dir()})
     return out
+
+
+LINK_ID_RE = re.compile(r"^link-[0-9a-f]{12}$")
+
+
+def links_file(root, create=False):
+    return (private_dir(root) if create else Path(root) / ".apiman") / "links.json"
+
+
+def robot_links(root):
+    """Project folders linked from anywhere on this computer: {id: absolute path}."""
+    try:
+        paths = json.loads(links_file(root).read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {"link-" + hashlib.sha256(x.encode()).hexdigest()[:12]: x for x in paths if isinstance(x, str)}
+
+
+def robot_has_tests(d):
+    return any(p.suffix == ".robot" for p in robot_walk(d))
+
+
+def robot_link(root, path, remove=False):
+    """Link (or unlink) a project folder anywhere on this computer. It's run where it is: nothing is copied."""
+    links = robot_links(root)
+    if remove:
+        if path not in links:
+            raise FileNotFoundError(path)
+        del links[path]
+    else:
+        d = Path(os.path.expanduser(str(path or "").strip())).resolve()
+        if not d.is_dir():
+            raise ValueError(f"No folder at {d}.")
+        if not robot_has_tests(d):
+            raise ValueError(f"No Robot Framework tests (.robot files) in {d}.")
+        if d == Path(root).resolve() or Path(root).resolve() in d.parents:
+            raise ValueError("That folder is already in your data folder: it's listed without linking.")
+        links["link-" + hashlib.sha256(str(d).encode()).hexdigest()[:12]] = str(d)
+    f = links_file(root, create=True)
+    f.write_text(json.dumps(sorted(set(links.values()))), "utf-8")
+    os.chmod(f, 0o600)
+    return {"ok": True}
 
 
 def robot_project_dir(root, pid):
     root = Path(root).resolve()
     if pid == ".":
         return root
+    if LINK_ID_RE.fullmatch(pid or ""):
+        link = robot_links(root).get(pid)
+        if not link or not Path(link).is_dir():
+            raise FileNotFoundError(pid)
+        return Path(link).resolve()
     segs = (pid or "").split("/")
     if len(segs) > PROJECT_DEPTH or not all(FOLDER_RE.fullmatch(x) for x in segs):
         raise ValueError("Invalid project")
@@ -697,6 +749,63 @@ def robot_project_dir(root, pid):
     if root not in p.parents or not p.is_dir():
         raise FileNotFoundError(pid)
     return p
+
+
+MAX_ZIP = 36 * 1024 * 1024            # the zip itself: it travels as base64 in JSON (+1/3), under MAX_REQUEST
+MAX_ZIP_UNPACKED = 300 * 1024 * 1024  # what it may unpack to
+MAX_ZIP_FILES = 10000
+
+
+def robot_import_zip(root, name, data):
+    """Unpack an uploaded project zip into the data folder, safely: no absolute paths, no "..", no links, bounded
+    size and file count. One folder at the top of the zip becomes the project folder."""
+    if len(data) > MAX_ZIP:
+        raise ValueError("That zip is too large (limit 36 MB).")
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise ValueError("That file isn't a zip.")
+    members = [m for m in z.infolist() if not m.filename.startswith("__MACOSX/") and not m.filename.endswith(".DS_Store")]
+    if len(members) > MAX_ZIP_FILES or sum(m.file_size for m in members) > MAX_ZIP_UNPACKED:
+        raise ValueError("That zip unpacks to too much (limit 300 MB, 10,000 files).")
+    for m in members:
+        parts = m.filename.replace("\\", "/").split("/")
+        if m.filename.startswith(("/", "\\")) or ".." in parts or ":" in parts[0] or (m.external_attr >> 16) & 0o170000 == 0o120000:
+            raise ValueError(f"Refused: {m.filename} would land outside the project (or is a link).")
+    tops = {m.filename.split("/")[0] for m in members}
+    strip = len(tops) == 1 and all("/" in m.filename for m in members)
+    base = re.sub(r"[^\w.-]+", "-", (next(iter(tops)) if strip else Path(str(name or "project")).stem)).strip("-._")[:60]
+    base = base if FOLDER_RE.fullmatch(base or "") else "project"
+    root = Path(root).resolve()
+    if any(x["id"] == "." for x in robot_projects(root)):
+        raise ValueError("Your data folder is itself a Robot project, so an imported one wouldn't be listed apart. "
+                         "Link the project folder instead.")
+    dest, n = root / base, 2
+    while dest.exists():
+        dest, n = root / f"{base}-{n}", n + 1
+    dest.mkdir()
+    try:
+        for m in members:
+            rel = m.filename.split("/", 1)[1] if strip else m.filename
+            if not rel:
+                continue
+            target = (dest / rel).resolve()
+            if target == dest:
+                continue  # "proj/./"
+            if dest not in target.parents:
+                raise ValueError(f"Refused: {m.filename} would land outside the project.")
+            if m.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(m) as src, open(target, "wb") as out:
+                shutil.copyfileobj(src, out)
+        if not robot_has_tests(dest):
+            raise ValueError("That zip has no Robot Framework tests (.robot files).")
+    except BaseException:
+        shutil.rmtree(dest, ignore_errors=True)  # only the folder this import just created
+        raise
+    return {"id": dest.relative_to(root).as_posix(), "name": dest.name}
 
 
 def robot_inside(project, rel):
@@ -861,7 +970,8 @@ def robot_python(project, root, probe=True):
     bins = ("Scripts/python.exe",) if os.name == "nt" else ("bin/python",)
     cands = [os.environ.get("APIMAN_ROBOT_PYTHON")]
     root = Path(root).resolve()
-    bases = [project] + ([project.parent] if project != root else []) + [HERE]  # never above the data folder
+    inside = root in project.parents  # a data-folder project may share a venv with its folder; never above the data folder
+    bases = [project] + ([project.parent] if inside else []) + [HERE]  # a linked one: its own venv or ApiMan's only
     for base in bases:
         for venv in (".venv", "venv", ".venv-robot"):
             cands += [str(base / venv / b) for b in bins]
@@ -1087,6 +1197,24 @@ def robot_runs(root, pid=None, limit=60):
     return out
 
 
+def robot_dashboard(root):
+    """One row per project for the Automation dashboard: tests, suites, keys and its recent runs."""
+    runs = robot_runs(root, limit=400)
+    out = []
+    for proj in robot_projects(root):
+        row = dict(proj)
+        try:
+            d = robot_project(root, proj["id"])
+            row.update(tests=sum(len(x["tests"]) for x in d["suites"]), suites=len(d["suites"]),
+                       keys=[k["name"] for k in d["keys"]], tags=sorted({t for x in d["suites"] for y in x["tests"] for t in y["tags"]}, key=str.lower))
+        except (OSError, ValueError) as e:
+            row["error"] = str(e)
+        row["runs"] = [{k: r.get(k) for k in ("id", "status", "passed", "failed", "skipped", "started", "ended", "env", "http")}
+                       for r in runs if r.get("project") == proj["id"]][:30]
+        out.append(row)
+    return out
+
+
 def robot_events_since(root, run_id, offset):
     """New complete event lines from byte `offset`, so the page can follow a run by polling."""
     out = robot_run_dir(root, run_id)
@@ -1143,6 +1271,59 @@ def robot_run_file(root, run_id, name):
     if out.resolve() not in p.parents or p.suffix.lower() not in RUN_FILE_TYPES:
         raise ValueError("Invalid file")
     return p.read_bytes(), RUN_FILE_TYPES[p.suffix.lower()]
+
+COMMON_PORTS = (3000, 3001, 3030, 4000, 4200, 5000, 5001, 5173, 5174, 5500, 5600, 7000, 8000, 8001, 8080, 8081, 8082,
+                8443, 8888, 9000, 9090, 1337)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None  # a redirect is an answer: the app is up
+
+
+def app_check(url, timeout=1.5):
+    """Is an app answering at this URL? {url, up, status, ms, title}. Any HTTP answer counts as up (even a 404)."""
+    u = urllib.parse.urlsplit(str(url))
+    if u.scheme not in ("http", "https") or not u.hostname:
+        return {"url": url, "up": False, "error": "Not an http(s) URL"}
+    # Only the app's address (scheme, host, port) is asked: never a path or query from an environment value
+    # (a reset link or a webhook must not be called just by opening the dashboard), and redirects aren't followed.
+    origin = f"{u.scheme}://{u.netloc.rsplit('@', 1)[-1]}/"
+    started = time.time()
+    try:
+        req = urllib.request.Request(origin, method="GET", headers={"User-Agent": "ApiMan app check"})
+        ctx = ssl.create_default_context(cafile=CA_FILE) if u.scheme == "https" else None
+        handlers = [_NoRedirect()] + ([urllib.request.HTTPSHandler(context=ctx)] if ctx else [])
+        try:
+            r = urllib.request.build_opener(*handlers).open(req, timeout=timeout)
+            status, body, server_name = r.status, r.read(65536), r.headers.get("Server", "")
+        except urllib.error.HTTPError as e:
+            status, body, server_name = e.code, e.read(65536), e.headers.get("Server", "")
+        m = re.search(rb"<title[^>]*>([^<]{1,120})", body, re.I)
+        return {"url": url, "up": True, "status": status, "ms": round((time.time() - started) * 1000), "server": server_name,
+                "title": m.group(1).decode("utf-8", "replace").strip() if m else ""}
+    except Exception as e:  # refused, timed out, TLS...
+        return {"url": url, "up": False, "error": str(getattr(e, "reason", e))[:200]}
+
+
+def app_scan():
+    """Apps listening on this computer's common development ports (never ApiMan's own)."""
+    def open_port(port):
+        for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+            try:
+                with socket.socket(family) as sk:
+                    sk.settimeout(0.25)
+                    if sk.connect_ex((host, port)) == 0:
+                        return True
+            except OSError:
+                continue
+        return False
+    ports = [x for x in COMMON_PORTS if x != SERVER_PORT]
+    with concurrent.futures.ThreadPoolExecutor(16) as pool:
+        up = [x for x, ok in zip(ports, pool.map(open_port, ports)) if ok]
+        found = pool.map(lambda x: app_check(f"http://localhost:{x}/"), up)
+        return [a for a in found if "airtunes" not in a.get("server", "").lower()]  # macOS AirPlay listens on 5000/7000
+
 
 class Handler(BaseHTTPRequestHandler):
     stores = None  # set in main()
@@ -1235,6 +1416,27 @@ class Handler(BaseHTTPRequestHandler):
         parts = [urllib.parse.unquote(x) for x in path[len("/api/robot/"):].split("/")]
         if parts == ["projects"] and method == "GET":
             return self.reply(200, robot_projects(root))
+        if parts == ["dashboard"] and method == "GET":
+            return self.reply(200, robot_dashboard(root))
+        if parts == ["links"] and method == "POST":
+            body = self.read_json()
+            return self.reply(200, robot_link(root, body.get("path") if isinstance(body, dict) else None))
+        if len(parts) == 2 and parts[0] == "links" and method == "DELETE":
+            return self.reply(200, robot_link(root, parts[1], remove=True))
+        if parts == ["import"] and method == "POST":
+            body = self.read_json()
+            if not isinstance(body, dict) or not isinstance(body.get("data"), str):
+                raise ValueError("Invalid request body")
+            return self.reply(201, robot_import_zip(root, body.get("name"), base64.b64decode(body["data"], validate=True)))
+        if parts == ["apps", "scan"] and method == "GET":
+            return self.reply(200, app_scan())
+        if parts == ["apps", "check"] and method == "POST":
+            body = self.read_json()
+            urls = body.get("urls") if isinstance(body, dict) else None
+            if not isinstance(urls, list) or len(urls) > 50:
+                raise ValueError("Invalid request body")
+            with concurrent.futures.ThreadPoolExecutor(8) as pool:
+                return self.reply(200, list(pool.map(app_check, [str(u) for u in urls])))
         if len(parts) == 2 and parts[0] == "projects" and method == "GET":
             return self.reply(200, robot_project(root, parts[1]))
         if len(parts) == 3 and parts[0] == "projects" and parts[2] == "file" and method in ("GET", "PUT"):
