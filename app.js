@@ -1728,7 +1728,7 @@ function fitTabs(seg) {
   if (!seg.getClientRects().length || seg.scrollWidth <= seg.clientWidth + 1) { if (more) more.hidden = true; return; }
   if (!more) {
     more = h('button', { type: 'button', class: 'btn icon small seg-more', title: 'More tabs', 'aria-label': 'More tabs', 'aria-haspopup': 'menu', 'aria-expanded': 'false' }, icon('dots'));
-    more.addEventListener('click', () => showMenu(more, btns.filter((b) => b.classList.contains('ovf')).map((b) => {
+    more.addEventListener('click', () => showMenu(more, btns.filter((b) => b.classList.contains('ovf') && !b.disabled).map((b) => {
       const name = [...b.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim() || b.textContent.trim();
       const count = b.querySelector('.count:not(.dot)')?.textContent.trim();
       return { label: count ? `${name} (${count})` : name, onClick: () => { b.click(); requestAnimationFrame(() => requestAnimationFrame(() => b.focus())); } };
@@ -1959,7 +1959,8 @@ function renderTabs() {
     h('button', { class: 'newtab', title: 'New request tab', 'aria-label': 'New request tab', onclick: () => { openTab(newTab()); $('#url').focus(); } }, icon('plus')),
     h('button', { class: 'newtab alltabs', title: 'All open tabs', 'aria-label': 'All open tabs', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
       onclick: (e) => showMenu(e.currentTarget, state.tabs.map((t, i) => ({
-        label: `${t.ed.method}  ${t.ed.name}${t.dirty ? '  •' : ''}${i === state.active ? '  (current)' : ''}`,
+        label: h('span', { class: 'mi-tab' }, h('span', { class: `mtag ${t.ed.method}` }, t.ed.method), h('span', { class: 'mi-name' }, t.ed.name, t.dirty ? h('span', { class: 'dirty-dot', 'aria-label': ' (unsaved)' }) : null),
+          h('span', { class: 'mi-sub' }, (t.ed.url || '').replace(/^[a-z]+:\/\//i, '') || 'no URL yet'), i === state.active ? h('span', { class: 'mi-sub' }, 'current') : null),
         onClick: () => { state.active = i; persistTabs(); renderAll(); requestAnimationFrame(() => $('#tabstrip .rtab.on')?.focus()); },
       }))) }, icon('chevron')));
   const on = strip.querySelector('.rtab.on');
@@ -2434,7 +2435,7 @@ function renderResponse() {
   // body
   $('#respTools').hidden = false;
   $('#respTools').classList.toggle('no-body', !hasRes);
-  $$('#respTools .seg-btn').forEach((b) => b.classList.toggle('on', b.dataset.view === t.bodyView));
+  $$('#respTools .seg-btn').forEach((b) => { const on = b.dataset.view === t.bodyView; b.classList.toggle('on', on); b.setAttribute('aria-checked', String(on)); });
   const previewable = hasRes && (/html|xml|svg/.test(contentType(res)) || (res.binary && /^image\//.test(contentType(res))));
   const pv = $('#respTools [data-view="preview"]');
   pv.disabled = !previewable;
@@ -2532,7 +2533,13 @@ function inertHtml(html) {
 const find = { marks: [], hits: [], i: -1 };
 const findCm = () => { const el = $('#respBody .CodeMirror'); return el && el.CodeMirror; };
 function openFind() {
-  if (!findCm()) { toast('Send the request first: Find searches the response body.'); return; }
+  const t = cur();
+  if (t && t.bodyView === 'preview' && !$('#respTools').classList.contains('no-body')) { // search the source instead
+    $('#respTools [data-view="raw"]').click();
+    setTimeout(openFind, 0);
+    return;
+  }
+  if (!findCm()) { toast(t && t.out && t.out.res ? 'This response has no text to search.' : 'Send the request first: Find searches the response body.'); return; }
   $('#findBar').hidden = false;
   refreshEditors($('#pane-rbody'));
   $('#findInput').focus();
@@ -3603,7 +3610,7 @@ function openSettings(initial = null, layoutSnap = null) {
     buttons: [
       { label: 'Restore defaults', left: true, onClick: () => {
         // Only the form is reset and previewed; nothing is stored until Save, and Cancel brings everything back.
-        const defaults = { ...draft, theme: DEFAULT_SETTINGS.theme, textScale: 1, codeSize: 13, density: 'comfortable', densityScale: 1, layout: 'auto', wrap: true,
+        const defaults = { ...draft, theme: DEFAULT_SETTINGS.theme, textScale: 1, codeSize: 13, density: 'comfortable', densityScale: 1, layout: 'auto', wrap: true, tabStyle: 'subtle',
           lineHeight: 1.6, tabSize: 2, uiFont: 'geist', codeFont: 'geist-mono', accent: 'blue', sidePosition: 'left', sideHidden: false };
         reopening = true;
         applyAppearance(defaults);                             // defaults first, so minimums use the default text size
@@ -3972,12 +3979,13 @@ async function start() {
     const seg = respRow.querySelector('.seg'), meta = $('#respStatus'), alt = $('#respMetaAlt'), tools = $('#respTools');
     const view = tools.querySelector(':scope > .seg');
     alt.replaceChildren(...[...meta.children].map((el) => el.cloneNode(true)));
-    tools.classList.remove('wrap', 'icons', 'short', 'squeeze');
+    tools.classList.remove('wrap', 'icons', 'short', 'squeeze', 'no-size', 'no-time');
     view.querySelectorAll('.ovf').forEach((b) => b.classList.remove('ovf'));
     const over = () => tools.scrollWidth > tools.clientWidth + 1;
     for (const step of ['short', 'icons']) if (over()) tools.classList.add(step);
     if (over()) { tools.classList.add('squeeze'); fitTabs(view); tools.classList.remove('squeeze'); } // hide extra views, then keep the rest whole
     else fitTabs(view);
+    for (const step of ['no-size', 'no-time']) if (over()) tools.classList.add(step);
     if (over()) tools.classList.add('wrap');
     fitTabs(seg);
   };
