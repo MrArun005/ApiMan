@@ -56,10 +56,10 @@ Each row: the root class, its variants (modifiers), its parts, and the `ui.*` fu
 | 14 | **Log** | `.console` | `.line` (tone), `.src` | `ui.logLine()` |
 | 15 | **Table** | `table.kv` (editable key/value) · `table.grid` (read-only) · `.boxed` | `.chk` `.type` `.act` `.file-pick` `.fname` · `.num` `.tight` `.v` `.r` `.mono` · rows `.off` `.ghost` | `kvTable()`, `ui.table()` |
 | 16 | **CodeView** | `.code-editor` · `.short` `.fill` `.readonly` `.codegen` · `pre.out` · `.line-diff` · `.preview` · `.docs-preview` | `.editor-host`, CodeMirror (`CodeMirror*`, `cm-*`), JSON marks `.j-key` `.j-str` `.j-num` `.j-lit`, diff `.n` `.sign`, rows `.del` `.ins` `.gap` | `codeEditor()`, `renderLineDiff()` |
-| 17 | **EmptyState** | `.empty-state` · `.drop` (drop zone) | `p`, ActionRow, `kbd` | `ui.empty()` |
+| 17 | **EmptyState** | `.empty-state` (compact, in lists) · `.fill` (owns a pane: centred icon, title, one line) · `.drop` (drop zone) | `svg`, `strong` title, `p`, shortcuts `dl.keys`, `pre.code-block`, ActionRow | `ui.empty()`, `ui.emptyPane()` |
 | 18 | **Dialog** | `dialog` · `.confirm` `.wide` `.drawer` `.docked` | `.dlg-shell` `.dlg-head` `.dlg-body` (`.tall`) `.dlg-foot` (`.push-left`) `.dlg-tabs` `.dlg-after` | `openDialog()`, `ask()` |
 | 19 | **Menu** | `.popover` | `.mi` (`.on`, `.danger`), `.sep`, `.mi-tab` `.mi-name` `.mi-sub`, `.peek`; anchor `.ctx-anchor` | `showMenu()` |
-| 20 | **Toast** | `.toast` · `.show` | | `toast()` |
+| 20 | **Toast** | `.toast` · tone (`ok` done, `warn` needs you, `err` failed, `muted` information) · `.show` | tone icon, text | `toast(message, tone)`: a light surface like menus, bottom-right over the work area; problems stay 6 s, the rest 2.6 s |
 | 21 | **Progress** | `.bar` · tone | fill `div` | `ui.progress()` |
 | 22 | **DocumentTabs** | `.tabstrip` | `.rtab` (`.on`, `.clipped`), `.tname`, Dot, close = Button `.btn.icon.small.x`, `.newtab`, `.alltabs` | `renderTabs()` |
 | 23 | **RequestBar** | `.reqbar` (`data-method`) | method Select, `.url-wrap` (`#url`, `.url-hl`, `.v`), `.send` (`.busy`), `.resolved` | static markup |
@@ -85,6 +85,6 @@ Regions place components on the page. They own position, size, order and spacing
 
 ## 5. Writing
 
-- Hints explain, once. Labels name. Toasts say what happened and the one next step, in one short sentence.
+- Hints explain, once. Labels name. Toasts say what happened and the one next step, in one short sentence, with the tone that matches: an error is never shown as `ok`.
 - A hint is never cut to a few letters: it wraps or moves to its own line. Long values (paths, URLs) stay on one line, cut at the start or end, with the whole value in `title`.
 - Numbers use tabular figures; timings and sizes come from `fmtMs()` / `fmtSize()`.

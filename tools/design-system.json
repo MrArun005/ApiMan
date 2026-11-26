@@ -175,7 +175,9 @@
     ],
     "EmptyState": [
       "empty-state",
-      "drop"
+      "fill",
+      "drop",
+      "keys"
     ],
     "Dialog": [
       "confirm",

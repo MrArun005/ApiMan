@@ -45,6 +45,10 @@ const ICONS = {
   eye: '<path d="M1.5 10S4.8 4 10 4s8.5 6 8.5 6-3.3 6-8.5 6S1.5 10 1.5 10Z" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="10" cy="10" r="2.6" fill="currentColor"/>',
   eyeOff: '<path d="M3 3l14 14M8.2 4.3A8 8 0 0 1 10 4c5.2 0 8.5 6 8.5 6a14 14 0 0 1-2.6 3.3M5.4 6.2A13.6 13.6 0 0 0 1.5 10S4.8 16 10 16a7.7 7.7 0 0 0 3.4-.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
   x: '<path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  compare: '<path d="M4 7h11M12 4l3 3-3 3M16 13H5M8 10l-3 3 3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+  check: '<circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M6.6 10.2l2.3 2.3 4.6-4.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>',
+  alert: '<circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 6v4.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="10" cy="13.6" r="1.1" fill="currentColor"/>',
+  info: '<circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 9v4.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="10" cy="6.4" r="1.1" fill="currentColor"/>',
   trash: '<path d="M4 6h12M8 6V4h4v2M6 6l.8 10h6.4L14 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>',
   play: '<path d="M6 4l10 6-10 6Z" fill="currentColor"/>',
   search: '<circle cx="8.5" cy="8.5" r="5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12.5 12.5L17 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
@@ -172,18 +176,32 @@ const ui = {
   },
   logLine(src, text, tone = '', srcAttrs = {}) { return h('div', { class: cx('line', toneOf(tone)) }, h('span', { class: 'src', ...srcAttrs }, src), text); },
   empty(...kids) { return h('div', { class: 'empty-state' }, ...kids); },
+  /** EmptyState that owns a whole pane: centred icon, title, one line of text, optional shortcuts [[keys], label], example and actions. */
+  emptyPane({ icon: ic = null, title, text = null, shortcuts = [], example = null, actions = [] }) {
+    return h('div', { class: 'empty-state fill' },
+      ic ? icon(ic) : null,
+      h('strong', null, title),
+      text ? h('p', null, text) : null,
+      shortcuts.length ? h('dl', { class: 'keys' }, ...shortcuts.flatMap(([keys, label]) => [h('dt', null, ...keys.map((k) => ui.kbd(k))), h('dd', null, label)])) : null,
+      example ? h('pre', { class: 'code-block' }, example) : null,
+      actions.length ? ui.actions(...actions) : null);
+  },
   progress(tone = '') { return h('div', { class: cx('bar', toneOf(tone)) }, h('div', { style: 'width:0%' })); },
 };
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID()
   : 'id-' + Math.random().toString(36).slice(2) + Date.now().toString(36));
 
-function toast(msg) {
+/** Toast (DESIGN.md §3): a short message with its tone. ok = done, warn = needs you, err = failed, muted = for information. */
+function toast(msg, tone = 'ok') {
   const t = $('#toast');
-  t.textContent = msg;
-  t.classList.add('show');
+  const tn = ['ok', 'warn', 'err', 'muted'].includes(tone) ? tone : 'ok';
+  t.className = `toast ${tn}`;
+  t.replaceChildren(icon({ ok: 'check', warn: 'alert', err: 'alert', muted: 'info' }[tn]), h('span', null, msg));
+  t.setAttribute('role', tn === 'err' ? 'alert' : 'status');
+  requestAnimationFrame(() => t.classList.add('show'));
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => t.classList.remove('show'), 2200);
+  toast.timer = setTimeout(() => t.classList.remove('show'), tn === 'err' || tn === 'warn' ? 6000 : 2600); // problems stay long enough to read
 }
 
 const ls = {
@@ -1574,7 +1592,7 @@ async function oauthAuthorize(c) {
       try { bc = new BroadcastChannel('apiman-oauth'); bc.onmessage = (e) => done(e.data); } catch { /* opener message only */ }
       window.addEventListener('message', onWin);
       const timer = setTimeout(() => { cleanup(); reject(new Error('Sign-in timed out after 10 minutes.')); }, 10 * 60_000);
-      if ($('#dlg').open) { toast(`Finish signing in to ${url.host} in the window that opened.`); return; } // never replace a dialog with unsaved edits
+      if ($('#dlg').open) { toast(`Finish signing in to ${url.host} in the window that opened.`, 'muted'); return; } // never replace a dialog with unsaved edits
       openDialog({
         title: 'Sign in',
         body: [h('p', { class: 'hint' }, `Finish signing in to ${url.host} in the window that opened. This dialog closes by itself when you're done.`),
@@ -1649,12 +1667,12 @@ function oauthFields(model, field, onChange, vars) {
     if (grant === 'authorization_code') {
       kids.push(ui.check({ label: 'Use PKCE', help: 'Recommended. Required for clients without a secret.', checked: model.pkce !== false, onChange: (e) => { model.pkce = e.target.checked; onChange(); } }));
       kids.push(ui.field('Callback URL (register it with your provider)', ui.secretField(ui.input({ value: oauthRedirectUri(), readonly: true, spellcheck: 'false' }),
-        ui.iconButton('copy', 'Copy the callback URL', () => navigator.clipboard.writeText(oauthRedirectUri()).then(() => toast('Copied'), () => toast('Copying was blocked by the browser.'))))));
+        ui.iconButton('copy', 'Copy the callback URL', () => navigator.clipboard.writeText(oauthRedirectUri()).then(() => toast('Copied'), () => toast('Copying was blocked by the browser.', 'err'))))));
     }
     kids.push(status, ui.actions(
       ui.button({ label: 'Get new token', size: 'small', onClick: async (e) => {
         const btn = e.currentTarget; btn.disabled = true;
-        try { await oauthToken(model, vars(), { force: true }); toast('Got a new token'); } catch (err) { toast(err.message); } finally { btn.disabled = false; showStatus(); }
+        try { await oauthToken(model, vars(), { force: true }); toast('Got a new token'); } catch (err) { toast(err.message, 'err'); } finally { btn.disabled = false; showStatus(); }
       } }),
       ui.button({ label: 'Clear token', size: 'small', onClick: async () => { await oauthClear(model, vars()); showStatus(); toast('Token cleared'); } })));
     kids.push(ui.hint('Tokens stay in this browser tab, never in collection files.'));
@@ -1999,7 +2017,7 @@ function renderCollectionTree() {
 function toggleOpen(key) { state.open.has(key) ? state.open.delete(key) : state.open.add(key); saveOpen(); }
 async function toggleCollection(id) {
   toggleOpen(id);
-  if (!state.cols[id]) { try { await loadCol(id); } catch (e) { toast(e.message); } }
+  if (!state.cols[id]) { try { await loadCol(id); } catch (e) { toast(e.message, 'err'); } }
   renderSidebar();
 }
 
@@ -2229,7 +2247,7 @@ async function renameItem(cid, id) {
   const name = await ask({ title: `Rename ${isFolder(loc.item) ? 'folder' : 'request'}`, input: { label: 'Name', value: loc.item.name || '' }, ok: 'Rename' });
   if (!name) return;
   const fresh = locate(state.cols[cid], id); // look it up again: the collection may have been reloaded meanwhile
-  if (!fresh) { toast('That item no longer exists.'); return; }
+  if (!fresh) { toast('That item no longer exists.', 'err'); return; }
   fresh.item.name = name;
   await saveCol(cid);
   for (const t of state.tabs) if (t.cid === cid && t.itemId === id) t.ed.name = name;
@@ -2257,7 +2275,7 @@ function keepDirtyAsDrafts(affected) {
     kept++;
     return true;
   });
-  if (kept) toast(`${kept} tab${kept > 1 ? 's' : ''} with unsaved changes ${kept > 1 ? 'were' : 'was'} kept as unsaved draft${kept > 1 ? 's' : ''}.`);
+  if (kept) toast(`${kept} tab${kept > 1 ? 's' : ''} with unsaved changes ${kept > 1 ? 'were' : 'was'} kept as unsaved draft${kept > 1 ? 's' : ''}.`, 'warn');
 }
 
 async function deleteItem(cid, id) {
@@ -2660,12 +2678,12 @@ function renderBody() {
       { value: b.lang, size: 'small', 'aria-label': 'Raw format', onChange: (e) => { b.lang = e.target.value; markDirty(); renderBody(); } }));
   }
   if (b.mode === 'raw' && b.lang === 'json') extras.push(ui.button({ label: 'Beautify', variant: 'ghost', size: 'small', onClick: () => {
-    try { b.raw = JSON.stringify(JSON.parse(b.raw), null, Number(state.settings.tabSize) || 2); renderBody(); markDirty(); } catch (e) { toast(`Not valid JSON: ${e.message}`); }
+    try { b.raw = JSON.stringify(JSON.parse(b.raw), null, Number(state.settings.tabSize) || 2); renderBody(); markDirty(); } catch (e) { toast(`Not valid JSON: ${e.message}`, 'err'); }
   } }));
   $('#bodyExtras').replaceChildren(...extras);
 
   const box = $('#bodyEditor');
-  if (b.mode === 'none') box.replaceChildren(ui.hint('This request has no body.'));
+  if (b.mode === 'none') box.replaceChildren(ui.emptyPane({ title: 'No body', text: 'Pick a body type above to send one.' }));
   else if (b.mode === 'raw') {
     box.replaceChildren(codeEditor({ value: b.raw, mode: b.lang, label: 'Request body', placeholder: b.lang === 'json' ? '{ "name": "{{$randomFirstName}}" }' : 'Request body',
       onChange: (v) => { b.raw = v; renderCounts(); markDirty(); } }));
@@ -2796,10 +2814,10 @@ function renderResponse() {
     switchPane('#respTabs', 'rbody');
     $('#respTools').hidden = !t.sending; // "Sending..." shows where the status will appear
     $('#respTools').classList.add('no-body');
-    $('#respBody').replaceChildren(ui.empty(...(t.sending
-      ? [ui.hint(`Waiting for the response to ${t.ed.method} ${t.ed.url || 'this request'}…`)]
-      : [ui.hint('Send the request to see its response here.'),
-        ui.hint([ui.kbd(MOD), ' + ', ui.kbd('Enter'), ' sends, ', ui.kbd(MOD), ' + ', ui.kbd('S'), ' saves, ', ui.kbd(MOD), ' + ', ui.kbd('F'), ' searches a response.'])])));
+    $('#respBody').replaceChildren(t.sending
+      ? ui.emptyPane({ title: 'Waiting for the response…', text: `${t.ed.method} ${t.ed.url || 'this request'}` })
+      : ui.emptyPane({ icon: 'play', title: 'No response yet', text: 'Send the request to see its response here.',
+        shortcuts: [[[MOD, 'Enter'], 'Send'], [[MOD, 'S'], 'Save'], [[MOD, 'F'], 'Find in the response']] }));
     renderDiff();
     return;
   }
@@ -2848,17 +2866,17 @@ function renderResponse() {
   $('#respCookies').replaceChildren(cookies.length
     ? h('table', { class: 'grid' }, h('thead', null, h('tr', null, ...['Name', 'Value', 'Domain', 'Path', 'Expires', 'Flags'].map((x) => h('th', null, x)))),
       h('tbody', null, cookies.map((c) => h('tr', null, h('td', null, c.name), h('td', { class: 'mono' }, c.value), h('td', null, c.domain || ''), h('td', null, c.path || ''), h('td', null, c.expires || ''), h('td', null, c.flags.join(', '))))))
-    : ui.hint(backend.mode === 'local' ? 'The response set no cookies.' : 'The response set no cookies that browsers let pages read (run ApiMan locally to see Set-Cookie headers).'));
+    : ui.emptyPane({ title: 'No cookies', text: backend.mode === 'local' ? 'The response didn\'t set any.' : 'The response set none that browsers let pages read. Run ApiMan locally to see Set-Cookie headers.' }));
   // tests
   $('#respTests').replaceChildren(tests.length
     ? h('div', null, ui.hint(`${passed} passed, ${failed} failed${tests.length - passed - failed ? `, ${tests.length - passed - failed} skipped` : ''}`),
       ...tests.map((x) => ui.result(x.passed === false ? 'err' : x.passed === null ? '' : 'ok', x.passed === false ? 'Fail' : x.passed === null ? 'Skip' : 'Pass', x.name, x.passed === false ? x.error : null)))
-    : ui.empty(ui.hint('No tests ran. Right-click a value in the JSON body to add a test for it, or write them in Scripts, then Tests. For example:'),
-      h('pre', { class: 'code-block' }, 'pm.test("Status is 200", () => {\n  pm.response.to.have.status(200);\n});')));
+    : ui.emptyPane({ icon: 'check', title: 'No tests ran', text: 'Right-click a value in the JSON body to add a test for it, or write one in Scripts → Tests:',
+      example: 'pm.test("Status is 200", () => {\n  pm.response.to.have.status(200);\n});' }));
   // console
   $('#respConsole').replaceChildren(...(out.logs && out.logs.length
     ? out.logs.map((l) => ui.logLine(l.src || '', l.text, { error: 'err', warn: 'warn' }[l.level] || ''))
-    : [ui.hint('console.log() output from scripts appears here.')]));
+    : [ui.emptyPane({ title: 'Nothing logged', text: 'console.log() output from scripts appears here.' })]));
   renderDiff();
 }
 
@@ -2934,7 +2952,7 @@ function openFind() {
   if ($('#respTools .seg-btn.on')?.dataset.view === 'preview' && !$('#respTools').classList.contains('no-body')) { // search the source instead
     $('#respTools [data-view="raw"]').click();
     find.restoreView = 'preview'; // undone when Find closes: the user never chose Raw
-    toast('Searching the Raw view; Preview comes back when you close Find.');
+    toast('Searching the Raw view; Preview comes back when you close Find.', 'muted');
     setTimeout(openFind, 0);
     return;
   }
@@ -3121,7 +3139,7 @@ function jsonValueMenu(cm, path, anchor) {
     const expr = v !== null && typeof v === 'object' ? `JSON.stringify(${x})` : x;
     addToTests(t, `// Save ${label} for other requests: {{${name}}}\npm.${scope[0]}.set(${JSON.stringify(name)}, ${expr});`, 'Variable saving added');
   } });
-  items.push({ label: 'Copy path', onClick: () => navigator.clipboard.writeText(jsAccess(path, 'pm.response.json()')).then(() => toast('Copied'), () => toast('Copying was blocked by the browser.')) });
+  items.push({ label: 'Copy path', onClick: () => navigator.clipboard.writeText(jsAccess(path, 'pm.response.json()')).then(() => toast('Copied'), () => toast('Copying was blocked by the browser.', 'err')) });
   showMenu(anchor, items);
 }
 
@@ -3359,15 +3377,15 @@ function renderDiff() {
       onClick: () => { t.pinned = { ...out, pinnedAt: Date.now() }; t.diffWith = 'pinned'; toast('Pinned'); renderDiff(); } }),
   ].filter(Boolean));
   const body = [];
-  const empty = (...kids) => body.push(ui.empty(...kids));
+  const empty = (o) => body.push(ui.emptyPane({ icon: 'compare', ...o }));
   if (!hasOut) {
-    empty(ui.hint('Send the request. Each response is then compared with the previous one, a pinned one, or the same request sent with another environment.'));
+    empty({ title: 'Nothing to compare yet', text: 'Send the request. Each response is compared with the previous one, a pinned one, or the same request sent with another environment.' });
   } else if (base && base.envId !== undefined && (!base.out || base.pending)) {
-    if (base.pending) empty(ui.hint(`Sending with ${base.label}…`));
-    else empty(ui.hint(`Sends this request again with the variables of ${base.label}, then compares the two responses. Scripts' variable changes aren't saved.`),
-      ui.actions(ui.button({ label: `Send with ${base.label}`, size: 'small', onClick: () => runInEnv(t, base.envId) })));
+    if (base.pending) empty({ title: `Sending with ${base.label}…` });
+    else empty({ title: `Compare with ${base.label}`, text: `Sends this request again with the variables of ${base.label} and compares the two responses. Scripts' variable changes aren't saved.`,
+      actions: [ui.button({ label: `Send with ${base.label}`, size: 'small', onClick: () => runInEnv(t, base.envId) })] });
   } else if (!base) {
-    empty(ui.hint(t.diffWith === 'pinned' ? 'Pin a response first.' : 'Send again to compare the next response with this one, or pin this one.'));
+    empty(t.diffWith === 'pinned' ? { title: 'No pinned response', text: 'Pin a response to compare later ones with it.' } : { title: 'One response so far', text: 'Send again to compare the next response with this one, or pin this one.' });
   } else if (base.out.error || !base.out.res) {
     body.push(ui.note(`The ${base.label} request failed: ${base.out.error || 'no response'}`, 'err'));
     if (base.envId !== undefined) body.push(ui.actions(ui.button({ label: 'Try again', size: 'small', onClick: () => runInEnv(t, base.envId) })));
@@ -3488,8 +3506,8 @@ function wsConnect(t) {
   const vars = merged(scopesFor(t.cid));
   const url = resolve(t.ed.url, vars).trim();
   const missing = unresolved([url]);
-  if (missing.length) { toast(`Unknown variable {{${missing[0]}}}. Define it in the environment, the collection, or Globals.`); return; }
-  try { new URL(url); } catch { toast(`"${url}" isn't a valid URL.`); return; }
+  if (missing.length) { toast(`Unknown variable {{${missing[0]}}}. Define it in the environment, the collection, or Globals.`, 'err'); return; }
+  try { new URL(url); } catch { toast(`"${url}" isn't a valid URL.`, 'err'); return; }
   const headers = t.ed.headers.filter((x) => !x.disabled && x.key);
   const proto = headers.find((x) => /^sec-websocket-protocol$/i.test(x.key));
   const protocols = proto ? resolve(proto.value, vars).split(',').map((s) => s.trim()).filter(Boolean) : [];
@@ -3523,7 +3541,7 @@ function wsConnect(t) {
 function wsDisconnect(t) { if (t.ws && t.ws.sock && t.ws.state !== 'closed') t.ws.sock.close(1000, 'Closed in ApiMan'); }
 function wsSend(t, text) {
   const ws = t.ws;
-  if (!ws || ws.state !== 'open') { toast('Connect first.'); return false; }
+  if (!ws || ws.state !== 'open') { toast('Connect first.', 'warn'); return false; }
   const msg = resolve(text, merged(scopesFor(t.cid)));
   ws.sock.send(msg);
   ws.log.push({ dir: 'out', data: msg, at: Date.now() });
@@ -3581,7 +3599,7 @@ async function send() {
     t.sending.abort();
     t.sending = null;
     t.out = t.prevOut || { error: 'Request cancelled.', tests: [], logs: [], warnings: [] };
-    if (t.prevOut) toast('Request cancelled. Showing the previous response.');
+    if (t.prevOut) toast('Request cancelled. Showing the previous response.', 'muted');
     renderResponse();
     return;
   }
@@ -3620,7 +3638,7 @@ async function save() {
   } catch (e) {
     // roll back, so a later unrelated save can't write these "unsaved" edits (a 409 already reloaded the doc)
     if (!e.message.includes('changed in another window') && loc.list[loc.index] !== previous) loc.list[loc.index] = previous;
-    toast(`Couldn't save: ${e.message}`);
+    toast(`Couldn't save: ${e.message}`, 'err');
     return;
   }
   t.dirty = false;
@@ -3729,7 +3747,7 @@ function renderDialog({ title, body, buttons = [], wide = false, confirm = false
       const btn = e.currentTarget;
       btn.disabled = true;
       const mine = dialogSeq;
-      try { if (await b.onClick() && dialogSeq === mine && dlg.open) dlg.close(); } catch (err) { toast(err.message); } finally { btn.disabled = false; }
+      try { if (await b.onClick() && dialogSeq === mine && dlg.open) dlg.close(); } catch (err) { toast(err.message, 'err'); } finally { btn.disabled = false; }
     },
   })));
   dialogSeq += 1;
@@ -3878,7 +3896,7 @@ async function editEnvironment(id) {
       ...(id && !isGlobals ? [{ label: 'Delete', danger: true, onClick: async () => { closeDialog(); await deleteEnvironment(id); return false; } }] : []),
       { label: 'Save', primary: true, onClick: async () => {
         const name = isGlobals ? 'Globals' : nameIn.value.trim();
-        if (!name) { toast('Give the environment a name.'); return false; }
+        if (!name) { toast('Give the environment a name.', 'warn'); return false; }
         const values = rows.filter((r) => r.key).map((r) => ({ key: r.key, value: r.value, type: r.type === 'secret' ? 'secret' : 'default', enabled: !r.disabled }));
         let envId = id;
         if (id) {
@@ -3983,8 +4001,8 @@ function openImport(start = 'file') {
   ];
   const run = {
     file: () => fileIn.click(),
-    curl: () => { try { const ed = parseCurl(curlIn.value); closeDialog(); openTab(newTab({ ed, dirty: true })); toast('Imported from cURL'); } catch (e) { toast(e.message); } },
-    paste: async () => { try { await importJson(parseSpecText(pasteIn.value), 'The pasted text'); closeDialog(); } catch (e) { toast(e.message); } },
+    curl: () => { try { const ed = parseCurl(curlIn.value); closeDialog(); openTab(newTab({ ed, dirty: true })); toast('Imported from cURL'); } catch (e) { toast(e.message, 'err'); } },
+    paste: async () => { try { await importJson(parseSpecText(pasteIn.value), 'The pasted text'); closeDialog(); } catch (e) { toast(e.message, 'err'); } },
   };
   let activeKey = 'file';
   const updateImport = () => {
@@ -4008,7 +4026,7 @@ function openImport(start = 'file') {
 async function importFiles(files) {
   let ok = 0;
   for (const f of files) {
-    try { await importJson(parseSpecText(await f.text()), f.name); ok++; } catch (e) { toast(`${f.name}: ${e.message}`); }
+    try { await importJson(parseSpecText(await f.text()), f.name); ok++; } catch (e) { toast(`${f.name}: ${e.message}`, 'err'); }
   }
   if (ok) closeDialog();
 }
@@ -4809,7 +4827,7 @@ function openCode() {
 
 // ---------- runner ----------
 async function openRunner(cid, folderId) {
-  if (!state.colList.length) { toast('Create or import a collection first.'); return; }
+  if (!state.colList.length) { toast('Create or import a collection first.', 'warn'); return; }
   await Promise.all(state.colList.map((c) => withCol(c.id).catch(() => {})));
   const colSel = ui.select(state.colList.map((c) => [c.id, c.name]), { value: cid || (cur() && cur().cid) || state.colList[0].id });
   const folderSel = ui.select([]);
@@ -4848,7 +4866,7 @@ async function openRunner(cid, folderId) {
     // Not awaited, so the button stays clickable as "Stop" while the run is in progress.
     buttons: [{ label: 'Run', primary: true, onClick: () => {
       if (ctrl) { ctrl.abort(); return false; }
-      run().catch((e) => { toast(e.message); ctrl = null; const b = $('#dlgFoot .btn.primary'); if (b) b.textContent = 'Run again'; });
+      run().catch((e) => { toast(e.message, 'err'); ctrl = null; const b = $('#dlgFoot .btn.primary'); if (b) b.textContent = 'Run again'; });
       return false;
     } }],
   });
@@ -5094,7 +5112,7 @@ function openSettings(initial = null, layoutSnap = null) {
         reopening = true;
         applyAppearance(defaults);                             // defaults first, so minimums use the default text size
         initResizers.setSide(288); initResizers.setSplit(50); // previewed like everything else; Cancel restores
-        setTimeout(() => { openSettings(defaults, snap); toast('Defaults loaded. Save to keep them, or Cancel to go back.'); }, 0);
+        setTimeout(() => { openSettings(defaults, snap); toast('Defaults loaded. Save to keep them, or Cancel to go back.', 'muted'); }, 0);
         return true;
       } },
       { label: 'Save', primary: true, onClick: () => {
@@ -5150,11 +5168,11 @@ function bindEditor() {
         markDirty();
         renderEditor();
         toast('Filled in from the pasted cURL command');
-      } catch (err) { toast(err.message); }
+      } catch (err) { toast(err.message, 'err'); }
     }
   });
   $('#btnSend').addEventListener('click', send);
-  $('#btnSave').addEventListener('click', () => save().catch((e) => toast(e.message)));
+  $('#btnSave').addEventListener('click', () => save().catch((e) => toast(e.message, 'err')));
   $('#btnCode').addEventListener('click', openCode);
   $('#reqTabs').addEventListener('click', (e) => {
     const b = e.target.closest('.tab');
@@ -5186,7 +5204,7 @@ function bindEditor() {
     navigator.clipboard.writeText(text).then(() => { // confirm where you clicked
       btn.classList.add('done'); if (lbl) lbl.textContent = 'Copied'; btn.setAttribute('aria-label', 'Copied');
       clearTimeout(btn.doneTimer); btn.doneTimer = setTimeout(() => { btn.classList.remove('done'); if (lbl) lbl.textContent = 'Copy'; btn.setAttribute('aria-label', 'Copy'); }, 1500);
-    }, () => toast('Copy failed'));
+    }, () => toast('Copy failed', 'err'));
   });
   $('#btnSaveBody').addEventListener('click', saveBody);
   $('#btnFindBody').addEventListener('click', () => openFind());
@@ -5236,7 +5254,7 @@ function bindChrome() {
   }, 120));
   $('#btnNew').addEventListener('click', (e) => showMenu(e.currentTarget, [
     { label: 'Request', onClick: () => openTab(newTab()) },
-    { label: 'Collection', onClick: () => newCollection().catch((err) => toast(err.message)) },
+    { label: 'Collection', onClick: () => newCollection().catch((err) => toast(err.message, 'err')) },
     { label: 'Environment', onClick: () => editEnvironment(null) },
     { label: 'Request from cURL', onClick: () => openImport('curl') },
   ]));
@@ -5267,7 +5285,7 @@ function bindChrome() {
     if (e.key === 'Escape' && !$('#popover').hidden) { hideMenu(); return; }
     if ($('#dlg').open) return; // never send/save the request behind a dialog
     if (mod && e.key === 'Enter') { e.preventDefault(); if (cur()) send(); return; }
-    if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); if (cur()) save().catch((err) => toast(err.message)); return; }
+    if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); if (cur()) save().catch((err) => toast(err.message, 'err')); return; }
     if (mod && e.key.toLowerCase() === 'b') { e.preventDefault(); toggleSidebar(); return; }
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
     if (!typing && e.key === '/') { e.preventDefault(); $('#search').focus(); }
@@ -5294,7 +5312,7 @@ async function useFolder(dir) {
   $('#dataDir').textContent = `Folder "${dir.name}" on this computer`;
   const btn = $('#btnFolder');
   btn.textContent = 'Change folder';
-  btn.onclick = () => pickFolder().catch((e) => e.name !== 'AbortError' && toast(e.message));
+  btn.onclick = () => pickFolder().catch((e) => e.name !== 'AbortError' && toast(e.message, 'err'));
   await Promise.all([refreshCollections(), refreshEnvironments()]);
   renderEnvPicker();
   renderAll();
@@ -5708,7 +5726,7 @@ async function start() {
     if (window.showDirectoryPicker) {
       const btn = $('#btnFolder');
       btn.hidden = false;
-      btn.onclick = () => pickFolder().catch((e) => e.name !== 'AbortError' && toast(e.message));
+      btn.onclick = () => pickFolder().catch((e) => e.name !== 'AbortError' && toast(e.message, 'err'));
       const dir = await idbHandle('get').catch(() => null);
       if (dir) {
         if ((await dir.queryPermission({ mode: 'readwrite' })) === 'granted') {
@@ -5726,7 +5744,7 @@ async function start() {
     await Promise.all([refreshCollections(), refreshEnvironments()]);
     await restoreTabs();
   } catch (e) {
-    toast(`Couldn't load your data: ${e.message}`);
+    toast(`Couldn't load your data: ${e.message}`, 'err');
   }
   renderEnvPicker();
   renderAll();

@@ -459,6 +459,16 @@ img.preview { max-width: 100%; border-radius: var(--r-lg); border: 1px solid var
 .empty-state { color: var(--muted); font-size: var(--fs-sm); display: flex; flex-direction: column; gap: var(--s2); }
 .empty-state p { margin: 0; }
 .empty-state > .actions { margin-top: var(--s1); }
+/* fill: the empty state owns its pane: centred, one icon, a title, one line, then shortcuts or an example */
+.empty-state.fill { align-items: center; text-align: center; padding: clamp(var(--s6), 10vh, 88px) var(--s4) var(--s6); } /* the same height in every pane */
+.empty-state.fill > svg { width: calc(var(--icon) * 1.75); height: calc(var(--icon) * 1.75); color: var(--line-strong); margin-bottom: var(--s1); }
+.empty-state.fill > strong { color: var(--ink-2); font-size: var(--fs-md); font-weight: 600; }
+.empty-state.fill > p { max-width: 34em; }
+.empty-state.fill > pre.code-block { margin: var(--s2) 0 0; text-align: left; }
+.empty-state.fill > .actions { margin-top: var(--s2); justify-content: center; }
+.keys { display: grid; grid-template-columns: max-content max-content; gap: var(--s2) var(--s3); align-items: center; margin: var(--s3) 0 0; text-align: left; }
+.keys dt { display: flex; gap: var(--s1); justify-content: flex-end; white-space: nowrap; } /* a key combination never breaks */
+.keys dd { margin: 0; }
 .empty-state.drop { border: 1.5px dashed var(--line-strong); border-radius: var(--r-lg); padding: var(--s6); text-align: center; align-items: center; gap: var(--s3); }
 
 /* ===================================================================================== 18 Dialog */
@@ -520,14 +530,21 @@ dialog.drawer.docked { position: fixed; inset: 0 0 0 auto; margin: 0; z-index: 4
 .ctx-anchor { position: fixed; width: 0; height: 0; pointer-events: none; }
 
 /* ===================================================================================== 20 Toast */
+/* A light surface like menus and popovers, a tone icon, bottom-right over the work area where results appear. */
 .toast {
-  position: fixed; left: var(--s4); bottom: calc(var(--s4) + 56px); z-index: 60; transform: translateY(8px);
-  background: var(--ink); color: var(--panel); padding: var(--s3) var(--s4); border-radius: var(--r-lg); font-size: var(--fs-sm);
-  box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s; max-width: min(640px, 90vw);
+  position: fixed; right: var(--s5); bottom: var(--s5); z-index: 60; max-width: min(400px, calc(100vw - 2 * var(--s5)));
+  display: flex; align-items: flex-start; gap: var(--s2); padding: var(--s2) var(--s3) var(--s2) var(--s2);
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow);
+  font-size: var(--fs-sm); line-height: 1.45; opacity: 0; transform: translateY(6px); pointer-events: none; transition: opacity .16s, transform .16s;
 }
 .toast.show { opacity: 1; transform: none; }
-@media (min-width: 601px) { :root:not([data-side-hidden="true"]) .toast { max-width: calc(var(--side-eff) - 2 * var(--s4)); } } /* sits over the sidebar: wraps inside it */
-@media (max-width: 600px) { .toast { left: var(--s3); right: var(--s3); bottom: var(--s4); } }
+.toast > svg { margin-top: calc((1.45em - var(--icon)) / 2); color: var(--ok); }
+.toast.warn > svg { color: var(--warn); }
+.toast.err { border-color: color-mix(in srgb, var(--err) 40%, var(--line)); }
+.toast.err > svg { color: var(--err); }
+.toast.muted > svg { color: var(--muted); }
+@media (min-width: 901px) { :root.drawer-open .toast { right: calc(var(--drawer-w) + var(--s5)); } } /* clear of the docked Settings drawer */
+@media (max-width: 600px) { .toast { left: var(--s3); right: var(--s3); bottom: var(--s3); max-width: none; } }
 
 /* ===================================================================================== 21 Progress */
 .bar { height: 4px; background: var(--sunken); border-radius: var(--r-pill); overflow: hidden; margin-bottom: var(--s4); }

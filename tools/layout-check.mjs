@@ -108,7 +108,7 @@ const measure = () => page.evaluate(() => {
   // 8. notes, hints, result rows and toasts stay inside their section, and are never cut to a few letters
   for (const el of document.querySelectorAll('.hint, .note, .data-dir, .test-row, .toast.show')) {
     if (!vis(el) || el.closest('dialog:not([open]), [hidden], .CodeMirror')) continue;
-    const box = el.matches('.toast') ? (phone || de.dataset.sideHidden === 'true' || de.dataset.side === 'right' ? null : document.querySelector('.side'))
+    const box = el.matches('.toast') ? (phone ? null : document.querySelector('.work')) // toasts sit over the work area
       : el.closest('.pane, .side, dialog[open], #welcomeInner');
     if (box && vis(box)) { const r = R(el), b = R(box); if (r.right > b.right + 1 || r.left < b.left - 1) fails.push(`${name(el)} spills out of ${name(box)}`); }
     if (getComputedStyle(el).textOverflow === 'ellipsis' && el.scrollWidth > el.clientWidth + 1) fails.push(`note cut short: ${name(el)}`);
@@ -157,7 +157,7 @@ for (const [w, h] of WIDTHS) for (const sc of [[1, 1], [1.5, 1.4]]) for (const [
     document.querySelector('#splitResizer').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     document.querySelector(`#reqTabs [data-tab=${req}]`).click();
     document.querySelector(`#tab-${resp}`).click();
-    toast('A long message that has to wrap inside the sidebar instead of spilling over the editor next to it.');
+    toast('A long message that has to wrap inside its box instead of running off the side of the window.', 'err');
   }, [req, resp]);
   await settle();
   const fails = await measure();
