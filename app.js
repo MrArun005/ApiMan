@@ -2033,13 +2033,13 @@ function renderWelcome() {
     h('h1', null, hasData ? 'No request open' : 'Send your first request'),
     h('p', null, hasData
       ? 'Pick up a recent request, open one from a collection, or start a new one.'
-      : `Paste a URL, import a Postman collection, or start from a cURL command. Everything stays ${where}.`),
+      : `Paste a URL, import a Postman collection or an OpenAPI spec, or start from a cURL command. Everything stays ${where}.`),
     h('div', { class: 'welcome-actions' },
       h('button', { class: 'btn primary', 'data-act': 'new-request' }, 'New request'),
       h('button', { class: 'btn', 'data-act': 'import' }, 'Import collection'),
       h('button', { class: 'btn', 'data-act': 'import-curl' }, 'Paste cURL')),
     h('p', { class: 'hint shortcuts empty-state' }, h('span', null, kbd('/'), ' filter requests, ', kbd(MOD), ' + ', kbd('Enter'), ' send, ', kbd(MOD), ' + ', kbd('S'), ' save, ', kbd(MOD), ' + ', kbd('B'), ' sidebar')),
-    cols.length ? h('div', { class: 'welcome-cols' }, ...cols) : null);
+    ...(cols.length ? [h('div', { class: 'welcome-cols' }, ...cols)] : [])); // replaceChildren would print a null as "null"
 }
 
 function renderEditor() {
@@ -3149,22 +3149,22 @@ function peekVariables(anchor) {
 
 // ---------- import ----------
 function openImport(start = 'file') {
-  const fileIn = h('input', { type: 'file', 'aria-label': 'Postman files to import', accept: '.json,application/json', multiple: true, hidden: true, onchange: (e) => importFiles([...e.target.files]) });
+  const fileIn = h('input', { type: 'file', 'aria-label': 'Files to import', accept: '.json,.yaml,.yml,application/json,application/yaml', multiple: true, hidden: true, onchange: (e) => importFiles([...e.target.files]) });
   const drop = h('div', {
     class: 'drop',
     ondragover: (e) => { e.preventDefault(); },
     ondrop: (e) => { e.preventDefault(); importFiles([...e.dataTransfer.files]); },
-  }, h('p', null, 'Drop Postman collection or environment files here (v2.1 JSON).'),
+  }, h('p', null, 'Drop Postman collections or environments (v2.1 JSON), or OpenAPI / Swagger specs (JSON or YAML), here.'),
     h('button', { type: 'button', class: 'btn', onclick: () => fileIn.click() }, 'Choose files'), fileIn);
   const curlIn = h('textarea', { class: 'code', 'aria-label': 'cURL command', rows: 10, spellcheck: 'false', placeholder: "curl -X POST 'https://api.example.com/items' \\\n  -H 'Authorization: Bearer …' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '{\"name\":\"x\"}'" });
-  const pasteIn = h('textarea', { class: 'code', 'aria-label': 'Postman collection or environment JSON', rows: 10, spellcheck: 'false', placeholder: 'Paste a Postman collection or environment JSON' });
+  const pasteIn = h('textarea', { class: 'code', 'aria-label': 'Postman collection, environment, or OpenAPI spec', rows: 10, spellcheck: 'false', placeholder: 'Paste a Postman collection or environment (JSON),\nor an OpenAPI / Swagger spec (JSON or YAML)' });
   const defs = [
-    { key: 'file', label: 'File', content: [drop, h('p', { class: 'hint' }, 'In Postman: ⋯ on a collection → Export → Collection v2.1. Environments: ⋯ → Export.')] },
+    { key: 'file', label: 'File', content: [drop, h('p', { class: 'hint' }, 'In Postman: ⋯ on a collection → Export → Collection v2.1. An OpenAPI spec becomes a collection with example bodies, auth and tests that check each response against the spec.')] },
     { key: 'curl', label: 'cURL', content: [curlIn, h('div', { hidden: true }, h('button', { type: 'button', class: 'btn primary', 'data-import': 'curl', onclick: () => {
       try { const ed = parseCurl(curlIn.value); closeDialog(); openTab(newTab({ ed, dirty: true })); toast('Imported from cURL'); } catch (e) { toast(e.message); }
     } }, 'Import cURL'))] },
-    { key: 'paste', label: 'Paste JSON', content: [pasteIn, h('div', { hidden: true }, h('button', { type: 'button', class: 'btn primary', 'data-import': 'paste', onclick: async () => {
-      try { await importJson(JSON.parse(pasteIn.value), 'pasted JSON'); closeDialog(); } catch (e) { toast(e.message); }
+    { key: 'paste', label: 'Paste', content: [pasteIn, h('div', { hidden: true }, h('button', { type: 'button', class: 'btn primary', 'data-import': 'paste', onclick: async () => {
+      try { await importJson(parseSpecText(pasteIn.value), 'The pasted text'); closeDialog(); } catch (e) { toast(e.message); }
     } }, 'Import'))] },
   ];
   let activeKey = 'file';
@@ -3194,12 +3194,19 @@ function openImport(start = 'file') {
 async function importFiles(files) {
   let ok = 0;
   for (const f of files) {
-    try { await importJson(JSON.parse(await f.text()), f.name); ok++; } catch (e) { toast(`${f.name}: ${e.message}`); }
+    try { await importJson(parseSpecText(await f.text()), f.name); ok++; } catch (e) { toast(`${f.name}: ${e.message}`); }
   }
   if (ok) closeDialog();
 }
 
 async function importJson(data, label) {
+  if (isOpenApi(data)) {
+    const col = openApiToCollection(data);
+    await importJson(col, label);
+    const creds = col.variable.filter((v) => v.key !== 'baseUrl').map((v) => v.key);
+    toast(`Imported "${col.info.name}" from OpenAPI: ${countRequests(col.item)} requests, each with tests from the spec.${creds.length ? ` Fill in ${creds.join(', ')} in the collection's variables.` : ''}`);
+    return;
+  }
   if (data && data.info && Array.isArray(data.item)) {
     ensureIds(data.item);
     data.info.schema = data.info.schema || SCHEMA_V21;
@@ -3236,7 +3243,483 @@ async function importJson(data, label) {
     return;
   }
   if (data && Array.isArray(data.requests)) throw new Error('This is an old Postman v1 collection. In Postman, export it again as Collection v2.1.');
-  throw new Error(`${label} isn't a Postman collection or environment.`);
+  if (data && typeof data === 'object' && (data.openapi || data.swagger)) throw new Error(`${label} looks like OpenAPI, but it has no "paths" (or it's Swagger 1.x, which isn't supported).`);
+  throw new Error(`${label} isn't a Postman collection, environment, or OpenAPI spec.`);
+}
+
+// ---------- YAML (the block subset OpenAPI specs use) ----------
+/** JSON, or the YAML that API specs use: mappings, sequences, quoted/plain/flow scalars, | and > blocks, << merges. */
+function parseSpecText(text) {
+  const t = String(text).replace(/^﻿/, '');
+  if (/^\s*[[{]/.test(t)) { try { return JSON.parse(t); } catch (_) { /* flow-style YAML */ } }
+  return parseYaml(t);
+}
+function parseYaml(src) {
+  const lines = String(src).replace(/\r\n?/g, '\n').split('\n');
+  let i = 0;
+  const fail = (msg) => { throw new Error(`YAML line ${i + 1}: ${msg}`); };
+  const indentOf = (l) => l.match(/^ */)[0].length;
+  const blank = (l) => /^\s*$/.test(l);
+  const ignorable = (l) => /^\s*(#.*)?$/.test(l) || /^(---|\.\.\.)(\s.*)?$/.test(l) || /^%/.test(l);
+  const skip = () => { while (i < lines.length && ignorable(lines[i])) i++; };
+  const isItem = (t) => /^-(\s|$)/.test(t);
+  // End index of the quoted string starting at t[0], or -1 when it isn't closed.
+  const quoteEnd = (t) => {
+    const q = t[0];
+    for (let j = 1; j < t.length; j++) {
+      if (q === '"' && t[j] === '\\') j++;
+      else if (t[j] === q) { if (q === "'" && t[j + 1] === q) j++; else return j; }
+    }
+    return -1;
+  };
+  const stripComment = (s) => {
+    let q = null;
+    for (let k = 0; k < s.length; k++) {
+      const c = s[k];
+      if (q) {
+        if (q === '"' && c === '\\') k++;
+        else if (c === q) { if (q === "'" && s[k + 1] === "'") k++; else q = null; }
+      } else if ((c === '"' || c === "'") && (k === 0 || /[\s[{,:-]/.test(s[k - 1]))) q = c;
+      else if (c === '#' && (k === 0 || /\s/.test(s[k - 1]))) return s.slice(0, k).trimEnd();
+    }
+    return s.trimEnd();
+  };
+  const unquote = (s) => {
+    if (s[0] === "'") return s.slice(1, -1).replace(/''/g, "'");
+    return s.slice(1, -1).replace(/\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[\s\S])/g, (m, e) => {
+      if (/^[xuU]./.test(e)) return String.fromCodePoint(parseInt(e.slice(1), 16));
+      return { n: '\n', t: '\t', r: '\r', 0: '\0', b: '\b', f: '\f', e: '\x1b', _: ' ', N: '\u0085' }[e] ?? e;
+    });
+  };
+  const plain = (s) => {
+    s = s.trim();
+    if (s === '' || s === '~' || /^null$/i.test(s)) return null;
+    if (/^(true|false)$/i.test(s)) return s.toLowerCase() === 'true';
+    if (/^[-+]?\d+$/.test(s)) { const n = Number(s); return Number.isSafeInteger(n) ? n : s; }
+    if (/^0x[0-9a-fA-F]+$/.test(s)) return parseInt(s, 16);
+    if (/^[-+]?(\d+\.\d*|\.\d+|\d+)([eE][-+]?\d+)?$/.test(s)) return Number(s);
+    if (/^[-+]?\.inf$/i.test(s)) return s[0] === '-' ? -Infinity : Infinity;
+    if (/^\.nan$/i.test(s)) return NaN;
+    return s;
+  };
+  // Flow collections: [a, b], {k: v}, nested, with quoted or plain scalars.
+  const flow = (s) => {
+    let p = 0;
+    const ws = () => { while (p < s.length && /\s/.test(s[p])) p++; };
+    const scalar = (stops) => {
+      ws();
+      if (s[p] === '"' || s[p] === "'") {
+        const e = quoteEnd(s.slice(p));
+        if (e < 0) fail('unclosed quote');
+        const out = unquote(s.slice(p, p + e + 1)); p += e + 1; return out;
+      }
+      let j = p;
+      while (j < s.length && !stops.includes(s[j]) && !(s[j] === ':' && /[\s,\]}]/.test(s[j + 1] ?? ' '))) j++;
+      const out = plain(s.slice(p, j)); p = j; return out;
+    };
+    const value = () => {
+      ws();
+      if (s[p] === '[') {
+        p++; const arr = [];
+        for (;;) {
+          ws(); if (s[p] === ']') { p++; return arr; } if (p >= s.length) fail('unclosed [');
+          arr.push(value()); ws(); if (s[p] === ',') p++; else if (s[p] !== ']') fail('expected , or ]');
+        }
+      }
+      if (s[p] === '{') {
+        p++; const obj = {};
+        for (;;) {
+          ws(); if (s[p] === '}') { p++; return obj; } if (p >= s.length) fail('unclosed {');
+          const k = scalar(',}'); ws();
+          let v = null;
+          if (s[p] === ':') { p++; v = value(); }
+          Object.defineProperty(obj, String(k), { value: v, enumerable: true, writable: true, configurable: true });
+          ws(); if (s[p] === ',') p++; else if (s[p] !== '}') fail('expected , or }');
+        }
+      }
+      return scalar(',]}');
+    };
+    const v = value(); ws();
+    if (p < s.length) fail(`unexpected "${s.slice(p, p + 10)}"`);
+    return v;
+  };
+  const balanced = (s) => {
+    let d = 0, q = null;
+    for (let k = 0; k < s.length; k++) {
+      const c = s[k];
+      if (q) { if (q === '"' && c === '\\') k++; else if (c === q) q = null; } else if (c === '"' || c === "'") q = c; else if ('[{'.includes(c)) d++; else if (']}'.includes(c)) d--;
+    }
+    return d <= 0 && !q;
+  };
+  const splitKey = (t) => {
+    if (t[0] === '"' || t[0] === "'") {
+      const e = quoteEnd(t);
+      if (e < 0) return null;
+      const m = t.slice(e + 1).match(/^\s*:(\s+|$)/);
+      return m ? { key: unquote(t.slice(0, e + 1)), rest: t.slice(e + 1 + m[0].length) } : null;
+    }
+    if (/^[[{]/.test(t) || isItem(t)) return null;
+    const m = t.match(/^(.*?):(\s+|$)/);
+    return m ? { key: m[1].trim(), rest: t.slice(m[0].length) } : null;
+  };
+  const blockScalar = (header, ind) => {
+    const m = header.match(/^([|>])([+-]?)(\d?)([+-]?)$/);
+    const style = m[1], chomp = m[2] || m[4], explicit = Number(m[3]) || 0;
+    const raw = [];
+    while (i < lines.length && (blank(lines[i]) || indentOf(lines[i]) > ind)) raw.push(lines[i++]);
+    let bi = explicit ? ind + explicit : 0;
+    if (!bi) { const first = raw.find((l) => !blank(l)); bi = first ? indentOf(first) : ind + 1; }
+    const body = raw.map((l) => l.slice(bi));
+    let trailing = 0;
+    while (body.length && body[body.length - 1].trim() === '') { body.pop(); trailing++; }
+    let out = '';
+    if (style === '|') out = body.join('\n');
+    else {
+      body.forEach((l, k) => {
+        if (k === 0) { out = l; return; }
+        const prev = body[k - 1];
+        if (l === '') out += '\n';
+        else if (prev === '' || /^\s/.test(l) || /^\s/.test(prev)) out += (prev === '' ? '' : '\n') + l;
+        else out += ' ' + l;
+      });
+    }
+    if (!body.length) return '';
+    if (chomp === '-') return out;
+    if (chomp === '+') return out + '\n'.repeat(trailing + 1);
+    return out + '\n';
+  };
+  // A scalar that began on the line just consumed, continuing over deeper-indented lines.
+  const inlineValue = (rest, ind) => {
+    rest = rest.replace(/^(&\S+|!\S*)\s*/, '').replace(/^(&\S+|!\S*)\s*/, '');
+    if (/^\*\S+$/.test(rest)) fail('YAML aliases (*name) aren\'t supported; save the spec as JSON instead.');
+    if (/^[|>][+-]?\d?[+-]?$/.test(rest)) return blockScalar(rest, ind);
+    if (rest === '') return undefined;
+    let text = rest;
+    const quoted = /^["']/.test(text), flowy = /^[[{]/.test(text);
+    const open = () => (quoted && quoteEnd(text) < 0) || (flowy && !balanced(text));
+    while (i < lines.length && (blank(lines[i]) || indentOf(lines[i]) > ind)) {
+      if ((quoted || flowy) && !open()) break;
+      const nxt = lines[i].trim();
+      if (quoted) { text += '\n' + nxt; i++; continue; } // folded below
+      if (!open() && /^#/.test(nxt)) break;
+      if (nxt === '') {
+        let j = i; while (j < lines.length && blank(lines[j])) j++;
+        if (j >= lines.length || indentOf(lines[j]) <= ind) break; // trailing blanks end the scalar
+        text += '\n'; i = j; continue;
+      }
+      text += (text.endsWith('\n') ? '' : ' ') + (open() ? nxt : stripComment(nxt));
+      i++;
+    }
+    if (open()) fail('unclosed quote or bracket');
+    if (quoted) {
+      const e = quoteEnd(text);
+      if (text.slice(e + 1).trim()) fail(`unexpected text after a quoted value: "${text.slice(e + 1, e + 21).trim()}"`);
+      // line folding: one line break becomes a space, each blank line a newline
+      return unquote(text.slice(0, e + 1).replace(/[ \t]*\n((?:[ \t]*\n)*)[ \t]*/g, (m, blanks) => (blanks ? '\n'.repeat(blanks.split('\n').length - 1) : ' ')));
+    }
+    if (flowy) return flow(text);
+    return plain(text.replace(/ ?\n ?/g, '\n'));
+  };
+  const node = (minIndent) => {
+    skip();
+    if (i >= lines.length) return null;
+    const ind = indentOf(lines[i]);
+    if (ind < minIndent) return null;
+    const t = stripComment(lines[i].slice(ind));
+    if (isItem(t)) return seq(ind);
+    if (splitKey(t)) return map(ind);
+    i++;
+    return inlineValue(t, ind - 1) ?? null;
+  };
+  const afterKey = (rest, ind) => {
+    const v = inlineValue(rest, ind);
+    if (v !== undefined) return v;
+    skip();
+    if (i >= lines.length) return null;
+    const ni = indentOf(lines[i]);
+    if (ni > ind) return node(ind + 1);
+    if (ni === ind && isItem(lines[i].slice(ind))) return seq(ind);
+    return null;
+  };
+  const map = (ind) => {
+    const obj = {};
+    for (;;) {
+      skip();
+      if (i >= lines.length) break;
+      const li = indentOf(lines[i]);
+      if (li < ind) break;
+      if (li > ind) fail('unexpected indentation');
+      const t = stripComment(lines[i].slice(ind));
+      if (isItem(t)) break;
+      const kv = splitKey(t);
+      if (!kv) fail(`expected "key: value", got "${t.slice(0, 40)}"`);
+      i++;
+      const v = afterKey(kv.rest, ind);
+      if (kv.key === '<<' && v && typeof v === 'object') Object.assign(obj, ...(Array.isArray(v) ? v : [v]));
+      else Object.defineProperty(obj, kv.key, { value: v, enumerable: true, writable: true, configurable: true }); // "__proto__" stays a plain key
+    }
+    return obj;
+  };
+  const seq = (ind) => {
+    const arr = [];
+    for (;;) {
+      skip();
+      if (i >= lines.length || indentOf(lines[i]) !== ind) break;
+      const t = stripComment(lines[i].slice(ind));
+      if (!isItem(t)) break;
+      const after = t.slice(1);
+      const pad = after.match(/^\s*/)[0].length;
+      const item = after.slice(pad);
+      if (item === '') { i++; skip(); arr.push(i < lines.length && indentOf(lines[i]) > ind ? node(ind + 1) : null); continue; }
+      if (isItem(item) || splitKey(item)) { lines[i] = ' '.repeat(ind + 1 + pad) + item; arr.push(node(ind + 1)); continue; } // "- key: v" opens a mapping at the item's column
+      i++;
+      arr.push(inlineValue(item, ind) ?? null);
+    }
+    return arr;
+  };
+  const out = node(0);
+  skip();
+  if (i < lines.length) fail('unexpected content (check the indentation)');
+  return out;
+}
+
+// ---------- OpenAPI / Swagger ----------
+const isOpenApi = (d) => !!d && typeof d === 'object' && !Array.isArray(d) && (typeof d.openapi === 'string' || String(d.swagger) === '2.0') && !!d.paths && typeof d.paths === 'object';
+
+/** OpenAPI 3.x or Swagger 2.0 → a Postman v2.1 collection: folders by tag, example bodies, auth, and contract tests. */
+function openApiToCollection(spec) {
+  const v2 = !spec.openapi;
+  const METHODS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'];
+  const isObj = (o) => !!o && typeof o === 'object' && !Array.isArray(o);
+  const pointer = (ref) => {
+    if (typeof ref !== 'string' || !ref.startsWith('#/')) return undefined; // external files can't be followed
+    let cur = spec;
+    for (const part of ref.slice(2).split('/')) {
+      const k = decodeURIComponent(part).replace(/~1/g, '/').replace(/~0/g, '~');
+      if (!cur || typeof cur !== 'object' || !Object.hasOwn(cur, k)) return undefined;
+      cur = cur[k];
+    }
+    return cur;
+  };
+  const deref = (o) => { for (let n = 0; isObj(o) && typeof o.$ref === 'string' && n < 20; n++) o = pointer(o.$ref); return isObj(o) ? o : {}; };
+  const str = (v) => (v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
+
+  // Example value for a schema: example > default > enum > type. A $ref already being expanded stops the cycle.
+  const sample = (schema, stack = [], mode = 'request') => {
+    if (stack.length > 12) return undefined;
+    const ref = isObj(schema) && typeof schema.$ref === 'string' ? schema.$ref : null;
+    if (ref && stack.includes(ref)) return undefined;
+    const st = ref ? [...stack, ref] : [...stack, null];
+    const s = deref(schema);
+    if (s.example !== undefined) return s.example;
+    if (Array.isArray(s.examples) && s.examples.length) return s.examples[0];
+    if (s.const !== undefined) return s.const;
+    if (s.default !== undefined) return s.default;
+    if (Array.isArray(s.enum) && s.enum.length) return s.enum[0];
+    if (Array.isArray(s.allOf)) {
+      const parts = s.allOf.map((x) => sample(x, st, mode));
+      const own = isObj(s.properties) ? sample({ ...s, allOf: undefined }, st, mode) : undefined;
+      if ([...parts, own].every((p) => p === undefined || isObj(p))) return Object.assign({}, ...parts.filter(Boolean), own || {});
+      return parts.find((p) => p !== undefined);
+    }
+    for (const k of ['oneOf', 'anyOf']) if (Array.isArray(s[k]) && s[k].length) return sample(s[k][0], st, mode);
+    const type = Array.isArray(s.type) ? s.type.find((x) => x !== 'null') : s.type;
+    if (type === 'object' || (!type && (isObj(s.properties) || isObj(s.additionalProperties)))) {
+      const o = {};
+      for (const [k, p] of Object.entries(isObj(s.properties) ? s.properties : {})) {
+        const pd = deref(p);
+        if ((mode === 'request' && pd.readOnly) || (mode === 'response' && pd.writeOnly)) continue;
+        const v = sample(p, st, mode);
+        if (v !== undefined) o[k] = v;
+      }
+      if (!Object.keys(o).length && isObj(s.additionalProperties)) { const v = sample(s.additionalProperties, st, mode); if (v !== undefined) o.key = v; }
+      return o;
+    }
+    if (type === 'array') { const v = sample(s.items, st, mode); return v === undefined ? [] : [v]; }
+    if (type === 'integer' || type === 'number') return typeof s.minimum === 'number' ? s.minimum : 0;
+    if (type === 'boolean') return true;
+    if (type === 'string' || (!type && s.format)) {
+      return ({ 'date-time': '2024-01-01T00:00:00Z', date: '2024-01-01', time: '12:00:00', email: 'user@example.com', uuid: '3fa85f64-5717-4562-b3fc-2c963f66afa6',
+        uri: 'https://example.com', url: 'https://example.com', hostname: 'example.com', ipv4: '192.0.2.1', ipv6: '2001:db8::1', byte: 'U3dhZ2dlciByb2Nrcw==',
+        password: 'password', binary: '' })[s.format] ?? 'string';
+    }
+    return undefined;
+  };
+  const paramValue = (p) => {
+    if (p.example !== undefined) return str(p.example);
+    if (isObj(p.examples)) { const e = deref(Object.values(p.examples)[0]); if (e.value !== undefined) return str(e.value); }
+    const v = sample(v2 ? p : (p.schema || {}));
+    return Array.isArray(v) ? v.map(str).join(',') : str(v);
+  };
+
+  // Base URL → the {{baseUrl}} collection variable
+  let baseUrl;
+  if (v2) {
+    const scheme = (Array.isArray(spec.schemes) && spec.schemes[0]) || 'https';
+    baseUrl = spec.host ? `${scheme}://${spec.host}${spec.basePath || ''}` : String(spec.basePath || '');
+  } else {
+    const srv = Array.isArray(spec.servers) && isObj(spec.servers[0]) ? spec.servers[0] : { url: '' };
+    baseUrl = String(srv.url || '').replace(/{([^{}]+)}/g, (m, k) => { const d = isObj(srv.variables) && isObj(srv.variables[k]) ? srv.variables[k].default : undefined; return d != null ? String(d) : m; });
+  }
+  baseUrl = baseUrl.replace(/\/+$/, '');
+  if (!/^[a-z][\w+.-]*:\/\//i.test(baseUrl)) baseUrl = 'http://localhost' + (baseUrl && !baseUrl.startsWith('/') ? '/' : '') + baseUrl;
+  const variable = [{ key: 'baseUrl', value: baseUrl }];
+  const addVar = (key) => { if (!variable.some((v) => v.key === key)) variable.push({ key, value: '' }); };
+
+  // Auth → collection auth plus per-request overrides
+  const schemes = (v2 ? spec.securityDefinitions : spec.components && spec.components.securitySchemes) || {};
+  const pair = (o) => Object.entries(o).map(([key, value]) => ({ key, value, type: 'string' }));
+  const authFor = (security) => {
+    if (!Array.isArray(security)) return undefined;
+    if (!security.length || security.some((r) => isObj(r) && !Object.keys(r).length)) return { type: 'noauth' };
+    for (const req of security) {
+      for (const name of Object.keys(isObj(req) ? req : {})) {
+        const sc = deref(isObj(schemes) ? schemes[name] : undefined);
+        const type = String(sc.type || '').toLowerCase();
+        if ((type === 'http' && /^bearer$/i.test(sc.scheme)) || type === 'oauth2' || type === 'openidconnect') {
+          addVar('bearerToken');
+          return { type: 'bearer', bearer: pair({ token: '{{bearerToken}}' }) };
+        }
+        if ((type === 'http' && /^basic$/i.test(sc.scheme)) || type === 'basic') {
+          addVar('username'); addVar('password');
+          return { type: 'basic', basic: pair({ username: '{{username}}', password: '{{password}}' }) };
+        }
+        if (type === 'apikey' && (sc.in === 'header' || sc.in === 'query') && sc.name) {
+          addVar('apiKey');
+          return { type: 'apikey', apikey: pair({ key: String(sc.name), value: '{{apiKey}}', in: sc.in }) };
+        }
+      }
+    }
+    return undefined;
+  };
+  const colAuth = authFor(spec.security);
+
+  // Contract tests from the documented responses: the status is one the spec lists, and a 2xx body has its required fields
+  // (registered only when that status comes back, so a 404 never reports a passing body check).
+  const testFor = (responses) => {
+    const codes = Object.keys(responses);
+    const exact = codes.filter((c) => /^\d{3}$/.test(c)).map(Number);
+    const ranges = codes.filter((c) => /^[1-5]XX$/i.test(c)).map((c) => Number(c[0]));
+    const lines = [];
+    if ((exact.length || ranges.length) && !codes.includes('default')) {
+      const cond = [exact.length ? `${JSON.stringify(exact)}.includes(code)` : '', ...ranges.map((r) => `(code >= ${r}00 && code < ${r + 1}00)`)].filter(Boolean).join(' || ');
+      const label = [...exact, ...ranges.map((r) => `${r}xx`)].join(', ');
+      lines.push(`pm.test("Status is one the spec documents (${label})", () => {`, '  const code = pm.response.code;', `  pm.expect(${cond}, "got " + code).to.be.true;`, '});');
+    }
+    const ok = exact.find((c) => c >= 200 && c < 300);
+    if (ok) {
+      const r = deref(responses[String(ok)]);
+      let schema = v2 ? r.schema : undefined;
+      if (!v2 && isObj(r.content)) { const ct = Object.keys(r.content).find((k) => /json/i.test(k)); if (ct) schema = deref(r.content[ct]).schema; }
+      const s = deref(schema);
+      const required = Array.isArray(s.required) ? s.required.filter((k) => typeof k === 'string' && !(isObj(s.properties) && deref(s.properties[k]).writeOnly)) : [];
+      if (required.length) {
+        lines.push(...(lines.length ? [''] : []), `if (pm.response.code === ${ok}) {`, `  pm.test("${ok} body has the required fields", () => {`, '    const body = pm.response.json();',
+          ...required.map((k) => `    pm.expect(body).to.have.property(${JSON.stringify(k)});`), '  });', '}');
+      } else if (s.type === 'array') {
+        lines.push(...(lines.length ? [''] : []), `if (pm.response.code === ${ok}) {`, `  pm.test("${ok} body is a list", () => {`, '    pm.expect(Array.isArray(pm.response.json())).to.be.true;', '  });', '}');
+      }
+    }
+    return lines.length ? [{ listen: 'test', script: { type: 'text/javascript', exec: lines } }] : undefined;
+  };
+
+  // Body: JSON / form / multipart / XML / text / binary, with an example filled in
+  const pickType = (content) => {
+    const keys = Object.keys(content);
+    return keys.find((k) => /^application\/([\w.-]+\+)?json/i.test(k)) || keys.find((k) => /x-www-form-urlencoded/i.test(k)) || keys.find((k) => /multipart\/form-data/i.test(k))
+      || keys.find((k) => /xml/i.test(k)) || keys.find((k) => /^text\//i.test(k)) || keys.find((k) => /json/i.test(k)) || keys[0];
+  };
+  const formFields = (schema, multipart) => {
+    const s = deref(schema);
+    const props = Object.assign({}, ...(Array.isArray(s.allOf) ? s.allOf.map((x) => deref(x).properties || {}) : []), isObj(s.properties) ? s.properties : {});
+    const required = Array.isArray(s.required) ? s.required : [];
+    return Object.entries(props).filter(([, p]) => !deref(p).readOnly).map(([key, p]) => {
+      const pd = deref(p);
+      const desc = pd.description ? { description: String(pd.description) } : {};
+      if (multipart && (pd.format === 'binary' || pd.format === 'base64' || (pd.type === 'array' && deref(pd.items).format === 'binary'))) return { key, type: 'file', src: [], ...desc };
+      const v = sample(p);
+      return { key, value: Array.isArray(v) ? v.map(str).join(',') : str(v), type: 'text', ...(required.includes(key) || !required.length ? {} : { disabled: true }), ...desc };
+    });
+  };
+  const rawBody = (raw, language) => ({ mode: 'raw', raw, options: { raw: { language } } });
+  const bodyFor = (op, params) => {
+    if (v2) {
+      const b = params.find((p) => p.in === 'body');
+      if (b) { const ex = sample(b.schema || {}); return { contentType: 'application/json', body: rawBody(ex === undefined ? '' : JSON.stringify(ex, null, 2), 'json') }; }
+      const form = params.filter((p) => p.in === 'formData');
+      if (!form.length) return null;
+      const consumes = Array.isArray(op.consumes) ? op.consumes : Array.isArray(spec.consumes) ? spec.consumes : [];
+      const multipart = form.some((p) => p.type === 'file') || consumes.some((c) => /multipart/i.test(c));
+      const fields = form.map((p) => (p.type === 'file' ? { key: String(p.name), type: 'file', src: [] }
+        : { key: String(p.name), value: paramValue(p), type: 'text', ...(p.required ? {} : { disabled: true }), ...(p.description ? { description: String(p.description) } : {}) }));
+      return multipart ? { body: { mode: 'formdata', formdata: fields } }
+        : { contentType: 'application/x-www-form-urlencoded', body: { mode: 'urlencoded', urlencoded: fields.map(({ type, ...f }) => f) } };
+    }
+    const rb = deref(op.requestBody);
+    if (!isObj(rb.content) || !Object.keys(rb.content).length) return null;
+    const ct = pickType(rb.content);
+    const media = deref(rb.content[ct]);
+    let ex = media.example;
+    if (ex === undefined && isObj(media.examples)) ex = deref(Object.values(media.examples)[0]).value;
+    if (ex === undefined) ex = sample(media.schema || {});
+    if (/x-www-form-urlencoded/i.test(ct)) return { contentType: ct, body: { mode: 'urlencoded', urlencoded: formFields(media.schema).map(({ type, ...f }) => f) } };
+    if (/multipart\/form-data/i.test(ct)) return { body: { mode: 'formdata', formdata: formFields(media.schema, true) } }; // the client sets the boundary
+    if (/json/i.test(ct)) return { contentType: ct, body: rawBody(ex === undefined ? '' : JSON.stringify(ex, null, 2), 'json') };
+    if (/xml/i.test(ct)) return { contentType: ct, body: rawBody(typeof ex === 'string' ? ex : '', 'xml') };
+    if (/octet-stream|^image\/|^audio\/|^video\/|\/pdf$|\/zip$/i.test(ct)) return { contentType: ct, body: { mode: 'file', file: {} } };
+    return { contentType: ct, body: rawBody(typeof ex === 'string' ? ex : ex === undefined ? '' : JSON.stringify(ex, null, 2), 'text') };
+  };
+
+  // Requests, in folders by first tag (spec's tag order first), untagged ones at the top level
+  const folders = new Map();
+  for (const t of Array.isArray(spec.tags) ? spec.tags : []) if (isObj(t) && t.name != null && !folders.has(String(t.name))) folders.set(String(t.name), { desc: t.description, items: [] });
+  const loose = [];
+  let count = 0;
+  const handled = /^(accept|content-type|authorization)$/i;
+  const kv = (p) => ({ key: String(p.name), value: paramValue(p), ...(p.required ? {} : { disabled: true }), ...(p.description ? { description: String(p.description) } : {}) });
+  const varName = (n) => String(n).replace(/[^\w-]/g, '_');
+  for (const [path, rawItem] of Object.entries(spec.paths)) {
+    const pathItem = deref(rawItem);
+    const shared = Array.isArray(pathItem.parameters) ? pathItem.parameters : [];
+    for (const m of METHODS) {
+      if (!isObj(pathItem[m])) continue;
+      const op = pathItem[m];
+      const byKey = new Map(); // operation parameters override path-level ones with the same name and location
+      for (const p of [...shared, ...(Array.isArray(op.parameters) ? op.parameters : [])]) { const d = deref(p); if (d.name != null && d.in) byKey.set(`${d.in}:${d.name}`, d); }
+      const params = [...byKey.values()];
+      const urlPath = ('/' + String(path).replace(/^\/+/, '')).replace(/{([^{}/]+)}/g, (mm, k) => `:${varName(k)}`);
+      const query = params.filter((p) => p.in === 'query').map(kv);
+      const header = params.filter((p) => p.in === 'header' && !handled.test(p.name)).map(kv);
+      const qs = query.filter((q) => !q.disabled).map((q) => `${q.key}=${q.value}`).join('&');
+      const pathVars = params.filter((p) => p.in === 'path').map((p) => ({ key: varName(p.name), value: paramValue(p), ...(p.description ? { description: String(p.description) } : {}) }));
+      const url = { raw: `{{baseUrl}}${urlPath}${qs ? '?' + qs : ''}`, host: ['{{baseUrl}}'], path: urlPath.split('/').filter(Boolean), ...(query.length ? { query } : {}), ...(pathVars.length ? { variable: pathVars } : {}) };
+      const b = bodyFor(op, params);
+      if (b && b.contentType) header.unshift({ key: 'Content-Type', value: b.contentType });
+      const responses = isObj(op.responses) ? op.responses : {};
+      const codeList = Object.entries(responses).map(([c, r]) => `- **${c}** ${String(deref(r).description || '').split('\n')[0]}`.trimEnd());
+      const desc = [op.deprecated ? '**Deprecated.**' : '', op.description && String(op.description).trim() !== String(op.summary || '').trim() ? String(op.description).trim() : '', codeList.length ? `Responses:\n${codeList.join('\n')}` : ''].filter(Boolean).join('\n\n');
+      const request = { method: m.toUpperCase(), header, url };
+      if (b) request.body = b.body;
+      if (desc) request.description = desc;
+      const opAuth = authFor(op.security);
+      if (opAuth && JSON.stringify(opAuth) !== JSON.stringify(colAuth)) request.auth = opAuth;
+      const item = { name: String(op.summary || op.operationId || `${m.toUpperCase()} ${path}`).replace(/\s+/g, ' ').trim().slice(0, 200), request, response: [] };
+      const ev = testFor(responses);
+      if (ev) item.event = ev;
+      const tag = Array.isArray(op.tags) && op.tags.length ? String(op.tags[0]) : null;
+      if (tag) { if (!folders.has(tag)) folders.set(tag, { items: [] }); folders.get(tag).items.push(item); } else loose.push(item);
+      count++;
+    }
+  }
+  if (!count) throw new Error('This OpenAPI spec has no operations under "paths".');
+  const info = isObj(spec.info) ? spec.info : {};
+  const col = {
+    info: { name: String(info.title || 'Imported API') + (info.version ? ` ${info.version}` : ''), schema: SCHEMA_V21, ...(info.description ? { description: String(info.description) } : {}) },
+    item: [...[...folders].filter(([, f]) => f.items.length).map(([name, f]) => ({ name, ...(f.desc ? { description: String(f.desc) } : {}), item: f.items })), ...loose],
+    variable,
+  };
+  if (colAuth && colAuth.type !== 'noauth') col.auth = colAuth;
+  return col;
 }
 
 // ---------- cURL ----------
@@ -3941,7 +4424,7 @@ function bindChrome() {
   document.addEventListener('dragover', (e) => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
   document.addEventListener('drop', (e) => {
     if (e.target.closest('dialog') || e.target.closest('input[type=file]')) return;
-    const files = [...e.dataTransfer.files].filter((f) => f.name.endsWith('.json'));
+    const files = [...e.dataTransfer.files].filter((f) => /\.(json|ya?ml)$/i.test(f.name));
     if (files.length) { e.preventDefault(); importFiles(files); }
   });
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
