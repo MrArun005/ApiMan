@@ -186,8 +186,8 @@ input.small, select.small { height: var(--h-sm); font-size: var(--fs-sm); paddin
 select.small { padding-right: calc(var(--s2) + 16px); }
 .bare { border: 0; border-radius: 0; background-color: transparent; }
 .code { font-family: var(--font-code); font-size: var(--fs-code); }
-.num { font-variant-numeric: tabular-nums; -moz-appearance: textfield; appearance: textfield; }
-.num::-webkit-inner-spin-button, .num::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input.num { font-variant-numeric: tabular-nums; -moz-appearance: textfield; appearance: textfield; }
+input.num::-webkit-inner-spin-button, input.num::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 input.title {
   height: var(--h); font-size: var(--fs-lg); font-weight: 600; border-color: transparent; background: transparent;
   padding: 0 var(--s2); text-overflow: ellipsis; field-sizing: content;
@@ -203,6 +203,7 @@ textarea.prose { width: 100%; flex: 1; min-height: 200px; resize: vertical; line
 .field.grow { flex: 1; min-height: 0; }
 .narrow { max-width: 360px; }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 var(--s4); }
+.grid-2.lead { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
 .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 var(--s4); }
 .field-row { display: flex; gap: var(--s2); align-items: center; }
 .field-row > input { flex: 1; }
@@ -219,7 +220,7 @@ textarea.prose { width: 100%; flex: 1; min-height: 200px; resize: vertical; line
 .swatch.on { box-shadow: 0 0 0 2px var(--ink); }
 .swatch.custom { position: relative; overflow: hidden; background: var(--rainbow); }
 .swatch.custom input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; padding: 0; border: 0; }
-@media (max-width: 600px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+@media (max-width: 600px) { .grid-2, .grid-2.lead, .grid-3 { grid-template-columns: 1fr; } }
 
 /* ===================================================================================== 4 Check */
 .check { display: flex; align-items: flex-start; gap: var(--s3); margin-bottom: var(--s3); cursor: pointer; }
@@ -353,6 +354,7 @@ mark { background: color-mix(in srgb, var(--post) 30%, transparent); color: inhe
 .console .line { font: var(--fs-code)/1.5 var(--font-code); padding: 6px 0; border-bottom: 1px solid var(--line); white-space: pre-wrap; word-break: break-word; display: flex; gap: var(--s3); }
 .console .line.err { color: var(--err); } .console .line.warn { color: var(--warn); } .console .line.muted { color: var(--muted); }
 .console .src { color: var(--muted); flex: none; min-width: 120px; }
+.console.scroll { height: min(62vh, 640px); overflow: auto; border: 1px solid var(--line); border-radius: var(--r-lg); padding: 0 var(--s3); }
 
 /* ===================================================================================== 15 Table */
 table.kv { width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; background: var(--panel); }
@@ -433,6 +435,7 @@ pre.out { margin: 0; font: var(--fs-code)/1.6 var(--font-code); white-space: pre
 .j-key { color: var(--j-key); } .j-str { color: var(--j-str); } .j-num { color: var(--j-num); } .j-lit { color: var(--j-lit); font-weight: 600; }
 iframe.preview { width: 100%; height: 100%; min-height: 360px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--preview-bg); }
 img.preview { max-width: 100%; border-radius: var(--r-lg); border: 1px solid var(--line); }
+iframe.preview.tall { height: calc(100dvh - 260px); min-height: 360px; }
 .docs-preview { flex: 1; overflow: auto; line-height: 1.6; padding: var(--s2) 0; }
 .docs-preview h3, .docs-preview h4, .docs-preview h5, .docs-preview h6 { margin: var(--s4) 0 var(--s2); font-size: var(--fs-md); }
 .docs-preview h3 { font-size: var(--fs-lg); }
@@ -480,6 +483,8 @@ dialog[open] { display: flex; flex-direction: column; overflow: hidden; }
 dialog::backdrop { background: var(--scrim); }
 dialog.confirm { width: min(460px, calc(100vw - 32px)); }
 dialog.wide { width: min(1120px, calc(100vw - 32px)); }
+dialog.full { width: calc(100vw - 32px); max-height: calc(100dvh - 32px); }
+dialog.full:has(.dlg-body.tall) { height: calc(100dvh - 32px); }
 dialog:has(.dlg-body.tall) { height: min(760px, calc(100dvh - 32px)); } /* tabbed dialogs keep one height */
 dialog:has(.drop) { min-height: min(480px, calc(100dvh - 32px)); }
 .dlg-shell { display: flex; flex-direction: column; max-height: 100%; min-height: 0; flex: 1 1 auto; }
@@ -647,6 +652,12 @@ dialog.drawer.docked { position: fixed; inset: 0 0 0 auto; margin: 0; z-index: 4
   .reqbar:has(#url:focus) { outline: 2px solid Highlight; }
   .resizer::after { background: CanvasText; }
 }
+
+/* ===================================================================================== 24 Chart */
+/* Bars from oldest to newest, height = value (set inline, like Progress), coloured by tone. */
+.chart { display: flex; align-items: flex-end; gap: 2px; height: 120px; padding-bottom: var(--s1); border-bottom: 1px solid var(--line); margin-bottom: var(--s3); }
+.chart > div { flex: 1 1 0; max-width: 28px; min-height: 2px; border-radius: 2px 2px 0 0; background: var(--muted); }
+.chart > .ok { background: var(--ok); } .chart > .warn { background: var(--warn); } .chart > .err { background: var(--err); }
 
 /* ===================================================================================== regions (layout only) */
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; padding: 0; margin: 0; }

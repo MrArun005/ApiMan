@@ -4,3 +4,5 @@ __pycache__/
 .DS_Store
 # Agent worktrees (temporary, per session)
 .claude/worktrees/
+# Robot Framework for Automation (local, per machine)
+.venv-robot/

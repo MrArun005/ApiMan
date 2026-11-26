@@ -32,6 +32,27 @@ python3 server.py run orders.json --folder Smoke -n 3 --delay 200 --bail
 
 `--junit` writes a JUnit XML report that GitHub Actions, GitLab and Jenkins show as test results. `--var KEY=VALUE` sets environment variables, handy for secrets from the CI's environment. `--browser` (or `APIMAN_BROWSER`) points at a browser if it isn't found automatically. Requests that need an OAuth sign-in window can't run headless; use client credentials there.
 
+## Automation: run Robot Framework projects, UI and API, live
+
+Put a Robot Framework project in your data folder (copy it, or clone the repo there) and click **Automation** (local mode). ApiMan finds it and everything in it on its own:
+
+- **Suites, tests and tags** from every `.robot` file: run everything, one suite, one test, or only tests with a tag.
+- **Environment keys** from the variables the project uses but never defines (`${BASE_URL}`, `${PASSWORD}`…). Pick an ApiMan environment and the Variables tab shows what's filled in and what's missing, with one click to add the missing keys. The project's own variable files (`env/qa.yaml`, `config/prod.py`) are offered too.
+- **Test data**: JSON, CSV, YAML and XML files, to read and edit, plus a JSON object of values for one run (each key becomes a `${variable}`, over the environment's value).
+- **The project's Python**: its own `.venv`/`venv` first, then ApiMan's `.venv-robot`, then the system's (or `APIMAN_ROBOT_PYTHON`). If Robot Framework is missing, it says exactly what to install.
+
+Click **Run** and watch it, inside ApiMan:
+
+- **Live browser**: UI tests (Browser library) run headless and the screen appears in ApiMan after every step that changes the page, large, beside the steps.
+- **Steps**: every test and keyword with its time, failures in red. Robot's console output also goes to the terminal running `server.py`.
+- **API calls**: every HTTP request the tests make through `requests` (RequestsLibrary or your own Python keywords), with headers, request and response bodies, status, time and errors. Credentials in headers are hidden.
+- **Failures**: each failed test with its error and the screen at the moment it failed.
+- **History**: every run is kept (`<data>/.apiman/runs/`) with Robot's report and log (shown in ApiMan), pass-rate and duration charts, flaky and failing tests, and the slowest ones.
+
+A project is a folder with `.robot` files of its own, or one that looks like a project root (`.git`, `requirements.txt`, `tests/`, `resources/`…) with `.robot` files below it, up to 4 levels down. `examples/robot-apiman` is a sample project: UI and API tests for ApiMan itself, which start a throwaway ApiMan to test (set `BASE_URL` and `APIMAN_SERVER` in an environment).
+
+To get Robot Framework for the sample: `python3 -m venv .venv-robot && .venv-robot/bin/pip install robotframework robotframework-browser robotframework-requests && .venv-robot/bin/rfbrowser init chromium`.
+
 ## Features
 
 | | |
@@ -59,6 +80,7 @@ python3 server.py run orders.json --folder Smoke -n 3 --delay 200 --bail
 - **Scripts are sandboxed.** Imported collections can contain scripts you didn't write. In ApiMan, every script runs in a Web Worker inside a sandboxed iframe whose Content-Security-Policy is `default-src 'none'`. A script can't make network requests of its own, can't read ApiMan's storage or the page, and is stopped after 5 seconds, so an endless loop can't freeze the app.
 - **`pm.sendRequest` goes through ApiMan, under its rules.** The script only describes the request; ApiMan checks it and sends it. Without asking, a script may only call the servers its own collection uses (the request being run, or any saved request in the collection, resolved with your saved variables). For any other server, Send asks you once per server per collection until you close ApiMan, showing the full URL; the runner and `server.py run` refuse it (unless you allowed that server with Send earlier in the session) and say so in the Console. ApiMan adds nothing to the request: only the headers the script set are sent, never your auth or cookies, and redirects aren't followed. A script can make at most 10 requests per run, each gets 30 seconds, and a script that waits for them is still stopped after 60 seconds in total. Every call is listed in the Console, with a warning when it goes over plain `http://`.
 - **Scripts can't quietly send your request elsewhere.** If a pre-request script changes which server a request goes to, ApiMan asks before sending it there with your auth. In the runner, where there's no one to ask, it blocks the request, and a value a script sets is only carried to the next request if it can't change any request's server: ApiMan puts a hostile test value in its place in every saved URL, under every environment, and checks that no destination moves (path and query values pass, host, port and scheme values don't). If a script changes or deletes variables in a way that would send any saved request to a different server, you're asked before the change is saved (the check resolves every request's URL, so variable names don't matter). Every variable a script changes is listed in the Console.
+- **Automation runs your project's code, only when you click Run.** A Robot Framework project is code (its Python libraries run with your permissions), so ApiMan runs one only when you start it from the Automation screen, never on its own, and only projects inside your data folder. Values from environments reach Robot in a temporary file only you can read, deleted when the run ends, never on the command line. Run logs stay in `<data>/.apiman/` (owner-only, ignored by git), and Robot's report and log are shown in a sandbox that can't reach ApiMan's API.
 - **Imported methods are validated.** HTTP methods from imported files are checked, and generated shell code quotes every value.
 - **Credentials never follow a redirect to another site.** When a redirect changes the scheme, host or port, only harmless headers (Accept, Accept-Language, User-Agent, Content-Type) are kept, and the response tells you which ones were removed. HTTPS is never downgraded to HTTP.
 - **Only ApiMan can use the local server.** It listens on `127.0.0.1` only, and it rejects requests from other websites (Origin check) and DNS-rebinding attempts (Host check). It serves only its own files. The one page that accepts a link from another site is `oauth-callback.html`, where an OAuth provider sends you back after sign-in; it holds no data or session token and only passes the sign-in code to your ApiMan tab.
