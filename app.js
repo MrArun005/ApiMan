@@ -2528,7 +2528,7 @@ function renderResponse() {
       ...tests.map((x) => h('div', { class: 'test-row' },
         h('span', { class: `pill ${x.passed === false ? 'err' : x.passed === null ? '' : 'ok'}` }, x.passed === false ? 'Fail' : x.passed === null ? 'Skip' : 'Pass'),
         h('div', null, h('div', null, x.name), x.error && x.passed === false ? h('div', { class: 'msg' }, x.error) : null))))
-    : h('div', { class: 'empty-state' }, h('p', { class: 'hint' }, 'No tests ran. Add them in Scripts, then Tests. For example:'),
+    : h('div', { class: 'empty-state' }, h('p', { class: 'hint' }, 'No tests ran. Right-click a value in the JSON body to add a test for it, or write them in Scripts, then Tests. For example:'),
       h('pre', { class: 'hint-code' }, 'pm.test("Status is 200", () => {\n  pm.response.to.have.status(200);\n});')));
   // console
   $('#respConsole').replaceChildren(...(out.logs && out.logs.length
@@ -2681,7 +2681,9 @@ function bodyView(res, view) {
       JSON.parse(text); // valid JSON only
       const pretty = prettyJson(text, Number(state.settings.tabSize) || 2);
       if (pretty.length > 2_000_000) return h('pre', { class: 'out' }, pretty); // keep very large bodies fast
-      return codeEditor({ value: pretty, mode: 'json', readOnly: true, fold: true, wrap, label: 'Response body', cls: 'fill' });
+      const viewer = codeEditor({ value: pretty, mode: 'json', readOnly: true, fold: true, wrap, label: 'Response body (right-click or the menu key on a value to add a test)', cls: 'fill' });
+      if (viewer.cm) attachJsonActions(viewer.cm);
+      return viewer;
     } catch { /* not JSON: show as-is below */ }
   }
   if (text.length > 2_000_000) return h('pre', { class: 'out' }, text);
@@ -2705,6 +2707,134 @@ function prettyJson(text, indent) {
   }
   return out;
 }
+// ---------- point-and-click tests ----------
+// Right-click (or the menu key / Shift+F10 on) any value in the Pretty JSON view: ApiMan writes the pm.test for it.
+/** Path (keys and indexes) of the JSON value, or member key, at a character offset. The deepest match wins. */
+function jsonPathAt(text, offset) {
+  let i = 0, found = null;
+  const n = text.length;
+  const ws = () => { while (i < n && /\s/.test(text[i])) i++; };
+  const str = () => { const s = i; i++; while (i < n && text[i] !== '"') { if (text[i] === '\\') i++; i++; } i++; return [s, i]; };
+  const value = (path, depth) => {
+    if (depth > 500) throw new Error('too deep');
+    ws();
+    const s = i, c = text[i];
+    if (c === '{') {
+      i++; ws();
+      if (text[i] === '}') i++;
+      else while (i < n) {
+        ws();
+        const [ks, ke] = str();
+        const p = [...path, JSON.parse(text.slice(ks, ke))];
+        if (!found && offset >= ks && offset < ke) found = p;
+        ws(); i++; // ':'
+        value(p, depth + 1);
+        ws();
+        if (text[i++] !== ',') break;
+      }
+    } else if (c === '[') {
+      i++; ws();
+      if (text[i] === ']') i++;
+      else for (let k = 0; i < n; k++) { value([...path, k], depth + 1); ws(); if (text[i++] !== ',') break; }
+    } else if (c === '"') str();
+    else { while (i < n && /[-+\w.]/.test(text[i])) i++; if (i === s) throw new Error('bad JSON'); }
+    if (!found && offset >= s && offset < i) found = path;
+  };
+  try { value([], 0); } catch { return null; }
+  return found;
+}
+const jsAccess = (path, root = 'body') => root + path.map((k) => (typeof k === 'number' ? `[${k}]` : /^[A-Za-z_$][\w$]*$/.test(k) ? `.${k}` : `[${JSON.stringify(k)}]`)).join('');
+const pathLabel = (path) => (path.length ? jsAccess(path, '').replace(/^\./, '') : 'the body');
+const typePhrase = (t) => (t === 'null' ? 'null' : `${/^[aeiou]/.test(t) ? 'an' : 'a'} ${t}`);
+const typeName = (v) => (v === null ? 'null' : Array.isArray(v) ? 'list' : typeof v === 'object' ? 'object' : typeof v);
+
+function testCode(kind, path, v) {
+  const x = jsAccess(path), label = pathLabel(path);
+  const wrap = (title, line) => `pm.test(${JSON.stringify(title)}, () => {\n  const body = pm.response.json();\n  ${line}\n});`;
+  const parent = jsAccess(path.slice(0, -1)), last = path[path.length - 1];
+  switch (kind) {
+    case 'eq': return wrap(`${label} is ${JSON.stringify(v).slice(0, 60)}`, `pm.expect(${x}).to.eql(${JSON.stringify(v)});`);
+    case 'exists': return typeof last === 'number'
+      ? wrap(`${pathLabel(path.slice(0, -1))} has at least ${last + 1} item${last ? 's' : ''}`, `pm.expect(${parent}.length).to.be.above(${last});`)
+      : wrap(`${label} exists`, `pm.expect(${parent}).to.have.property(${JSON.stringify(last)});`);
+    case 'type': {
+      const t = typeName(v);
+      const line = t === 'null' ? `pm.expect(${x}).to.eql(null);` : t === 'list' ? `pm.expect(Array.isArray(${x})).to.be.true;`
+        : t === 'object' ? `pm.expect(${x} !== null && typeof ${x} === "object" && !Array.isArray(${x})).to.be.true;` : `pm.expect(typeof ${x}).to.eql(${JSON.stringify(t)});`;
+      return wrap(`${label} is ${typePhrase(t)}`, line);
+    }
+    case 'nonempty': return wrap(`${label} is not empty`, `pm.expect(${x}.length).to.be.above(0);`);
+    default: return '';
+  }
+}
+
+function addToTests(t, code, what) {
+  t.ed.test = (t.ed.test.trim() ? t.ed.test.replace(/\s*$/, '\n\n') : '') + code + '\n';
+  t.scriptKind = 'test'; // show where it went
+  if (cur() === t) { renderScripts(); renderCounts(); markDirty(); }
+  toast(`${what} to this request's Tests script (Scripts → Tests). It runs on the next send${t.cid ? '; save to keep it' : ''}.`);
+}
+
+function jsonValueMenu(cm, path, anchor) {
+  const t = cur();
+  let v;
+  try { v = path.reduce((o, k) => o[k], JSON.parse(cm.getValue())); } catch { return; }
+  const label = pathLabel(path);
+  const shown = JSON.stringify(v);
+  const items = [];
+  if (shown.length <= 200) items.push({ label: `Test: ${label} is ${shown.length > 40 ? shown.slice(0, 40) + '…' : shown}`, onClick: () => addToTests(t, testCode('eq', path, v), 'Test added') });
+  if (path.length) items.push({ label: `Test: ${label} exists`, onClick: () => addToTests(t, testCode('exists', path, v), 'Test added') });
+  items.push({ label: `Test: ${label} is ${typePhrase(typeName(v))}`, onClick: () => addToTests(t, testCode('type', path, v), 'Test added') });
+  if (Array.isArray(v) || typeof v === 'string') items.push({ label: `Test: ${label} is not empty`, onClick: () => addToTests(t, testCode('nonempty', path, v), 'Test added') });
+  items.push('-');
+  items.push({ label: 'Save to a variable…', onClick: async () => {
+    const guess = String([...path].reverse().find((k) => typeof k === 'string') || 'value').replace(/[^\w-]/g, '_');
+    const scope = state.activeEnv ? ['environment', `the "${state.envs[state.activeEnv].name}" environment`] : t.cid ? ['collectionVariables', 'the collection'] : ['globals', 'globals'];
+    const name = await ask({ title: 'Save to a variable', message: `After each response, the Tests script stores ${label} in ${scope[1]}, so other requests can use it as {{name}}.`, input: { label: 'Variable name', value: guess }, ok: 'Add' });
+    if (!name) return;
+    const x = jsAccess(path, 'pm.response.json()');
+    const expr = v !== null && typeof v === 'object' ? `JSON.stringify(${x})` : x;
+    addToTests(t, `// Save ${label} for other requests: {{${name}}}\npm.${scope[0]}.set(${JSON.stringify(name)}, ${expr});`, 'Variable saving added');
+  } });
+  items.push({ label: 'Copy path', onClick: () => navigator.clipboard.writeText(jsAccess(path, 'pm.response.json()')).then(() => toast('Copied'), () => toast('Copying was blocked by the browser.')) });
+  showMenu(anchor, items);
+}
+
+/** Right-click / menu key on the read-only JSON viewer opens jsonValueMenu at that value. */
+function attachJsonActions(cm) {
+  const at = (x, y) => {
+    let a = $('#ctxAnchor');
+    if (!a) { a = h('span', { id: 'ctxAnchor', 'aria-label': 'Response value', class: 'ctx-anchor' }); document.body.append(a); }
+    a.style.left = `${x}px`; a.style.top = `${y}px`;
+    a.focus = () => cm.focus(); // closing the menu returns focus to the viewer
+    return a;
+  };
+  const open = (pos, x, y) => {
+    // A click in the indent, after the end of a line or on ":" / "," means that line's key or value.
+    const text = cm.getLine(pos.line) || '';
+    let ch = Math.min(pos.ch, text.trimEnd().length - 1);
+    if (ch < 0) return false;
+    if (/\s/.test(text[ch])) { const k = text.slice(ch).search(/\S/); ch = k < 0 ? ch : ch + k; }
+    while (ch > 0 && /[,:\s]/.test(text[ch])) ch--;
+    pos = { line: pos.line, ch };
+    const path = jsonPathAt(cm.getValue(), cm.indexFromPos(pos));
+    if (!path) return false;
+    cm.setCursor(pos);
+    jsonValueMenu(cm, path, at(x, y));
+    return true;
+  };
+  const wrapper = cm.getWrapperElement();
+  wrapper.addEventListener('contextmenu', (e) => {
+    if (e.target.closest('.CodeMirror-gutters')) return;
+    if (open(cm.coordsChar({ left: e.clientX, top: e.clientY }, 'window'), e.clientX, e.clientY)) e.preventDefault();
+  });
+  wrapper.addEventListener('keydown', (e) => {
+    if (!(e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) return;
+    const c = cm.cursorCoords(null, 'window');
+    if (open(cm.getCursor(), c.left, c.bottom)) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+}
+
 // ---------- response diff ----------
 // Compare the latest response with the previous one, a pinned one, or the same request sent with another
 // environment (staging vs prod). JSON is compared by field, so key order and formatting never show up as changes.
