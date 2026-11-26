@@ -296,6 +296,8 @@ mark { background: color-mix(in srgb, var(--post) 30%, transparent); color: inhe
 .mono { font-family: var(--font-code); font-size: var(--fs-code); }
 .err { color: var(--err); }
 
+.hint.path { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; } /* the end of a path is what tells it apart */
+
 /* ===================================================================================== 9 Toolbar, ActionRow */
 .pane-tools { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s3); flex-wrap: wrap; }
 .pane > .pane-tools { flex-shrink: 0; } /* never squeezed by the editor below: wrapped notes push the editor down */
@@ -658,6 +660,16 @@ dialog.drawer.docked { position: fixed; inset: 0 0 0 auto; margin: 0; z-index: 4
 .chart { display: flex; align-items: flex-end; gap: 2px; height: 120px; padding-bottom: var(--s1); border-bottom: 1px solid var(--line); margin-bottom: var(--s3); }
 .chart > div { flex: 1 1 0; max-width: 28px; min-height: 2px; border-radius: 2px 2px 0 0; background: var(--muted); }
 .chart > .ok { background: var(--ok); } .chart > .warn { background: var(--warn); } .chart > .err { background: var(--err); }
+.chart.small { height: 36px; margin-bottom: var(--s2); }
+
+/* ===================================================================================== 25 Card */
+/* One thing at a glance (an Automation project): a head, a few facts, a trend, its actions. */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: var(--s4); margin-bottom: var(--s6); }
+.card { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; padding: var(--s4); border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--panel); }
+.card-head { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.card-head strong { font-size: var(--fs-lg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-head .dot { margin-left: auto; }
+.card .actions { margin-top: auto; }
 
 /* ===================================================================================== regions (layout only) */
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; padding: 0; margin: 0; }

@@ -359,6 +359,49 @@ class ServerTest(unittest.TestCase):
         status, res = self.call("POST", "/api/robot/runs", {"project": "..", "suite": "."})
         self.assertEqual(status, 400, res)
 
+    def test_projects_can_be_linked_from_anywhere_and_imported_as_zips(self):
+        import io, zipfile
+        root = server.Handler.stores["collections"].root
+        with tempfile.TemporaryDirectory() as outside:
+            (Path(outside) / "suite.robot").write_text("*** Test Cases ***\nT\n    Log    ${URL}\n")
+            self.assertEqual(self.call("POST", "/api/robot/links", {"path": outside})[0], 200)
+            linked = [x for x in self.call("GET", "/api/robot/projects")[1] if x.get("linked")]
+            self.assertEqual(len(linked), 1)
+            d = self.call("GET", f"/api/robot/projects/{linked[0]['id']}")[1]
+            self.assertEqual([k["name"] for k in d["keys"]], ["URL"])
+            empty = Path(outside) / "empty"
+            empty.mkdir()
+            self.assertEqual(self.call("POST", "/api/robot/links", {"path": str(empty)})[0], 400)  # no tests there
+            self.assertEqual(self.call("DELETE", f"/api/robot/links/{linked[0]['id']}")[0], 200)
+            self.assertFalse([x for x in self.call("GET", "/api/robot/projects")[1] if x.get("linked")])
+
+        def zipped(files):
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as z:
+                for name, text in files.items():
+                    z.writestr(name, text)
+            return base64.b64encode(buf.getvalue()).decode()
+        ok = zipped({"office-tests/tests/login.robot": "*** Test Cases ***\nLogin\n    Log    hi\n", "office-tests/data/u.csv": "a\n"})
+        status, res = self.call("POST", "/api/robot/import", {"name": "office-tests.zip", "data": ok})
+        self.assertEqual((status, res["id"]), (201, "office-tests"))
+        self.assertTrue((root / "office-tests" / "tests" / "login.robot").is_file())  # the top folder became the project
+        self.assertEqual(self.call("POST", "/api/robot/import", {"name": "x.zip", "data": ok})[1]["id"], "office-tests-2")
+        status, res = self.call("POST", "/api/robot/import", {"name": "_api-tests.zip", "data": zipped({"t.robot": "*** Test Cases ***\nT\n    Log    x\n"})})
+        self.assertEqual(status, 201, res)
+        self.assertIn(res["id"], [x["id"] for x in self.call("GET", "/api/robot/projects")[1]])  # a name every id can address
+        for bad in ({"../evil.robot": "x"}, {"/abs.robot": "x"}, {"a/../../evil.robot": "x"}, {"notes.txt": "no tests"}):
+            status, res = self.call("POST", "/api/robot/import", {"name": "bad.zip", "data": zipped(bad)})
+            self.assertEqual(status, 400, (bad, res))
+        self.assertFalse((root.parent / "evil.robot").exists())
+        self.assertEqual(self.call("POST", "/api/robot/import", {"name": "x.zip", "data": base64.b64encode(b"nope").decode()})[0], 400)
+
+    def test_app_check_says_what_answers(self):
+        res = self.call("POST", "/api/robot/apps/check", {"urls": [self.target + "/x", "http://127.0.0.1:9/", "ftp://x"]})[1]
+        self.assertEqual([r["up"] for r in res], [True, False, False])
+        self.assertEqual(res[0]["status"], 200)
+        # only the app's address is asked, never the path from a value (a reset link must not be called)
+        self.assertEqual(self.call("POST", "/api/robot/apps/check", {"urls": [self.target + "/missing?token=x"]})[1][0]["status"], 200)
+
     def test_a_run_cut_short_is_reported_stopped_not_running_forever(self):
         out = server.runs_dir(server.Handler.stores["collections"].root, create=True) / "20261127-000001-abcdef"
         out.mkdir(parents=True)

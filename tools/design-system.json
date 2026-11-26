@@ -95,7 +95,8 @@
       "note",
       "inline",
       "code-block",
-      "pre-line"
+      "pre-line",
+      "path"
     ],
     "Toolbar": [
       "pane-tools",
@@ -230,6 +231,11 @@
     ],
     "Chart": [
       "chart"
+    ],
+    "Card": [
+      "cards",
+      "card",
+      "card-head"
     ]
   },
   "regions": [

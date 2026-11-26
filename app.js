@@ -155,6 +155,8 @@ const ui = {
     return h('span', { class: cx('dot', toneOf(tone), off && 'off'), role: label ? 'img' : null, 'aria-label': label, title: label, ...attrs });
   },
   hint(text, { oneLine = false, ...attrs } = {}) { return h('p', { class: cx('hint', oneLine && 'one-line'), ...attrs }, text); },
+  /** A long path on one line, cut at its start (its end tells it apart); the whole path in the tooltip. */
+  path(text) { return h('p', { class: 'hint path', title: text }, h('bdi', null, text)); },
   note(text, tone = '') { return h('p', { class: cx('note', toneOf(tone)) }, text); },
   kbd(text) { return h('kbd', null, text); },
   /** Toolbar: controls on the left, actions (small, ghost) right-aligned. */
@@ -187,9 +189,14 @@ const ui = {
       actions.length ? ui.actions(...actions) : null);
   },
   progress(tone = '') { return h('div', { class: cx('bar', toneOf(tone)) }, h('div', { style: 'width:0%' })); },
-  /** Chart: bars oldest to newest. bars: [{ value 0..1, tone, title }]. */
-  chart(bars, { label = '' } = {}) {
-    return h('div', { class: 'chart', role: 'img', 'aria-label': label || null },
+  /** Card: one thing at a glance. head: [title, badge?, dot?]; then the body nodes; actions (buttons) last. */
+  card({ title, badge = null, dot = null, body = [], actions = [], ...attrs }) {
+    return h('section', { class: 'card', ...attrs }, h('div', { class: 'card-head' }, h('strong', { title }, title), badge, dot), ...body,
+      actions.length ? ui.actions(...actions) : null);
+  },
+  /** Chart: bars oldest to newest. bars: [{ value 0..1, tone, title }]. small: a trend line inside a Card. */
+  chart(bars, { label = '', small = false } = {}) {
+    return h('div', { class: cx('chart', small && 'small'), role: 'img', 'aria-label': label || null },
       ...bars.map((b) => h('div', { class: toneOf(b.tone) || null, style: `height:${Math.max(0, Math.min(1, b.value)) * 100}%`, title: b.title || null })));
   },
 };
@@ -5396,16 +5403,14 @@ async function runFile(runId, name, as = 'url') {
 const runTone = (st) => ({ PASS: 'ok', passed: 'ok', FAIL: 'err', failed: 'err', SKIP: 'muted', stopped: 'warn', running: '' }[st] || 'muted');
 const fmtWhen = (t) => new Date(t * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
+/** The http(s) URLs among an environment's enabled values: what its app answers at. */
+const envUrls = (doc) => ((doc && doc.values) || []).filter((v) => v.enabled !== false && v.type !== 'secret' && /^https?:\/\/\S+$/i.test(String(v.value || '').trim()))
+  .map((v) => ({ key: v.key, url: String(v.value).trim() }));
+/** An app's address for comparing: scheme, host, port; localhost and 127.0.0.1 are the same. */
+const appKey = (u) => { try { const x = new URL(u); const host = ['127.0.0.1', '[::1]'].includes(x.hostname) ? 'localhost' : x.hostname; return `${x.protocol}//${host}:${x.port || (x.protocol === 'https:' ? 443 : 80)}`; } catch { return u; } };
+
 async function openAutomation() {
-  const projects = await api('GET', '/api/robot/projects');
-  if (!projects.length) {
-    openDialog({ title: 'Automation', wide: true, cancel: 'Close', body: ui.emptyPane({
-      icon: 'folder', title: 'No Robot Framework project yet',
-      text: `Put a project folder (one with .robot files) in your data folder, ${state.dataDir || ''}, then open Automation again. ApiMan finds its suites, tests, tags and test data, and suggests environment keys from the variables it uses.`,
-      example: 'my-project/\n  tests/ui/*.robot      Browser library (Playwright)\n  tests/api/*.robot     RequestsLibrary\n  resources/*.resource\n  testdata/*.json, *.csv',
-    }) });
-    return;
-  }
+  let projects = await api('GET', '/api/robot/projects');
   const saved = ls.get('apiman:automation', {});
   const remember = (k, v) => { saved[k] = v; ls.set('apiman:automation', saved); };
   let project = null;      // the open project's details
@@ -5415,13 +5420,23 @@ async function openAutomation() {
   let dataText = saved.data || '{\n  \n}';
 
   // ---- controls ----
-  const projSel = ui.select(projects.map((p) => [p.id, p.name]), { value: projects.some((p) => p.id === saved.project) ? saved.project : projects[0].id,
+  saved.envs = saved.envs || {}; // project id -> environment chosen for it
+  /** Until one is chosen for a project: the environment that has most of the keys it needs (Robot ignores case, spaces, _). */
+  const bestEnv = (keys) => {
+    const norm = (k) => String(k).replace(/[\s_]/g, '').toLowerCase();
+    const want = new Set(keys.map(norm));
+    const best = state.envList.map((e) => [e.id, ((state.envs[e.id] || {}).values || []).filter((v) => want.has(norm(v.key))).length]).sort((a, b) => b[1] - a[1])[0];
+    if (best && best[1]) return best[0];
+    const known = (id) => id && state.envList.some((e) => e.id === id);
+    return known(saved.env) ? saved.env : known(state.activeEnv) ? state.activeEnv : null; // what was chosen before
+  };
+  const projSel = ui.select(projects.map((p) => [p.id, p.name]), { value: projects.some((p) => p.id === saved.project) ? saved.project : (projects[0] || {}).id,
     onChange: () => { remember('project', projSel.value); loadProject().catch((e) => toast(e.message, 'err')); } });
   const targetSel = ui.select([['', 'Everything']], { onChange: () => remember('target', targetSel.value) });
-  const envSel = ui.select([], { onChange: () => { remember('env', envSel.value); renderKeys(); } });
+  const envSel = ui.select([], { onChange: () => { saved.envs[projSel.value] = envSel.value; remember('envs', saved.envs); renderKeys(); } });
   // ApiMan environments, then the project's own variable files (env/qa.yaml, config/prod.py) as "file:<path>"
   const fillEnvs = () => {
-    const keep = envSel.value || saved.env || state.activeEnv || '';
+    const keep = (project && saved.envs[project.id]) ?? envSel.value ?? '';
     const files = project ? project.varfiles : [];
     envSel.replaceChildren(...ui.select([['', 'No environment'],
       ...(state.envList.length ? [{ group: 'ApiMan environments', options: state.envList.map((e) => [e.id, e.name]) }] : []),
@@ -5483,6 +5498,7 @@ async function openAutomation() {
   const keysPane = h('div');
   function renderKeys() {
     if (!project) return;
+    setTimeout(markApps, 0);
     const env = envSel.value && !envSel.value.startsWith('file:') ? state.envs[envSel.value] : null;
     const values = new Map((env ? env.values : []).filter((v) => v.enabled !== false).map((v) => [v.key.replace(/[\s_]/g, '').toLowerCase(), v]));
     const missing = project.keys.filter((k) => !values.has(k.name.replace(/[\s_]/g, '').toLowerCase()));
@@ -5502,6 +5518,14 @@ async function openAutomation() {
         env ? ui.button({ label: `Edit ${env.name}`, size: 'small', onClick: () => aside(() => editEnvironment(envSel.value)) }) : null,
       ].filter(Boolean))].filter(Boolean));
   }
+  /** A live dot after each URL value in the Variables table: is its app answering? */
+  async function markApps() {
+    const cells = $$('td.mono', keysPane).filter((td) => /^https?:\/\//i.test(td.textContent));
+    if (!cells.length) return;
+    const res = await api('POST', '/api/robot/apps/check', { urls: cells.map((td) => td.textContent) }).catch(() => []);
+    res.forEach((r, i) => cells[i] && cells[i].append(' ', ui.dot({ tone: r.up ? 'ok' : '', label: r.up ? `Answering (${r.status}, ${fmtMs(r.ms)})` : `Not answering: ${r.error || 'no reply'}` })));
+  }
+
   async function addKeys(env, missing) {
     await mutateDoc('environments', envSel.value, (doc) => { doc.values.push(...missing.map((k) => ({ key: k.name, value: '', type: /pass|secret|token|key/i.test(k.name) ? 'secret' : 'default', enabled: true }))); return true; });
     renderKeys();
@@ -5514,7 +5538,7 @@ async function openAutomation() {
     await refreshEnvironments();
     renderEnvPicker();
     fillEnvs();
-    envSel.value = id; remember('env', id);
+    envSel.value = id; saved.envs[project.id] = id; remember('envs', saved.envs);
     renderKeys();
     toast(`Created the ${project.name} environment: fill in its values.`, 'ok');
     aside(() => editEnvironment(id));
@@ -5619,6 +5643,142 @@ async function openAutomation() {
     } catch (e) { toast(e.message, 'err'); }
   }
 
+  // =========================== Dashboard: every project at a glance, the home of Automation ===========================
+  const dash = h('div');
+  const projectView = h('div', { hidden: true });
+  const linkIn = ui.input({ code: true, placeholder: '~/work/office-tests', spellcheck: 'false', autocomplete: 'off' });
+  const linkForm = h('div', { hidden: true },
+    ui.field('Project folder on this computer', linkIn, { hint: 'Any folder with Robot Framework tests. It runs where it is: nothing is copied.' }),
+    ui.actions(ui.button({ label: 'Link folder', size: 'small', onClick: () => linkFolder().catch((e) => toast(e.message, 'err')) }),
+      ui.button({ label: 'Cancel', size: 'small', onClick: () => { linkForm.hidden = true; } })));
+  linkIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); linkFolder().catch((err) => toast(err.message, 'err')); } });
+  const zipIn = ui.input({ type: 'file', accept: '.zip,application/zip', hidden: true, 'aria-label': 'Project zip' });
+  zipIn.addEventListener('change', () => importZip().catch((e) => toast(e.message, 'err')));
+  async function linkFolder() {
+    if (!linkIn.value.trim()) { linkIn.focus(); return; }
+    await api('POST', '/api/robot/links', { path: linkIn.value.trim() });
+    toast('Linked: it runs from its own folder.', 'ok');
+    linkIn.value = ''; linkForm.hidden = true;
+    await renderDashboard();
+  }
+  async function importZip() {
+    const f = zipIn.files[0];
+    zipIn.value = '';
+    if (!f) return;
+    if (f.size > 36 * 1024 * 1024) throw new Error('That zip is too large (limit 36 MB).');
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    const res = await api('POST', '/api/robot/import', { name: f.name, data: btoa(bin) });
+    toast(`Imported ${res.name} into your data folder.`, 'ok');
+    await renderDashboard();
+  }
+  async function refreshProjects() {
+    projects = await api('GET', '/api/robot/projects');
+    projSel.replaceChildren(...ui.select(projects.map((x) => [x.id, x.name]), { value: projSel.value }).childNodes);
+  }
+  const showDashboard = () => { projectView.hidden = true; dash.hidden = false; setRunButton(false); renderDashboard().catch((e) => toast(e.message, 'err')); };
+  async function openProject(id, runNow = false) {
+    projSel.value = id; remember('project', id);
+    dash.hidden = true; projectView.hidden = false; setRunButton(false);
+    await loadProject();
+    if (runNow) await start();
+  }
+  async function renderDashboard() {
+    const [rows] = await Promise.all([api('GET', '/api/robot/dashboard'), refreshProjects()]);
+    const allUrls = [...new Set(state.envList.flatMap((e) => envUrls(state.envs[e.id]).map((u) => u.url)))];
+    const [checks, scan] = await Promise.all([
+      allUrls.length ? api('POST', '/api/robot/apps/check', { urls: allUrls }).catch(() => []) : [],
+      api('GET', '/api/robot/apps/scan').catch(() => [])]);
+    const up = new Map(checks.map((c) => [c.url, c]));
+    const tests = rows.reduce((a, r) => a + (r.tests || 0), 0);
+    const lastRuns = rows.map((r) => r.runs[0]).filter(Boolean);
+    const allRuns = rows.flatMap((r) => r.runs).filter((r) => r.status !== 'running');
+    const passedRuns = allRuns.filter((r) => r.status === 'passed').length;
+    const anyRunning = rows.some((r) => r.runs.some((x) => x.status === 'running'));
+    const envFor = (r) => { const id = saved.envs[r.id] ?? bestEnv(r.keys || []); return id && !id.startsWith('file:') ? state.envs[id] : null; };
+    const card = (r) => {
+      const last = r.runs.find((x) => x.status !== 'running');
+      const running = r.runs.find((x) => x.status === 'running');
+      const env = envFor(r);
+      const urls = envUrls(env);
+      const runs = r.runs.filter((x) => x.status !== 'running').slice(0, 20).reverse();
+      return ui.card({
+        title: r.name,
+        badge: ui.pill(r.linked ? 'Linked' : 'Data folder', 'muted'),
+        dot: running ? ui.dot({ tone: 'warn', label: 'Running now' }) : last ? ui.dot({ tone: last.status === 'passed' ? 'ok' : '', label: `Last run ${last.status}` }) : null,
+        body: [
+          ui.path(r.linked ? r.path : `${state.dataDir || 'data folder'}/${r.path}`),
+          r.error ? ui.note(r.error, 'err') : ui.meta([
+            h('span', null, ui.value(String(r.tests || 0)), ` tests in ${r.suites || 0} suites`),
+            r.tags && r.tags.length ? h('span', null, r.tags.slice(0, 4).join(', ')) : null,
+          ].filter(Boolean)),
+          last ? ui.meta([h('span', null, ui.pill(last.status === 'passed' ? 'Passed' : last.status === 'stopped' ? 'Stopped' : last.failed ? `${last.failed} failed` : 'Error', runTone(last.status))),
+            h('span', null, fmtWhen(last.started)), h('span', null, `${last.passed || 0} passed`), last.env ? h('span', null, last.env) : null].filter(Boolean)) : ui.hint('Not run yet.'),
+          runs.length > 1 ? ui.chart(runs.map((x) => { const n = (x.passed || 0) + (x.failed || 0); return { value: n ? (x.passed || 0) / n : 0.05, tone: runTone(x.status), title: `${fmtWhen(x.started)}: ${x.passed || 0} passed, ${x.failed || 0} failed` }; }), { small: true, label: 'Recent runs' }) : null,
+          env ? ui.meta([h('span', null, 'Environment ', ui.value(env.name)), ...urls.slice(0, 2).map((u) => {
+            const c = up.get(u.url);
+            return h('span', { title: u.url }, ui.dot({ tone: c && c.up ? 'ok' : '', label: c && c.up ? 'Answering' : 'Not answering' }), ` ${u.key} ${c && c.up ? 'up' : 'down'}`);
+          })]) : ui.hint(r.keys && r.keys.length ? `Needs ${r.keys.slice(0, 4).join(', ')}: pick an environment when you open it.` : 'Needs no environment.'),
+        ].filter(Boolean),
+        actions: [
+          ui.button({ label: running ? 'Show run' : 'Open', size: 'small', onClick: () => openProject(r.id).then(() => running && follow(running.id)).catch((e) => toast(e.message, 'err')) }),
+          running || anyRunning || r.error ? null : ui.button({ label: 'Run', size: 'small', onClick: () => openProject(r.id, true).catch((e) => toast(e.message, 'err')) }),
+          r.linked ? ui.button({ label: 'Unlink', variant: 'ghost', size: 'small', onClick: async () => {
+            try { await api('DELETE', `/api/robot/links/${encodeURIComponent(r.id)}`); } catch (e) { toast(e.message, 'err'); return; }
+            toast(`Unlinked ${r.name}: its folder and runs are untouched. Link it again any time.`, 'muted');
+            await renderDashboard();
+          } }) : null,
+        ].filter(Boolean),
+      });
+    };
+    const appRows = scan.filter((a) => a.up);
+    dash.replaceChildren(...[
+      ui.toolbar([ui.sectionHead('Projects', rows.length ? `${rows.length} found` : null, null)], [
+        ui.button({ label: 'Link a folder…', variant: 'ghost', size: 'small', onClick: () => { linkForm.hidden = false; linkIn.focus(); } }),
+        ui.button({ label: 'Import a zip…', variant: 'ghost', size: 'small', onClick: () => zipIn.click() }),
+        ui.button({ label: 'Refresh', variant: 'ghost', size: 'small', onClick: () => renderDashboard().catch((e) => toast(e.message, 'err')) })]),
+      linkForm, zipIn,
+      rows.length ? ui.meta([
+        h('span', null, ui.value(String(rows.length)), rows.length === 1 ? ' project' : ' projects'),
+        h('span', null, ui.value(String(tests)), ' tests'),
+        h('span', null, ui.value(String(allRuns.length)), ' runs'),
+        h('span', null, 'Runs passing ', ui.value(allRuns.length ? `${Math.round((passedRuns / allRuns.length) * 100)}%` : '–', passedRuns === allRuns.length ? 'ok' : 'warn')),
+        h('span', null, ui.value(String(lastRuns.filter((x) => x.status === 'passed').length)), ` of ${lastRuns.length} projects green on their last run`),
+        h('span', null, ui.value(String(appRows.length)), ' apps running'),
+      ]) : null,
+      rows.length ? h('div', { class: 'cards' }, ...rows.map(card)) : ui.emptyPane({
+        icon: 'folder', title: 'No Robot Framework project yet',
+        text: 'Link a project folder from anywhere on this computer, import a zip, or put a project in your data folder. ApiMan finds its suites, tests, tags, test data and the environment keys it needs.',
+        actions: [ui.button({ label: 'Link a folder…', size: 'small', onClick: () => { linkForm.hidden = false; linkIn.focus(); } }), ui.button({ label: 'Import a zip…', size: 'small', onClick: () => zipIn.click() })],
+      }),
+      ui.sectionHead('Apps running on this computer', 'common development ports, answering now', null),
+      appRows.length ? h('table', { class: 'grid boxed' }, h('thead', null, h('tr', null, h('th', null, 'App'), h('th', { class: 'desktop-only' }, 'Page'), h('th', { class: 'num' }, 'Status'), h('th', { class: 'desktop-only' }, 'Environments'), h('th', { class: 'tight' }, ''))),
+        h('tbody', null, ...appRows.map((a) => {
+          const base = a.url.replace(/\/$/, '');
+          const using = state.envList.filter((e) => envUrls(state.envs[e.id]).some((u) => appKey(u.url) === appKey(base)));
+          return h('tr', null, h('td', { class: 'mono' }, ui.dot({ tone: 'ok', label: 'Answering' }), ' ', base), h('td', { class: 'desktop-only' }, a.title || '–'),
+            h('td', { class: 'num' }, ui.status(a.status, { small: true })), h('td', { class: 'desktop-only' }, using.map((e) => e.name).join(', ') || '–'),
+            h('td', { class: 'tight' }, ui.iconButton('plus', `Create an environment for ${base}`, () => envForApp(base, a.title).catch((e) => toast(e.message, 'err')), { size: 'small' })));
+        }))) : ui.hint('Nothing answering on the usual development ports (3000, 4200, 5173, 8000, 8080…). Start your app and Refresh.'),
+      allUrls.length ? ui.sectionHead('Environments', 'is each one\'s app answering?', null) : null,
+      allUrls.length ? h('table', { class: 'grid boxed' }, h('tbody', null, ...state.envList.filter((e) => envUrls(state.envs[e.id]).length).map((e) => h('tr', null,
+        h('td', null, e.name),
+        h('td', { class: 'mono' }, ...envUrls(state.envs[e.id]).flatMap((u) => { const c = up.get(u.url); return [h('div', { title: c && !c.up ? c.error : null }, ui.dot({ tone: c && c.up ? 'ok' : '', label: c && c.up ? 'Answering' : 'Not answering' }), ` ${u.key} = ${u.url}`)]; })),
+        h('td', { class: 'tight' }, ui.button({ label: 'Edit', variant: 'ghost', size: 'small', onClick: () => aside(() => editEnvironment(e.id)) }))))))
+        : null,
+    ].filter(Boolean));
+  }
+  /** One click: an environment whose BASE_URL is a running app. */
+  async function envForApp(base, title) {
+    const name = `${title ? `${title} ` : ''}${base.replace(/^https?:\/\//, '')}`.slice(0, 60);
+    await backend.environments.create({ name, values: [{ key: 'BASE_URL', value: base, type: 'default', enabled: true }], _postman_variable_scope: 'environment' });
+    await refreshEnvironments();
+    renderEnvPicker();
+    toast(`Created the "${name}" environment (BASE_URL = ${base}). Pick it on a project.`, 'ok');
+    await renderDashboard();
+  }
+
   let loading = null; // the project being loaded: Run waits for it
   const [tabBar, ...panes] = ui.tabs([
     { key: 'live', label: 'Live', content: live },
@@ -5639,12 +5799,8 @@ async function openAutomation() {
     pythonNote.replaceChildren(project.python.error ? ui.note(project.python.error, 'err')
       : ui.hint(`Robot Framework ${project.python.version} · ${project.python.path}`, { oneLine: true, title: project.python.path }));
     fillEnvs();
-    if (!saved.env) { // first time: the environment that has most of this project's keys
-      const norm = (k) => k.replace(/[\s_]/g, '').toLowerCase();
-      const want = new Set(project.keys.map((k) => norm(k.name)));
-      const best = state.envList.map((e) => [e.id, ((state.envs[e.id] || {}).values || []).filter((v) => want.has(norm(v.key))).length]).sort((a, b) => b[1] - a[1])[0];
-      if (best && best[1]) envSel.value = best[0];
-    }
+    envSel.value = saved.envs[project.id] ?? '';
+    if (saved.envs[project.id] == null) envSel.value = bestEnv(project.keys.map((k) => k.name)) || ''; // first time
     renderKeys();
     renderFiles();
     fileView.replaceChildren();
@@ -5735,8 +5891,13 @@ async function openAutomation() {
     };
     await tick();
   }
-  const setRunButton = (running) => { const b = $('#dlgFoot .btn.primary'); if (b) b.textContent = running ? 'Stop' : 'Run'; };
+  /** The footer's Run (Stop while a run goes); hidden on the dashboard, where each project has its own Run. */
+  const setRunButton = (running) => { const b = $('#dlgFoot .btn.primary'); if (b) { b.textContent = running ? 'Stop' : 'Run'; b.hidden = !dash.hidden; } };
   async function start() {
+    if (run && run.meta && run.meta.status === 'running' && run.meta.project !== project.id) {
+      toast(`${run.meta.projectName} is still running: wait for it or stop it first.`, 'warn');
+      return;
+    }
     if (run && run.meta && run.meta.status === 'running') {
       const { stopped } = await api('POST', `/api/robot/runs/${encodeURIComponent(run.id)}/stop`);
       if (stopped) return;
@@ -5757,20 +5918,24 @@ async function openAutomation() {
     await follow(meta.id);
   }
 
+  projectView.append(
+    ui.toolbar([ui.button({ label: 'All projects', variant: 'ghost', size: 'small', onClick: showDashboard })], []),
+    h('div', { class: 'grid-3' }, ui.field('Project', projSel), ui.field('Run', targetSel), ui.field('Environment', envSel)),
+    h('div', { class: 'grid-3' }, ui.field('Only tests tagged', tagsIn), ui.field('Speed', speedSel), h('div', { class: 'field' }, pythonNote)),
+    tabBar, ...panes);
   openDialog({
     title: 'Automation', full: true, tall: true, cancel: 'Close',
-    body: [
-      h('div', { class: 'grid-3' }, ui.field('Project', projSel), ui.field('Run', targetSel), ui.field('Environment', envSel)),
-      h('div', { class: 'grid-3' }, ui.field('Only tests tagged', tagsIn), ui.field('Speed', speedSel), h('div', { class: 'field' }, pythonNote)),
-      tabBar, ...panes,
-    ],
+    body: [dash, projectView],
     onClose: () => { if (run && run.timer) clearTimeout(run.timer); run = null; if (shotUrl) URL.revokeObjectURL(shotUrl); },
     buttons: [{ label: 'Run', primary: true, onClick: () => { start().catch((e) => toast(e.message, 'err')); return false; } }],
   });
-  await loadProject();
-  // a run still going (started before this window opened): show it
-  const active = (await api('GET', `/api/robot/runs?project=${encodeURIComponent(project.id)}`)).find((r) => r.status === 'running');
-  if (active) follow(active.id).catch(() => {});
+  setRunButton(false);
+  // a run still going (started before this window opened): show it; otherwise the dashboard
+  const going = (await api('GET', '/api/robot/runs')).find((r) => r.status === 'running');
+  if (going && projects.some((x) => x.id === going.project)) {
+    try { await openProject(going.project); follow(going.id).catch(() => {}); return; } catch (e) { toast(e.message, 'err'); showDashboard(); return; }
+  }
+  await renderDashboard();
 }
 
 // ---------- settings ----------
