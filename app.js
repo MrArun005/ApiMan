@@ -1471,26 +1471,41 @@ async function closeTab(i) {
   renderAll();
 }
 
-function writeTabs() {
-  let budget = 2 * 1024 * 1024; // all kept responses together stay well inside the browser's storage quota
-  const keepOut = (t) => {
-    if (state.settings.history === false || !t.out || !t.out.res) return undefined; // History off: nothing about responses is kept
-    const json = JSON.stringify(t.out);
-    if (json.length > 256 * 1024 || json.length > budget) return undefined;
-    budget -= json.length;
-    return t.out;
+/** What survives a reload: only what the response pane shows. Never the request as sent (resolved tokens),
+ *  variables or script logs; secret-looking and cookie headers are dropped. Session-only (gone when the browser tab closes). */
+function minimalOut(out) {
+  const r = out.res;
+  const headers = (r.headers || []).filter(([k]) => !SECRET_HEADER.test(String(k)) && !/^set-cookie2?$/i.test(String(k)));
+  return {
+    res: { status: r.status, reason: r.reason, timeMs: r.timeMs, size: r.size, truncated: r.truncated, binary: r.binary, headers,
+      body: r.binary ? undefined : r.body, bodyBase64: undefined },
+    tests: (out.tests || []).map((x) => ({ name: x.name, passed: x.passed })), logs: [], warnings: [], restored: true,
   };
+}
+function writeTabs() {
   ls.set('apiman:tabs', {
     active: state.active,
-    tabs: state.tabs.map((t) => (t.cid ? { cid: t.cid, itemId: t.itemId, ed: t.dirty ? edForStorage(t.ed) : null, out: keepOut(t) } : { ed: edForStorage(t.ed), out: keepOut(t) })),
+    tabs: state.tabs.map((t) => (t.cid ? { cid: t.cid, itemId: t.itemId, ed: t.dirty ? edForStorage(t.ed) : null } : { ed: edForStorage(t.ed) })),
   });
+  let budget = 2 * 1024 * 1024; // all kept responses together stay well inside the storage quota
+  const outs = state.tabs.map((t) => {
+    if (state.settings.history === false || !t.out || !t.out.res || t.out.res.binary) return null; // History off: nothing kept
+    const json = JSON.stringify(minimalOut(t.out));
+    if (json.length > 256 * 1024 || json.length > budget) return null;
+    budget -= json.length;
+    return JSON.parse(json);
+  });
+  try { sessionStorage.setItem('apiman:outs', JSON.stringify(outs)); } catch { /* private mode or quota: just not kept */ }
 }
 const persistTabs = debounce(writeTabs, 300);
 
 async function restoreTabs() {
   const saved = ls.get('apiman:tabs', null);
   if (!saved || !Array.isArray(saved.tabs)) return;
-  for (const s of saved.tabs) {
+  let outs = [];
+  try { outs = JSON.parse(sessionStorage.getItem('apiman:outs') || '[]'); } catch { /* none */ }
+  for (const [si, s] of saved.tabs.entries()) {
+    s.out = outs[si] && outs[si].res ? outs[si] : null; // this browser tab's own last responses only
     try {
       if (s.cid) {
         if (!state.colList.some((c) => c.id === s.cid)) continue;
