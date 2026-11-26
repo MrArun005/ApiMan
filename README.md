@@ -10,11 +10,24 @@ git clone https://github.com/MrArun005/ApiMan.git && cd ApiMan
 python3 server.py                     # opens http://127.0.0.1:5577
 python3 server.py --data ~/my-apis    # keep collections + environments somewhere else
 python3 server.py --ca-file ~/company-root-ca.pem   # trust internal HTTPS certificates
+python3 server.py run api.json -e staging.json --junit report.xml   # run a collection headlessly (CI)
 python3 test_server.py                # server self-check
 node tools/layout-check.mjs           # layout check: 508 width/sidebar/layout/text/density/divider combinations (needs Playwright)
 ```
 
 You only need Python 3. There's nothing to install.
+
+## Run collections in CI
+
+`python3 server.py run` runs a collection from the command line, the job Postman needs Newman (npm) for. It uses the Chrome, Chromium or Edge already on the machine in headless mode, so scripts run in the same sandbox as in the app, and there's still nothing to install.
+
+```bash
+python3 server.py run orders.json -e staging.json            # live results; exit code 1 if a test fails or a request can't be sent
+python3 server.py run orders.json -e staging.json --var token=$API_TOKEN --junit report.xml --json report.json
+python3 server.py run orders.json --folder Smoke -n 3 --delay 200 --bail
+```
+
+`--junit` writes a JUnit XML report that GitHub Actions, GitLab and Jenkins show as test results. `--var KEY=VALUE` sets environment variables, handy for secrets from the CI's environment. `--browser` (or `APIMAN_BROWSER`) points at a browser if it isn't found automatically. Requests that need an OAuth sign-in window can't run headless; use client credentials there.
 
 ## Features
 
@@ -27,7 +40,7 @@ You only need Python 3. There's nothing to install.
 | **Variables** | Environments, collection variables, globals and dynamic values (`{{$guid}}`, `{{$timestamp}}`, …), with a live "Resolves to" preview under the URL |
 | **Scripts** | Pre-request and test scripts with Postman's `pm.*` commands (`pm.test`, `pm.expect`, `pm.response`, `pm.environment`, …), plus snippets |
 | **Click-to-test** | Right-click any value in a JSON response (or put the cursor on it and press the menu key or <kbd>Shift+F10</kbd>) to add a test without writing code: *equals this value*, *exists*, *is a string/number/list…*, *is not empty*, or *save it to a variable* for the next request (e.g. a login token). ApiMan writes the `pm.test` into the request's Tests script, where you can edit it |
-| **Runner** | Run a collection or folder, with iterations, delay, stop on failure, and live pass/fail results |
+| **Runner** | Run a collection or folder, with iterations, delay, stop on failure, and live pass/fail results. Values scripts set carry to the next request (`/orders/{{orderId}}` chaining works), except ones that could change which server a request goes to. Also from the command line (see above) |
 | **Responses** | Pretty (highlighted JSON) / raw / preview views, headers, cookies, test results, script console, copy, save to file |
 | **Diff** | Compare a response with the previous one, one you pinned, or **the same request sent with another environment** (staging vs prod) in one click, without switching environments. JSON is compared field by field (key order and formatting don't count; list items with an `id` are matched by it), with a line view too. Ignore noisy fields by name or path (`updatedAt, data.items[*].etag`); headers that change on every response (Date, request ids…) are skipped |
 | **Import / export** | Postman collections v2.1, environments and globals, cURL commands (paste into the URL bar or use Import), export as JSON |
@@ -40,7 +53,7 @@ You only need Python 3. There's nothing to install.
 ## Safety
 
 - **Scripts are sandboxed.** Imported collections can contain scripts you didn't write. In ApiMan, every script runs in a Web Worker inside a sandboxed iframe whose Content-Security-Policy is `default-src 'none'`. A script can't make network requests of its own (`pm.sendRequest` is disabled too), can't read ApiMan's storage or the page, and is stopped after 5 seconds, so an endless loop can't freeze the app.
-- **Scripts can't quietly send your request elsewhere.** If a pre-request script changes which server a request goes to, ApiMan asks before sending it there with your auth. In the runner, where there's no one to ask, it blocks the request. If a script changes or deletes variables in a way that would send any saved request to a different server, you're asked before the change is saved (the check resolves every request's URL, so variable names don't matter). Every variable a script changes is listed in the Console.
+- **Scripts can't quietly send your request elsewhere.** If a pre-request script changes which server a request goes to, ApiMan asks before sending it there with your auth. In the runner, where there's no one to ask, it blocks the request, and a value a script sets is only carried to the next request if it can't change any request's server: ApiMan puts a hostile test value in its place in every saved URL, under every environment, and checks that no destination moves (path and query values pass, host, port and scheme values don't). If a script changes or deletes variables in a way that would send any saved request to a different server, you're asked before the change is saved (the check resolves every request's URL, so variable names don't matter). Every variable a script changes is listed in the Console.
 - **Imported methods are validated.** HTTP methods from imported files are checked, and generated shell code quotes every value.
 - **Credentials never follow a redirect to another site.** When a redirect changes the scheme, host or port, only harmless headers (Accept, Accept-Language, User-Agent, Content-Type) are kept, and the response tells you which ones were removed. HTTPS is never downgraded to HTTP.
 - **Only ApiMan can use the local server.** It listens on `127.0.0.1` only, and it rejects requests from other websites (Origin check) and DNS-rebinding attempts (Host check). It serves only its own files. The one page that accepts a link from another site is `oauth-callback.html`, where an OAuth provider sends you back after sign-in; it holds no data or session token and only passes the sign-in code to your ApiMan tab.

@@ -1148,6 +1148,7 @@ async function urlVariableNames(extraPairs = []) {
   let complete = true;
   const urls = []; // { label, url, colId }
   const hostHeaders = []; // Host header values also decide where a request lands on shared servers
+  const headerOnly = []; // the header/auth part of hostHeaders (path-variable values are URL-encoded into the path)
   // A variable used in any header name or value (or API-key auth) could later become "Host: attacker", so all are guarded.
   const headerParts = (headers) => (Array.isArray(headers) ? headers : []).filter((x) => x && typeof x === 'object').flatMap((x) => [String(x.key ?? ''), String(x.value ?? '')]);
   const authParts = (auth) => { const a = authIn(auth); return a.type === 'apikey' ? [a.key, a.value] : []; };
@@ -1159,8 +1160,10 @@ async function urlVariableNames(extraPairs = []) {
         urls.push({ label: `${c.name} / ${String(it.name ?? '') || 'Untitled'}`, url: urlIn(rq.url).raw, colId: c.id });
         hostHeaders.push(...urlIn(rq.url).pathVars.map((v) => v.value)); // path-variable values can rewrite the URL too
         hostHeaders.push(...headerParts(rq.header), ...authParts(rq.auth));
-      }, [], (parents) => parents.forEach((f) => hostHeaders.push(...authParts(f.auth))));
+        headerOnly.push(...headerParts(rq.header), ...authParts(rq.auth));
+      }, [], (parents) => parents.forEach((f) => { hostHeaders.push(...authParts(f.auth)); headerOnly.push(...authParts(f.auth)); }));
       hostHeaders.push(...authParts(col.auth));
+      headerOnly.push(...authParts(col.auth));
     } catch (e) {
       if (!/Not a Postman v2 collection/.test(e.message)) complete = false; // a stray non-collection .json isn't a gap
     }
@@ -1169,6 +1172,7 @@ async function urlVariableNames(extraPairs = []) {
     urls.push({ label: `${t.ed.name} (open tab)`, url: t.ed.url, colId: t.cid });
     hostHeaders.push(...(t.ed.pathVars || []).map((v) => v.value));
     hostHeaders.push(...t.ed.headers.flatMap((x) => [x.key, x.value]), ...authParts(authOut(t.ed.auth)));
+    headerOnly.push(...t.ed.headers.flatMap((x) => [x.key, x.value]), ...authParts(authOut(t.ed.auth)));
   }
   const names = new Set();
   const add = (s) => { for (const m of String(s ?? '').matchAll(VAR_RE)) names.add(m[1]); };
@@ -1182,12 +1186,38 @@ async function urlVariableNames(extraPairs = []) {
     ...Object.values(state.cols).flatMap((c) => (c && c.variable) || []),
     ...extraPairs, // values a script just wrote: they may reference further variables
   ];
-  for (let grew = true; grew;) {
-    const n = names.size;
-    for (const p of pairs) if (p && names.has(p.key)) add(p.value);
-    grew = names.size > n;
+  const expand = (set, addTo) => {
+    for (let grew = true; grew;) {
+      const n = set.size;
+      for (const p of pairs) if (p && set.has(p.key)) addTo(p.value);
+      grew = set.size > n;
+    }
+  };
+  expand(names, add);
+  const headerNames = new Set();
+  const addH = (x) => { for (const m of String(x ?? '').matchAll(VAR_RE)) headerNames.add(m[1]); };
+  headerOnly.forEach(addH);
+  expand(headerNames, addH);
+  return { names, complete, urls, headerNames };
+}
+
+/**
+ * Could variable k send any known request to a different server? It's replaced by a hostile value in every URL,
+ * under the run's current values and under every environment: a variable that only ever lands in a path or query
+ * (/orders/{{id}}) can't move the origin whatever its value, one in the scheme, host or port always does.
+ */
+const ORIGIN_CANARY = 'x@evil.invalid:1/#?';
+function canMoveOrigin(k, urls, runScopes, cid) {
+  const envs = [null, ...Object.entries(state.envs).filter(([id]) => id !== GLOBALS_ID).map(([, d]) => d)];
+  for (const u of urls) {
+    const col = u.colId === cid ? runScopes.collection : colObj(state.cols[u.colId]);
+    const variants = [merged({ ...runScopes, collection: col, local: {} }),
+      ...envs.map((d) => merged({ globals: runScopes.globals, collection: col, environment: d ? envObj(d) : {}, local: {} }))];
+    for (const vars of variants) {
+      if (originOf(resolve(u.url, vars)) !== originOf(resolve(u.url, { ...vars, [k]: ORIGIN_CANARY }))) return true;
+    }
   }
-  return { names, complete, urls };
+  return false;
 }
 
 /**
@@ -4674,53 +4704,24 @@ async function openRunner(cid, folderId) {
   });
 
   async function run() {
-      const runCid = colSel.value;
-      const col = state.cols[runCid];
-      const root = folderSel.value ? locate(col, folderSel.value).item.item : col.item;
-      const items = [];
-      eachRequest(root, (it) => items.push(it));
-      if (!items.length) { toast('There are no requests to run here.'); return; }
-      const iterations = Math.max(1, Math.min(1000, Number(iterIn.value) || 1));
-      const delay = Math.max(0, Math.min(60000, Number(delayIn.value) || 0));
-      const runBtn = $('#dlgFoot .btn.primary');
-      ctrl = new AbortController();
-      runBtn.textContent = 'Stop';
-      results.hidden = false;
-      tbody.replaceChildren();
-      let n = 0, pass = 0, fail = 0, errors = 0, totalMs = 0, ok = 0, c4 = 0, c5 = 0;
-      let runScopes = scopesFor(runCid);
-      const total = items.length * iterations;
-      const started = performance.now();
-      outer: for (let it = 0; it < iterations; it++) {
-        for (const item of items) {
-          if (ctrl.signal.aborted) break outer;
-          const ed = fromItem(item);
-          // Values set by scripts carry through the whole run (like Postman), saved or not.
-          const out = await execute({ ed, cid: runCid, itemId: item.id, iteration: it, signal: ctrl.signal, persist: keepVars.checked, runScopes: keepVars.checked ? null : runScopes });
-          if (!keepVars.checked && out.scopes) {
-            // carry script values to the next request, except ones that decide where requests go (URL/Host)
-            const { names } = await urlVariableNames();
-            for (const sc of ['environment', 'collection', 'globals']) {
-              for (const k of new Set([...Object.keys(runScopes[sc]), ...Object.keys(out.scopes[sc])])) {
-                if (!names.has(k) || runScopes[sc][k] === out.scopes[sc][k]) continue;
-                if (Object.hasOwn(runScopes[sc], k)) out.scopes[sc][k] = runScopes[sc][k]; else delete out.scopes[sc][k];
-                out.logs.push({ level: 'warn', text: `Not carried to the next request: ${sc} variable "${k}" decides where requests go.`, src: 'ApiMan' });
-              }
-            }
-            runScopes = out.scopes;
-          }
-          n++;
-          const tp = out.tests.filter((x) => x.passed === true).length;
-          const tf = out.tests.filter((x) => x.passed === false).length;
-          pass += tp; fail += tf;
-          if (out.error) errors++;
-          else if (out.res.status >= 500) c5++;
-          else if (out.res.status >= 400) c4++;
-          else ok++;
-          if (out.res && !out.error) totalMs += out.res.timeMs;
+    const runCid = colSel.value;
+    const iterations = Math.max(1, Math.min(1000, Number(iterIn.value) || 1));
+    const runBtn = $('#dlgFoot .btn.primary');
+    ctrl = new AbortController();
+    runBtn.textContent = 'Stop';
+    results.hidden = false;
+    tbody.replaceChildren();
+    const started = performance.now();
+    let t = null;
+    try {
+      t = await runCollection({
+        cid: runCid, folderId: folderSel.value || null, iterations, delay: Number(delayIn.value) || 0,
+        stopOnFail: stopOnFail.checked, keepVars: keepVars.checked, signal: ctrl.signal,
+        onResult: ({ it, idx, ed, out, tp, totals }) => {
+          const { n, pass, fail, errors, totalMs, ok, c4, c5, total } = totals;
           const sc = out.error ? 'err' : `s${String(out.res.status)[0]}`;
           tbody.append(h('tr', null,
-            h('td', { class: 'tight' }, iterations > 1 ? `${it + 1}.${items.indexOf(item) + 1}` : String(n)),
+            h('td', { class: 'tight' }, iterations > 1 ? `${it + 1}.${idx + 1}` : String(n)),
             h('td', null, h('span', { class: `mtag ${ed.method}` }, ed.method), ' ', ed.name,
               ...out.tests.filter((x) => x.passed === false).map((x) => h('div', { class: 'runner-fail' }, h('span', { class: 'pill err' }, 'Fail'), `${x.name}: ${x.error}`)),
               out.error ? h('div', { class: 'runner-fail' }, h('span', { class: 'pill err' }, 'Error'), out.error) : null),
@@ -4735,15 +4736,97 @@ async function openRunner(cid, folderId) {
             h('span', null, h('b', null, `${n} of ${total}`), ` requests: ${outcome}`),
             h('span', null, 'Tests: ', h('span', { class: `big ${pass ? 'pass' : 'zero'}` }, `${pass} passed`), ' ', h('span', { class: `big ${fail ? 'fail' : 'zero'}` }, `${fail} failed`)),
             h('span', null, `Average ${n - errors ? fmtMs(Math.round(totalMs / Math.max(1, n - errors))) : '–'}`));
-          if (stopOnFail.checked && (tf || out.error)) break outer;
-          if (delay) await new Promise((r) => { const tm = setTimeout(r, delay); ctrl.signal.addEventListener('abort', () => { clearTimeout(tm); r(); }, { once: true }); });
-        }
-      }
-      summary.append(h('span', null, `${ctrl.signal.aborted ? 'Stopped' : 'Finished'} in ${fmtMs(Math.round(performance.now() - started))}`));
+        },
+      });
+    } finally {
+      summary.append(h('span', null, `${t && !t.stopped ? 'Finished' : 'Stopped'} in ${fmtMs(Math.round(performance.now() - started))}`));
       ctrl = null;
       runBtn.textContent = 'Run again';
       if (state.view === 'environments') renderSidebar();
       renderResolved();
+    }
+  }
+}
+
+/**
+ * Runs a collection or folder: the Runner dialog and `python3 server.py run` both use this.
+ * Values set by scripts carry through the whole run (like Postman), saved to files only with keepVars.
+ */
+async function runCollection({ cid, folderId = null, iterations = 1, delay = 0, stopOnFail = false, keepVars = false, signal, onResult = () => {} }) {
+  const col = state.cols[cid] || await withCol(cid);
+  const folder = folderId ? locate(col, folderId) : null;
+  if (folderId && !folder) throw new Error('That folder no longer exists.');
+  const items = [];
+  eachRequest(folder ? folder.item.item : col.item, (item, parents) => items.push({ item, parents: [...(folder ? [...folder.parents, folder.item] : []), ...parents] }));
+  if (!items.length) throw new Error('There are no requests to run here.');
+  iterations = Math.max(1, Math.min(1000, iterations | 0 || 1));
+  delay = Math.max(0, Math.min(60000, delay | 0));
+  const totals = { n: 0, pass: 0, fail: 0, errors: 0, totalMs: 0, ok: 0, c4: 0, c5: 0, total: items.length * iterations, stopped: false };
+  let runScopes = scopesFor(cid);
+  outer: for (let it = 0; it < iterations; it++) {
+    for (const [idx, { item, parents }] of items.entries()) {
+      if (signal && signal.aborted) { totals.stopped = true; break outer; }
+      const ed = fromItem(item);
+      const out = await execute({ ed, cid, itemId: item.id, iteration: it, signal, persist: keepVars, runScopes: keepVars ? null : runScopes });
+      if (!keepVars && out.scopes) {
+        // carry script values to the next request, except ones that decide where requests go (URL/Host)
+        // (path and query values like /orders/{{id}} do carry: they can't change the server)
+        const written = ['environment', 'collection', 'globals'].flatMap((sc) => Object.entries(out.scopes[sc]).map(([key, value]) => ({ key, value })));
+        const { names, complete, urls, headerNames } = await urlVariableNames(written);
+        for (const sc of ['environment', 'collection', 'globals']) {
+          for (const k of new Set([...Object.keys(runScopes[sc]), ...Object.keys(out.scopes[sc])])) {
+            if (!names.has(k) || runScopes[sc][k] === out.scopes[sc][k]) continue;
+            if (complete && !headerNames.has(k) && !canMoveOrigin(k, urls, out.scopes, cid)) continue;
+            if (Object.hasOwn(runScopes[sc], k)) out.scopes[sc][k] = runScopes[sc][k]; else delete out.scopes[sc][k];
+            out.logs.push({ level: 'warn', text: `Not carried to the next request: ${sc} variable "${k}" decides where requests go.`, src: 'ApiMan' });
+          }
+        }
+        runScopes = out.scopes;
+      }
+      totals.n++;
+      const tp = out.tests.filter((x) => x.passed === true).length;
+      const tf = out.tests.filter((x) => x.passed === false).length;
+      totals.pass += tp; totals.fail += tf;
+      if (out.error) totals.errors++;
+      else if (out.res.status >= 500) totals.c5++;
+      else if (out.res.status >= 400) totals.c4++;
+      else totals.ok++;
+      if (out.res && !out.error) totals.totalMs += out.res.timeMs;
+      await onResult({ it, idx, item, parents, ed, out, tp, tf, totals });
+      if (stopOnFail && (tf || out.error)) { totals.stopped = true; break outer; }
+      if (delay) await new Promise((r) => { const tm = setTimeout(r, delay); if (signal) signal.addEventListener('abort', () => { clearTimeout(tm); r(); }, { once: true }); });
+    }
+  }
+  return totals;
+}
+
+/** `python3 server.py run`: run what the server asks for, streaming each result back, then report the end. */
+async function headlessRun(job) {
+  const post = (body) => api('POST', '/api/run-event', body).catch(() => {});
+  try {
+    if (job.envId !== undefined) setActiveEnv(job.envId || '');
+    let folderId = null;
+    if (job.folder) {
+      const col = state.cols[job.cid] || await withCol(job.cid);
+      const hits = [];
+      const walk = (items) => items.forEach((it) => { if (isFolder(it)) { if (it.name === job.folder) hits.push(it); walk(it.item); } });
+      walk(col.item);
+      if (!hits.length) throw new Error(`No folder named "${job.folder}" in this collection.`);
+      folderId = hits[0].id;
+    }
+    const totals = await runCollection({
+      cid: job.cid, folderId, iterations: job.iterations, delay: job.delay, stopOnFail: !!job.bail, keepVars: false,
+      onResult: ({ it, item, parents, ed, out }) => post({ type: 'result', result: {
+        iteration: it + 1, name: ed.name, path: parents.map((p) => p.name), method: ed.method, url: out.wire ? out.wire.url : ed.url,
+        status: out.res && !out.error ? out.res.status : null, reason: out.res && !out.error ? (out.res.reason || REASONS[out.res.status] || '') : '',
+        timeMs: out.res && !out.error ? out.res.timeMs : null, size: out.res && !out.error ? out.res.size : null, error: out.error || '',
+        warnings: out.warnings || [], tests: out.tests.map((x) => ({ name: x.name, passed: x.passed, error: x.error || '' })),
+        logs: (out.logs || []).filter((l) => l.level === 'error' || l.level === 'warn').map((l) => `${l.src ? `${l.src}: ` : ''}${l.text}`).slice(0, 20),
+      } }),
+    });
+    await post({ type: 'done', totals });
+  } catch (e) {
+    await post({ type: 'fatal', error: e.message });
   }
 }
 
@@ -5510,6 +5593,10 @@ async function start() {
   }
   renderEnvPicker();
   renderAll();
+  if (local) {
+    const info = await api('GET', '/api/info').catch(() => ({}));
+    if (info.run) headlessRun(info.run); // started by `python3 server.py run`
+  }
 }
 
 start();

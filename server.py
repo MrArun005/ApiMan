@@ -6,6 +6,7 @@ ApiMan local server: a private, local Postman-style API client. Python standard 
     python3 server.py --data ~/my-apis     # keep collections + environments somewhere else
     python3 server.py --port 6000 --no-browser
     python3 server.py --ca-file ~/company-root-ca.pem   # internal HTTPS APIs signed by your company CA
+    python3 server.py run api.json -e staging.json --junit report.xml   # run a collection headlessly (CI)
 
 Requests are sent from THIS machine, so they go through whatever VPN you are connected to.
 Collections are Postman v2.1 JSON files; environments are Postman environment JSON files.
@@ -19,8 +20,12 @@ import json
 import secrets
 import socket
 import os
+import queue
 import re
+import shutil
 import ssl
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -43,6 +48,8 @@ CA_FILE = None  # extra trusted CA bundle (PEM), set by --ca-file
 # running as you can read the page, but they can already read your collection files directly.)
 SESSION_TOKEN = secrets.token_urlsafe(32)
 SERVER_PORT = None  # set in main(); the proxy refuses to call ApiMan itself
+RUN_JOB = None      # `server.py run`: what the headless page should run
+RUN_EVENTS = None   # ...and the queue its results come back on
 TOKEN_HEADER = "X-ApiMan-Token"
 
 
@@ -363,7 +370,10 @@ class Handler(BaseHTTPRequestHandler):
                 name, ctype = STATIC[path]
                 return self.reply_file(HERE / name, ctype)
             if method == "GET" and path == "/api/info":
-                return self.reply(200, {"dataDir": str(self.stores["collections"].root)})
+                return self.reply(200, {"dataDir": str(self.stores["collections"].root), **({"run": RUN_JOB} if RUN_JOB else {})})
+            if method == "POST" and path == "/api/run-event" and RUN_EVENTS is not None:
+                RUN_EVENTS.put(self.read_json())
+                return self.reply(200, {"ok": True})
             if method == "POST" and path == "/api/send":
                 return self.reply(200, send(self.read_json()))
             m = re.match(r"^/api/(collections|environments)(?:/(.+))?$", path)
@@ -444,8 +454,204 @@ class Handler(BaseHTTPRequestHandler):
         pass  # keep the terminal quiet
 
 
+# ---------- `server.py run`: headless collection runs for CI ----------
+# Scripts in collections may be untrusted, and only a browser sandbox isolates them safely, so the run happens in a
+# headless Chrome / Chromium / Edge already on the machine, driving the same runner as the app. Nothing to install.
+
+def find_browser(explicit=None):
+    names = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome", "msedge", "microsoft-edge", "microsoft-edge-stable"]
+    paths = [explicit, os.environ.get("APIMAN_BROWSER"), os.environ.get("CHROME_PATH"),
+             *[shutil.which(n) for n in names],
+             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Chromium.app/Contents/MacOS/Chromium",
+             "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+             *[os.path.expandvars(p) for p in (r"%ProgramFiles%\Google\Chrome\Application\chrome.exe", r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
+                                               r"%LocalAppData%\Google\Chrome\Application\chrome.exe", r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
+                                               r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe")],
+             "/opt/pw-browsers/chromium"]
+    for p in paths:
+        if p and Path(p).is_file() and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def load_json_file(path, what):
+    try:
+        return json.loads(Path(path).expanduser().read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        raise SystemExit(f"error: {what} file not found: {path}")
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"error: {what} file isn't valid JSON ({path}): {e}")
+
+
+def junit_report(results, suite_name, path):
+    import xml.etree.ElementTree as ET
+    root = ET.Element("testsuites", name=suite_name)
+    tot = {"tests": 0, "failures": 0, "errors": 0, "time": 0.0}
+    for r in results:
+        label = " / ".join([*r["path"], r["name"]]) + (f" (iteration {r['iteration']})" if r.get("iterations", 1) > 1 else "")
+        secs = (r.get("timeMs") or 0) / 1000
+        suite = ET.SubElement(root, "testsuite", name=label, time=f"{secs:.3f}")
+        cases = failures = errors = 0
+        classname = ".".join(re.sub(r"[^\w-]+", "_", x) for x in [*r["path"], r["name"]]) or "request"
+        if r["error"]:
+            cases += 1; errors += 1
+            tc = ET.SubElement(suite, "testcase", classname=classname, name=f"{r['method']} request", time=f"{secs:.3f}")
+            ET.SubElement(tc, "error", message=r["error"][:500]).text = r["error"]
+        for t in r["tests"]:
+            cases += 1
+            tc = ET.SubElement(suite, "testcase", classname=classname, name=t["name"], time="0")
+            if t["passed"] is False:
+                failures += 1
+                ET.SubElement(tc, "failure", message=(t["error"] or "failed")[:500]).text = t["error"] or "failed"
+            elif t["passed"] is None:
+                ET.SubElement(tc, "skipped")
+        if not cases:  # a request without tests still shows up, passing if it got a response
+            cases = 1
+            ET.SubElement(suite, "testcase", classname=classname, name=f"{r['method']} responded {r['status']}", time=f"{secs:.3f}")
+        suite.set("tests", str(cases)); suite.set("failures", str(failures)); suite.set("errors", str(errors))
+        tot["tests"] += cases; tot["failures"] += failures; tot["errors"] += errors; tot["time"] += secs
+    for k, v in tot.items():
+        root.set(k, f"{v:.3f}" if k == "time" else str(v))
+    ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
+
+
+def run_main(argv):
+    ap = argparse.ArgumentParser(prog="server.py run", description="Run a collection headlessly, e.g. in CI. Exits 1 when a test fails or a request can't be sent.")
+    ap.add_argument("collection", help="Postman v2.1 collection JSON file")
+    ap.add_argument("-e", "--env", help="environment JSON file")
+    ap.add_argument("-g", "--globals", help="globals JSON file")
+    ap.add_argument("--var", action="append", default=[], metavar="KEY=VALUE", help="set an environment variable (repeatable), e.g. --var token=$API_TOKEN")
+    ap.add_argument("--folder", help="run only the folder with this name")
+    ap.add_argument("-n", "--iterations", type=int, default=1)
+    ap.add_argument("--delay", type=int, default=0, metavar="MS", help="pause between requests")
+    ap.add_argument("--bail", action="store_true", help="stop at the first failure")
+    ap.add_argument("--junit", metavar="FILE", help="write a JUnit XML report (for CI test tabs)")
+    ap.add_argument("--json", metavar="FILE", help="write a JSON report")
+    ap.add_argument("--browser", help="path to Chrome, Chromium or Edge (default: found automatically, or $APIMAN_BROWSER)")
+    ap.add_argument("--ca-file", help="PEM file with your company's root CA, for internal HTTPS APIs")
+    ap.add_argument("--timeout", type=float, default=1800, metavar="SECONDS", help="give up after this long (default 1800)")
+    args = ap.parse_args(argv)
+
+    global CA_FILE, SERVER_PORT, RUN_JOB, RUN_EVENTS
+    if args.ca_file:
+        CA_FILE = str(Path(args.ca_file).expanduser().resolve())
+        ssl.create_default_context().load_verify_locations(cafile=CA_FILE)
+    browser = find_browser(args.browser)
+    if not browser:
+        raise SystemExit("error: no Chrome, Chromium or Edge found. Install one, or pass --browser /path/to/chrome (or set APIMAN_BROWSER).")
+
+    col = load_json_file(args.collection, "collection")
+    if not (isinstance(col, dict) and isinstance(col.get("info"), dict) and isinstance(col.get("item"), list)):
+        raise SystemExit("error: that file isn't a Postman v2.1 collection (export it from Postman or ApiMan as JSON).")
+    env = load_json_file(args.env, "environment") if args.env else None
+    if env is not None and not (isinstance(env, dict) and isinstance(env.get("values"), list)):
+        raise SystemExit("error: that file isn't a Postman environment.")
+    for kv in args.var:
+        if "=" not in kv:
+            raise SystemExit(f"error: --var needs KEY=VALUE, got {kv!r}")
+        k, v = kv.split("=", 1)
+        env = env or {"name": "Command line", "values": []}
+        env["values"] = [x for x in env["values"] if not (isinstance(x, dict) and x.get("key") == k)] + [{"key": k, "value": v, "enabled": True}]
+
+    tmp = tempfile.TemporaryDirectory(prefix="apiman-run-")
+    data = Path(tmp.name) / "data"
+    (data / "environments").mkdir(parents=True)
+    (data / "collection.json").write_text(json.dumps(col), encoding="utf-8")
+    if env is not None:
+        env.setdefault("name", "Environment")
+        (data / "environments" / "env.json").write_text(json.dumps(env), encoding="utf-8")
+    if args.globals:
+        g = load_json_file(args.globals, "globals")
+        g["_postman_variable_scope"] = "globals"
+        g.setdefault("name", "Globals")
+        (data / "environments" / "globals.json").write_text(json.dumps(g), encoding="utf-8")
+
+    Handler.stores = make_stores(str(data))
+    RUN_JOB = {"cid": "collection.json", "envId": "env.json" if env is not None else "", "folder": args.folder,
+               "iterations": max(1, args.iterations), "delay": max(0, args.delay), "bail": args.bail}
+    RUN_EVENTS = queue.Queue()
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    SERVER_PORT = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    cmd = [browser, "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-extensions", "--disable-sync",
+           "--disable-background-networking", "--mute-audio", f"--user-data-dir={Path(tmp.name) / 'profile'}"]
+    if sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0:
+        cmd.append("--no-sandbox")  # Chrome refuses to start as root otherwise (common in CI containers); scripts stay in ApiMan's own sandbox
+    proc = subprocess.Popen([*cmd, f"http://127.0.0.1:{SERVER_PORT}/"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+    paint = (lambda code, t: f"\033[{code}m{t}\033[0m") if color else (lambda code, t: t)
+    try:
+        "✓✗".encode(sys.stdout.encoding or "ascii")
+        OK, BAD = "✓", "✗"
+    except (UnicodeEncodeError, LookupError):
+        OK, BAD = "PASS", "FAIL"
+    name = col["info"].get("name", "Collection")
+    print(f'ApiMan: running "{name}"' + (f' with "{env.get("name")}"' if env is not None else "") + (f' (folder "{args.folder}")' if args.folder else "")
+          + (f", {args.iterations} iterations" if args.iterations > 1 else ""))
+    results, started, deadline, outcome = [], time.time(), time.time() + args.timeout, None
+    try:
+        while outcome is None:
+            try:
+                ev = RUN_EVENTS.get(timeout=0.5)
+            except queue.Empty:
+                if proc.poll() is not None:
+                    outcome = {"type": "fatal", "error": f"the browser exited unexpectedly (code {proc.returncode})."}
+                elif time.time() > deadline:
+                    outcome = {"type": "fatal", "error": f"timed out after {args.timeout:g} s."}
+                continue
+            if ev.get("type") == "result":
+                r = ev["result"]
+                r["iterations"] = args.iterations
+                results.append(r)
+                where = " / ".join([*r["path"], r["name"]])
+                status = paint("31", f"ERROR {r['error']}") if r["error"] else paint("32" if r["status"] < 400 else "33" if r["status"] < 500 else "31", f"{r['status']} {r['reason']}".strip())
+                timing = f"  {r['timeMs']} ms" if r["timeMs"] is not None else ""
+                print(f"\n{paint('1', where)}" + (f"  (iteration {r['iteration']})" if args.iterations > 1 else ""))
+                print(f"  {r['method']} {r['url']}  {status}{timing}")
+                for t in r["tests"]:
+                    if t["passed"] is False:
+                        print(f"  {paint('31', BAD)} {t['name']}" + (f"\n      {t['error']}" if t["error"] else ""))
+                    else:
+                        print(f"  {paint('32', OK) if t['passed'] else '-'} {t['name']}")
+                for w in r["warnings"] + r["logs"]:
+                    print(f"  {paint('33', '!')} {w}")
+            elif ev.get("type") in ("done", "fatal"):
+                outcome = ev
+    except KeyboardInterrupt:
+        outcome = {"type": "fatal", "error": "interrupted."}
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        srv.shutdown()
+
+    tests = [t for r in results for t in r["tests"]]
+    passed = sum(1 for t in tests if t["passed"] is True)
+    failed = sum(1 for t in tests if t["passed"] is False)
+    errors = sum(1 for r in results if r["error"])
+    elapsed = time.time() - started
+    if args.json:
+        Path(args.json).write_text(json.dumps({"collection": name, "environment": env.get("name") if env is not None else None,
+                                               "passed": passed, "failed": failed, "requestErrors": errors, "seconds": round(elapsed, 3),
+                                               "results": results, **({"error": outcome["error"]} if outcome["type"] == "fatal" else {})}, indent=2), encoding="utf-8")
+    if args.junit:
+        junit_report(results, name, args.junit)
+    print()
+    if outcome["type"] == "fatal":
+        print(paint("31", f"Run failed: {outcome['error']}"))
+    summary = f"{len(results)} request{'s' * (len(results) != 1)}, {errors} not sent · tests: {passed} passed, {failed} failed · {elapsed:.1f} s"
+    print(paint("31" if failed or errors else "32", summary))
+    tmp.cleanup()
+    return 2 if outcome["type"] == "fatal" else 1 if failed or errors else 0
+
+
 def main():
-    ap = argparse.ArgumentParser(description="ApiMan local server")
+    if len(sys.argv) > 1 and sys.argv[1] == "run":
+        sys.exit(run_main(sys.argv[2:]))
+    ap = argparse.ArgumentParser(description="ApiMan local server (or: server.py run COLLECTION.json --help)")
     ap.add_argument("--port", type=int, default=5577)
     ap.add_argument("--data", default=str(HERE / "collections"),
                     help="folder holding collection .json files (environments go in its environments/ subfolder)")
