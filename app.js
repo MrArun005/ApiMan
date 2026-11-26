@@ -2309,7 +2309,7 @@ function renderBody() {
 
 const CM_MODES = {
   json: { name: 'javascript', json: true }, javascript: 'javascript', xml: 'xml', html: 'htmlmixed', text: null,
-  graphql: 'javascript', shell: 'shell', python: 'python', java: 'text/x-java',
+  graphql: 'javascript', shell: 'shell', python: 'python', java: 'text/x-java', go: 'text/x-go', powershell: 'shell',
 };
 /**
  * A code editor with line numbers, syntax colours, bracket matching, search (Cmd/Ctrl+F) and, when `fold`
@@ -3305,6 +3305,7 @@ function codeWire(mask) {
 
 const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 const dq = (s) => JSON.stringify(String(s));
+const psq = (s) => `'${String(s).replace(/'/g, "''")}'`; // PowerShell single-quoted string
 const GENERATORS = {
   curl: { label: 'cURL', gen(w) {
     const lines = [`curl -X ${sq(w.method)} ${sq(w.url)}`];
@@ -3331,19 +3332,47 @@ const GENERATORS = {
     lines.push('});', 'console.log(response.status, await response.text());');
     return lines.join('\n');
   } },
+  httpie: { label: 'HTTPie', gen(w) {
+    const lines = [`http ${w.body.kind === 'text' ? `--raw ${sq(w.body.text)} ` : ''}${sq(w.method)} ${sq(w.url)}`];
+    for (const [k, v] of w.headers) lines.push(`  ${sq(`${k}:${v}`)}`);
+    if (w.body.kind === 'formdata') for (const f of w.body.fields) lines.push(f.file ? `  ${sq(`${f.key}@${f.file.name}`)}` : `  ${sq(`${f.key}=${f.value}`)}`);
+    if (w.body.kind === 'file') lines.push(`  < ${sq(w.body.file.name)}`);
+    return lines.join(' \\\n');
+  } },
+  go: { label: 'Go net/http', gen(w) {
+    const text = w.body.kind === 'text';
+    return ['package main', '', 'import (', '\t"fmt"', '\t"io"', '\t"net/http"', ...(text ? ['\t"strings"'] : []), ')', '', 'func main() {',
+      `\treq, err := http.NewRequest(${dq(w.method)}, ${dq(w.url)}, ${text ? `strings.NewReader(${dq(w.body.text)})` : 'nil'})`,
+      '\tif err != nil {', '\t\tpanic(err)', '\t}',
+      ...w.headers.map(([k, v]) => `\treq.Header.Set(${dq(k)}, ${dq(v)})`),
+      ...(w.body.kind === 'formdata' || w.body.kind === 'file' ? ['\t// form-data / file bodies: build them with mime/multipart or os.Open'] : []),
+      '\tres, err := http.DefaultClient.Do(req)', '\tif err != nil {', '\t\tpanic(err)', '\t}', '\tdefer res.Body.Close()',
+      '\tbody, _ := io.ReadAll(res.Body)', '\tfmt.Println(res.Status)', '\tfmt.Println(string(body))', '}'].join('\n');
+  } },
+  powershell: { label: 'PowerShell', gen(w) {
+    const lines = [];
+    if (w.headers.length) lines.push('$headers = @{', ...w.headers.map(([k, v]) => `    ${psq(k)} = ${psq(v)}`), '}');
+    let call = `$response = Invoke-WebRequest -Uri ${psq(w.url)} -Method ${psq(w.method)}${w.headers.length ? ' -Headers $headers' : ''}`;
+    if (w.body.kind === 'text') call += ` -Body ${psq(w.body.text)}`;
+    if (w.body.kind === 'file') call += ` -InFile ${psq(w.body.file.name)}`;
+    if (w.body.kind === 'formdata') { lines.push('$form = @{', ...w.body.fields.map((f) => `    ${psq(f.key)} = ${f.file ? `Get-Item ${psq(f.file.name)}` : psq(f.value)}`), '}'); call += ' -Form $form'; }
+    lines.push(call, '$response.StatusCode', '$response.Content');
+    return lines.join('\n');
+  } },
   python: { label: 'Python requests', gen(w) {
     const lines = ['import requests', '', `url = ${dq(w.url)}`];
     const headers = w.body.kind === 'formdata' ? w.headers.filter(([k]) => k.toLowerCase() !== 'content-type') : w.headers;
-    lines.push('headers = {', ...headers.map(([k, v]) => `    ${dq(k)}: ${dq(v)},`), '}');
-    let args = 'headers=headers';
-    if (w.body.kind === 'text') { lines.push(`payload = ${dq(w.body.text)}`); args += ', data=payload.encode("utf-8")'; }
+    if (headers.length) lines.push('headers = {', ...headers.map(([k, v]) => `    ${dq(k)}: ${dq(v)},`), '}');
+    let args = headers.length ? 'headers=headers' : '';
+    const add = (a) => { args = args ? `${args}, ${a}` : a; };
+    if (w.body.kind === 'text') { lines.push(`payload = ${dq(w.body.text)}`); add('data=payload.encode("utf-8")'); }
     if (w.body.kind === 'formdata') {
       lines.push('data = {', ...w.body.fields.filter((f) => !f.file).map((f) => `    ${dq(f.key)}: ${dq(f.value)},`), '}');
       lines.push('files = {', ...w.body.fields.filter((f) => f.file).map((f) => `    ${dq(f.key)}: open(${dq(f.file.name)}, "rb"),`), '}');
-      args += ', data=data, files=files';
+      add('data=data, files=files');
     }
-    if (w.body.kind === 'file') { lines.push(`with open(${dq(w.body.file.name)}, "rb") as f:`, '    payload = f.read()'); args += ', data=payload'; }
-    lines.push('', `response = requests.request(${dq(w.method)}, url, ${args}, timeout=${Number(state.settings.timeout) || 60})`, 'print(response.status_code)', 'print(response.text)');
+    if (w.body.kind === 'file') { lines.push(`with open(${dq(w.body.file.name)}, "rb") as f:`, '    payload = f.read()'); add('data=payload'); }
+    lines.push('', `response = requests.request(${dq(w.method)}, url, ${args ? `${args}, ` : ''}timeout=${Number(state.settings.timeout) || 60})`, 'print(response.status_code)', 'print(response.text)');
     return lines.join('\n');
   } },
   java: { label: 'Java HttpClient', gen(w) {
@@ -3371,7 +3400,7 @@ function openCode() {
   if (!t) return;
   let lang = ls.get('apiman:codeLang', 'curl');
   const mask = h('input', { type: 'checkbox', checked: true });
-  const LANG_MODE = { curl: 'shell', fetch: 'javascript', python: 'python', java: 'java' };
+  const LANG_MODE = { curl: 'shell', httpie: 'shell', fetch: 'javascript', python: 'python', java: 'java', go: 'go', powershell: 'powershell' };
   const viewer = codeEditor({ readOnly: true, label: 'Generated code', cls: 'codegen' });
   const pre = { set textContent(v) { if (viewer.cm) { viewer.cm.setValue(v); viewer.cm.setOption('mode', CM_MODES[LANG_MODE[lang]] ?? null); } else viewer.querySelector('pre').textContent = v; },
                 get textContent() { return viewer.cm ? viewer.cm.getValue() : viewer.querySelector('pre').textContent; } };
@@ -4029,10 +4058,9 @@ async function start() {
       const edge = tools.getBoundingClientRect().right - parseFloat(getComputedStyle(tools).paddingRight) + 0.5;
       return tools.scrollWidth > tools.clientWidth + 1 || [...tools.querySelectorAll(':scope > *, .tool-group > *')].some((el) => el.getClientRects().length && el.getBoundingClientRect().right > edge);
     };
-    for (const step of ['short', 'icons']) if (over()) tools.classList.add(step);
-    if (over()) { tools.classList.add('squeeze'); fitTabs(view); tools.classList.remove('squeeze'); } // hide extra views, then keep the rest whole
+    for (const step of ['short', 'icons', 'no-size', 'no-time']) if (over()) tools.classList.add(step);
+    if (over()) { tools.classList.add('squeeze'); fitTabs(view); tools.classList.remove('squeeze'); } // last: hide extra views, keep the rest whole
     else fitTabs(view);
-    for (const step of ['no-size', 'no-time']) if (over()) tools.classList.add(step);
     if (over()) tools.classList.add('wrap');
     fitTabs(seg);
   };
@@ -4044,6 +4072,7 @@ async function start() {
   });
   fitTabs.resp = fitResp;
   new ResizeObserver(fitResp).observe(respRow);
+  { let w = 0; new ResizeObserver(() => { const nw = $('#respTools').clientWidth; if (nw !== w) { w = nw; requestAnimationFrame(fitResp); } }).observe($('#respTools')); }
   new MutationObserver(fitResp).observe($('#respStatus'), { childList: true, subtree: true, characterData: true });
   // Tab rows that don't fit fade at whichever edge has more tabs (and scroll), so no tab is ever silently cut off.
   const watchOverflow = (el) => {

@@ -54,7 +54,7 @@
   --select: color-mix(in srgb, var(--focus) 11%, var(--panel));
   --logo: #193a5c;
 
-  --get: #1b7044; --post: #8f5500; --put: #2862c9; --patch: #7247c4; --delete: #c2352b; --other: #5b6875;
+  --get: #146138; --post: #8f5500; --put: #2862c9; --patch: #7247c4; --delete: #c2352b; --other: #5b6875;
   --ok: #1b7044; --redirect: #756000; --warn: #a04c00; --err: #c2352b;
   --j-key: #2753a5; --j-str: #1f7a4a; --j-num: #a24a00; --j-lit: #7247c4;
   --on-cable: #ffffff;
@@ -886,3 +886,10 @@ h1.wordmark { font: inherit; margin: 0; }
 @media (max-width: 600px) { .titlebar .name-input { field-sizing: content; flex: 0 1 auto; max-width: 70%; } } /* the unsaved dot stays by the name */
 .tabstrip { background: var(--seg-track); } /* the active document tab stands out in light theme too */
 .tabstrip .newtab { background: var(--seg-track); }
+/* round 19 */
+#respTools { padding-top: calc(var(--s2) * var(--d)); padding-bottom: calc(var(--s2) * var(--d)); min-height: calc(var(--h-sm) + 2 * var(--s2) * var(--d) + 6px); } /* scales with density */
+.pane { padding-top: calc(var(--s4) * var(--d)); padding-bottom: calc(var(--s4) * var(--d)); }
+.req-col .pane { padding-top: calc(var(--s2) * var(--d)); }
+.pane-tools > .hint.one-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1 1 0; align-self: center; }
+.toast { bottom: calc(var(--s4) + 56px); } /* above the sidebar footer */
+@media (max-width: 600px) { .toast { bottom: var(--s4); } }
