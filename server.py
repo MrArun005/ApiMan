@@ -71,7 +71,11 @@ STATIC = {"/": ("index.html", "text/html"), "/index.html": ("index.html", "text/
           "/fonts/Geist-Variable.woff2": ("fonts/Geist-Variable.woff2", "font/woff2"),
           "/fonts/GeistMono-Variable.woff2": ("fonts/GeistMono-Variable.woff2", "font/woff2"),
           "/vendor/codemirror.js": ("vendor/codemirror.js", "text/javascript"),
-          "/vendor/codemirror.css": ("vendor/codemirror.css", "text/css")}
+          "/vendor/codemirror.css": ("vendor/codemirror.css", "text/css"),
+          "/oauth-callback.html": ("oauth-callback.html", "text/html")}
+# The OAuth 2.0 provider redirects the sign-in popup here from its own site, so this one page accepts cross-site
+# navigations. It holds no data and no session token; it only hands the code to the ApiMan tab that asked for it.
+OAUTH_CALLBACK = "/oauth-callback.html"
 
 
 def validate_collection(data):
@@ -338,6 +342,8 @@ class Handler(BaseHTTPRequestHandler):
         hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
         if self.headers.get("Host") not in hosts:  # blocks DNS-rebinding attacks
             return False
+        if self.command == "GET" and urllib.parse.urlparse(self.path).path == OAUTH_CALLBACK:
+            return True  # a provider's redirect arrives as a cross-site navigation
         origin = self.headers.get("Origin")
         # Blocks other websites in your browser from using this as a proxy into your network.
         if not (origin is None or origin in {f"http://{h}" for h in hosts}):

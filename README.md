@@ -23,7 +23,7 @@ You only need Python 3. There's nothing to install.
 | **Requests** | All methods, a Params table kept in sync with the URL, Postman path variables (`/users/:id`), headers, and multiple tabs with unsaved work restored after a reload |
 | **Editors** | Code editors with line numbers, syntax colours, bracket matching, search (<kbd>Cmd/Ctrl+F</kbd>) and collapsible JSON/XML, for bodies, scripts, responses and generated code (CodeMirror, bundled) |
 | **Bodies** | JSON / text / XML / HTML raw, form data with file uploads, URL-encoded, binary file, GraphQL |
-| **Auth** | Bearer token, Basic, API key (header or query), inherited from folder or collection, or none |
+| **Auth** | Bearer token, Basic, API key (header or query), **OAuth 2.0** (authorization code with PKCE, client credentials, password), inherited from folder or collection, or none. OAuth tokens are fetched when you send and refreshed automatically when they expire, no "Get token" click needed (authorization code opens a sign-in window once). Register `http://127.0.0.1:5577/oauth-callback.html` (or your site's `oauth-callback.html`) as the redirect URI |
 | **Variables** | Environments, collection variables, globals and dynamic values (`{{$guid}}`, `{{$timestamp}}`, …), with a live "Resolves to" preview under the URL |
 | **Scripts** | Pre-request and test scripts with Postman's `pm.*` commands (`pm.test`, `pm.expect`, `pm.response`, `pm.environment`, …), plus snippets |
 | **Click-to-test** | Right-click any value in a JSON response (or put the cursor on it and press the menu key or <kbd>Shift+F10</kbd>) to add a test without writing code: *equals this value*, *exists*, *is a string/number/list…*, *is not empty*, or *save it to a variable* for the next request (e.g. a login token). ApiMan writes the `pm.test` into the request's Tests script, where you can edit it |
@@ -43,7 +43,8 @@ You only need Python 3. There's nothing to install.
 - **Scripts can't quietly send your request elsewhere.** If a pre-request script changes which server a request goes to, ApiMan asks before sending it there with your auth. In the runner, where there's no one to ask, it blocks the request. If a script changes or deletes variables in a way that would send any saved request to a different server, you're asked before the change is saved (the check resolves every request's URL, so variable names don't matter). Every variable a script changes is listed in the Console.
 - **Imported methods are validated.** HTTP methods from imported files are checked, and generated shell code quotes every value.
 - **Credentials never follow a redirect to another site.** When a redirect changes the scheme, host or port, only harmless headers (Accept, Accept-Language, User-Agent, Content-Type) are kept, and the response tells you which ones were removed. HTTPS is never downgraded to HTTP.
-- **Only ApiMan can use the local server.** It listens on `127.0.0.1` only, and it rejects requests from other websites (Origin check) and DNS-rebinding attempts (Host check). It serves only its own three files.
+- **Only ApiMan can use the local server.** It listens on `127.0.0.1` only, and it rejects requests from other websites (Origin check) and DNS-rebinding attempts (Host check). It serves only its own files. The one page that accepts a link from another site is `oauth-callback.html`, where an OAuth provider sends you back after sign-in; it holds no data or session token and only passes the sign-in code to your ApiMan tab.
+- **OAuth tokens stay out of your files.** Access and refresh tokens live only in the browser tab's session, never in collection files or exports (Postman saves them into the collection). OAuth settings are resolved from your saved variables, so a script can't point the token request, and your client secret, at another server. Token URLs must use HTTPS unless they're on this computer.
 - **Secrets stay hidden on screen.** Mark environment or collection variables as Secret to mask them. Generated code hides tokens by default.
 - **You're warned about plain HTTP.** If credentials go over `http://` to a non-local host, the response says so.
 - **Response previews are inert.** HTML previews render with scripts and network access disabled.
@@ -51,6 +52,6 @@ You only need Python 3. There's nothing to install.
 
 ## Not included (yet)
 
-Cloud and team sync, mock servers, monitors, WebSocket and gRPC, the OAuth 2.0 authorization flow, and npm libraries inside scripts (`require`).
+Cloud and team sync, mock servers, monitors, WebSocket and gRPC, OAuth 2.0 implicit and device-code grants, and npm libraries inside scripts (`require`).
 
 Fonts: Geist and Geist Mono (SIL Open Font License, `fonts/OFL.txt`). Editor: CodeMirror 5 (MIT, `vendor/CODEMIRROR-LICENSE`). Both are bundled, so ApiMan never loads anything from a CDN.

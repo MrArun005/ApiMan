@@ -247,6 +247,14 @@ class ServerTest(unittest.TestCase):
         status, _ = self.call("GET", "/api/collections", headers={"Host": "attacker.example:5577"})
         self.assertEqual(status, 403)
 
+    def test_only_the_oauth_callback_accepts_cross_site_navigation(self):
+        nav = {"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate", "Origin": "https://login.example"}
+        status, page = self.call("GET", "/oauth-callback.html?code=x&state=y", headers=nav)
+        self.assertEqual(status, 200)
+        self.assertNotIn(server.SESSION_TOKEN.encode(), page)  # the callback never carries the session token
+        self.assertEqual(self.call("GET", "/?code=x&state=y", headers=nav)[0], 403)  # the app itself stays same-site only
+        self.assertEqual(self.call("GET", "/oauth-callback.html", headers={"Host": "attacker.example:5577"})[0], 403)
+
     def test_only_whitelisted_static_files_are_served(self):
         self.assertEqual(self.call("GET", "/server.py")[0], 404)
         self.assertEqual(self.call("GET", "/../server.py")[0], 404)

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>ApiMan sign-in</title>
+<style>body { font: 15px/1.5 system-ui, sans-serif; max-width: 26rem; margin: 18vh auto; padding: 0 16px; text-align: center; } p { color: GrayText; }</style>
+</head>
+<body>
+<h1 id="t">Signing in…</h1>
+<p id="m">You can close this window.</p>
+<script>
+// OAuth 2.0 redirect target. It holds no data and no session token: it only passes the code to the ApiMan tab
+// that started this sign-in (same origin, matching state) and closes. ApiMan exchanges the code itself.
+(() => {
+  const p = new URLSearchParams(location.search);
+  const state = p.get('state');
+  history.replaceState(null, '', location.pathname); // the code never stays in the address bar or history
+  let pending = {};
+  try { pending = JSON.parse(localStorage.getItem('apiman:oauthPending') || '{}'); } catch (e) { /* storage blocked */ }
+  const t = document.getElementById('t'), m = document.getElementById('m');
+  if (!state || !pending[state] || !(p.has('code') || p.has('error'))) {
+    t.textContent = 'Nothing to do here';
+    m.textContent = 'This page finishes sign-ins that ApiMan starts. Start again from the Auth tab.';
+    return;
+  }
+  const msg = { state, code: p.get('code'), error: p.get('error'), errorDescription: p.get('error_description') };
+  try { new BroadcastChannel('apiman-oauth').postMessage(msg); } catch (e) { /* old browser: opener only */ }
+  try { if (window.opener) window.opener.postMessage({ apimanOAuth: msg }, location.origin); } catch (e) { /* severed by the provider */ }
+  t.textContent = msg.error ? 'Sign-in failed' : 'Signed in';
+  m.textContent = msg.error ? (msg.errorDescription || msg.error) : 'You can close this window and go back to ApiMan.';
+  setTimeout(() => window.close(), 400);
+})();
+</script>
+</body>
+</html>

@@ -445,6 +445,12 @@ function authIn(a) {
     case 'bearer': return { type: 'bearer', token: get('token') };
     case 'basic': return { type: 'basic', username: get('username'), password: get('password') };
     case 'apikey': return { type: 'apikey', key: get('key'), value: get('value'), in: get('in') === 'query' ? 'query' : 'header' };
+    case 'oauth2': {
+      const g = get('grant_type');
+      return { type: 'oauth2', grant: g === 'client_credentials' ? 'client_credentials' : g === 'password_credentials' ? 'password' : 'authorization_code', pkce: g !== 'authorization_code',
+        authUrl: get('authUrl'), tokenUrl: get('accessTokenUrl'), clientId: get('clientId'), clientSecret: get('clientSecret'), scope: get('scope'), audience: get('audience'),
+        username: get('username'), password: get('password'), clientAuth: get('client_authentication') === 'body' ? 'body' : 'header', headerPrefix: get('headerPrefix') || 'Bearer', raw: a };
+    }
     default: return { type: 'unsupported', raw: a };
   }
 }
@@ -456,6 +462,14 @@ function authOut(m) {
     case 'bearer': return { type: 'bearer', bearer: pairs({ token: m.token }) };
     case 'basic': return { type: 'basic', basic: pairs({ username: m.username, password: m.password }) };
     case 'apikey': return { type: 'apikey', apikey: pairs({ key: m.key, value: m.value, in: m.in }) };
+    case 'oauth2': { // Postman's layout; keys ApiMan doesn't edit (redirect_uri, tokenName…) are kept
+      const grant_type = m.grant === 'client_credentials' ? 'client_credentials' : m.grant === 'password' ? 'password_credentials' : m.pkce === false ? 'authorization_code' : 'authorization_code_with_pkce';
+      const mine = { grant_type, authUrl: m.authUrl || '', accessTokenUrl: m.tokenUrl || '', clientId: m.clientId || '', clientSecret: m.clientSecret || '', scope: m.scope || '',
+        ...(m.audience ? { audience: m.audience } : {}), ...(m.grant === 'password' ? { username: m.username || '', password: m.password || '' } : {}),
+        client_authentication: m.clientAuth === 'body' ? 'body' : 'header', headerPrefix: m.headerPrefix ?? 'Bearer', addTokenTo: 'header' };
+      const keep = (m.raw && Array.isArray(m.raw.oauth2) ? m.raw.oauth2 : []).filter((e) => e && !Object.hasOwn(mine, e.key) && !['audience', 'username', 'password'].includes(e.key));
+      return { type: 'oauth2', oauth2: [...pairs(mine), ...keep] };
+    }
     default: return m.raw;
   }
 }
@@ -1018,6 +1032,10 @@ function buildWire(ed, req, vars, authInfo) {
     headers.push(['Authorization', 'Basic ' + utf8b64(`${r(auth.username)}:${r(auth.password)}`)]);
     checks.push(auth.username, auth.password);
   }
+  if (auth.type === 'oauth2' && auth._token && !has('authorization')) {
+    const prefix = String(auth.headerPrefix ?? 'Bearer').trim();
+    headers.push(['Authorization', (prefix ? prefix + ' ' : '') + auth._token.accessToken]);
+  }
   if (auth.type === 'apikey' && auth.key) {
     if (auth.in === 'query') {
       try { const u = new URL(url); u.searchParams.append(r(auth.key), r(auth.value)); url = u.toString(); } catch { /* reported below */ }
@@ -1250,7 +1268,12 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
   if (signal && signal.aborted) return { error: 'Request cancelled.', logs, tests, warnings };
 
   const vars = merged(scopes);
-  const authInfo = effectiveAuth(ed, cid, itemId);
+  let authInfo = effectiveAuth(ed, cid, itemId);
+  if (authInfo.auth.type === 'oauth2') {
+    // resolved with the saved variables (trusted), never script-set ones: a script can't send the client secret elsewhere
+    try { authInfo = { ...authInfo, auth: { ...authInfo.auth, _token: await oauthToken(authInfo.auth, trusted, { interactive: !!ask }) } }; }
+    catch (e) { return { error: `OAuth 2.0: ${e.message}`, logs, tests, warnings }; }
+  }
   const built = buildWire(ed, req, vars, authInfo);
   if (built.error) return { error: built.error, logs, tests, warnings };
   const wire = built.wire;
@@ -1313,6 +1336,192 @@ async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true,
     } catch (e) { logs.push({ level: 'error', text: `Couldn't save variable changes: ${e.message}`, src: 'ApiMan' }); }
   }
   return { res, wire, tests, logs, warnings, error: res.error || '', scopes };
+}
+
+// =====================================================================================================
+// OAuth 2.0: authorization code (+PKCE), client credentials, password. Tokens are fetched and refreshed
+// automatically on Send, live only in this browser tab's session, and are never written to collection files.
+// =====================================================================================================
+const OAUTH_GRANTS = [['authorization_code', 'Authorization code'], ['client_credentials', 'Client credentials'], ['password', 'Password (legacy)']];
+const oauthRedirectUri = () => new URL('oauth-callback.html', location.origin + location.pathname).href; // see oauth-callback.html
+const b64url = (bytes) => bufToB64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const randomB64url = (n = 32) => b64url(crypto.getRandomValues(new Uint8Array(n)));
+
+function oauthResolved(auth, vars) {
+  const r = (s) => resolve(s ?? '', vars).trim();
+  return {
+    grant: OAUTH_GRANTS.some(([g]) => g === auth.grant) ? auth.grant : 'authorization_code',
+    authUrl: r(auth.authUrl), tokenUrl: r(auth.tokenUrl), clientId: r(auth.clientId), clientSecret: r(auth.clientSecret), scope: r(auth.scope),
+    audience: r(auth.audience), username: r(auth.username), password: resolve(auth.password ?? '', vars),
+    clientAuth: auth.clientAuth === 'body' ? 'body' : 'header', pkce: auth.pkce !== false, headerPrefix: (auth.headerPrefix ?? 'Bearer').trim(),
+  };
+}
+async function oauthKey(c) {
+  const id = JSON.stringify([c.grant, c.tokenUrl, c.clientId, c.scope, c.audience, c.grant === 'password' ? c.username : '']);
+  return 'apiman:oauth:' + b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(id)))).slice(0, 24);
+}
+const oauthMem = new Map();
+function oauthLoad(key) {
+  if (oauthMem.has(key)) return oauthMem.get(key);
+  try { const v = JSON.parse(sessionStorage.getItem(key) || 'null'); if (v) oauthMem.set(key, v); return v; } catch { return null; }
+}
+function oauthStore(key, tok) {
+  if (tok) oauthMem.set(key, tok); else oauthMem.delete(key);
+  try { if (tok) sessionStorage.setItem(key, JSON.stringify(tok)); else sessionStorage.removeItem(key); } catch { /* memory only */ }
+  window.dispatchEvent(new Event('apiman:oauth')); // open Auth forms refresh their token status
+}
+const oauthFresh = (tok) => !!tok && !!tok.accessToken && (!tok.expiresAt || tok.expiresAt - Date.now() > 30_000);
+
+async function oauthTokenRequest(c, params) {
+  const headers = [['Content-Type', 'application/x-www-form-urlencoded'], ['Accept', 'application/json']];
+  const form = new URLSearchParams(params);
+  if (c.clientAuth === 'header' && c.clientSecret) headers.push(['Authorization', 'Basic ' + utf8b64(`${encodeURIComponent(c.clientId)}:${encodeURIComponent(c.clientSecret)}`)]);
+  else { form.set('client_id', c.clientId); if (c.clientSecret) form.set('client_secret', c.clientSecret); }
+  if (c.audience) form.set('audience', c.audience);
+  let target;
+  try { target = new URL(c.tokenUrl); } catch { throw new Error('Set a valid Token URL in the OAuth 2.0 settings.'); }
+  if (target.protocol === 'http:' && !isLocalHost(target.hostname)) throw new Error(`The token URL uses plain HTTP (${target.origin}); OAuth credentials must go over https://.`);
+  const res = await backend.send({ method: 'POST', url: target.toString(), headers, body: { kind: 'text', text: form.toString() } });
+  if (res.error) throw new Error(`Token request failed: ${res.error}`);
+  let data = {};
+  try { data = JSON.parse(res.body || '{}'); } catch { data = Object.fromEntries(new URLSearchParams(res.body || '')); } // some providers answer form-encoded
+  if (res.status >= 400 || data.error || !data.access_token) {
+    const why = data.error ? `${data.error}${data.error_description ? `: ${data.error_description}` : ''}` : `HTTP ${res.status}${res.body ? ` ${String(res.body).slice(0, 200)}` : ''}`;
+    throw new Error(`The token endpoint refused: ${why}`);
+  }
+  const expiresIn = Number(data.expires_in);
+  return { accessToken: String(data.access_token), tokenType: String(data.token_type || 'Bearer'), refreshToken: data.refresh_token ? String(data.refresh_token) : '',
+    scope: data.scope ? String(data.scope) : c.scope, expiresAt: Number.isFinite(expiresIn) && expiresIn > 0 ? Date.now() + expiresIn * 1000 : 0, obtainedAt: Date.now() };
+}
+
+/** Opens the provider's sign-in page in a popup and resolves with the authorization code. */
+async function oauthAuthorize(c) {
+  let url;
+  try { url = new URL(c.authUrl); } catch { throw new Error('Set a valid Auth URL in the OAuth 2.0 settings.'); }
+  const st = randomB64url(16);
+  const verifier = c.pkce ? randomB64url(48) : '';
+  url.searchParams.set('response_type', 'code');
+  url.searchParams.set('client_id', c.clientId);
+  url.searchParams.set('redirect_uri', oauthRedirectUri());
+  if (c.scope) url.searchParams.set('scope', c.scope);
+  if (c.audience) url.searchParams.set('audience', c.audience);
+  url.searchParams.set('state', st);
+  if (verifier) {
+    url.searchParams.set('code_challenge', b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)))));
+    url.searchParams.set('code_challenge_method', 'S256');
+  }
+  const pending = ls.get('apiman:oauthPending', {});
+  for (const [k, v] of Object.entries(pending)) if (Date.now() - v > 15 * 60_000) delete pending[k];
+  pending[st] = Date.now();
+  ls.set('apiman:oauthPending', pending);
+  const popup = window.open(url.toString(), 'apiman-oauth', 'popup,width=520,height=700');
+  if (!popup) throw new Error('The sign-in window was blocked. Allow pop-ups for ApiMan and try again.');
+  try {
+    const msg = await new Promise((resolveMsg, reject) => {
+      let bc = null;
+      const done = (m) => { if (!m || m.state !== st) return; cleanup(); resolveMsg(m); };
+      const onWin = (e) => { if (e.origin === location.origin && e.data && e.data.apimanOAuth) done(e.data.apimanOAuth); };
+      const cleanup = () => {
+        window.removeEventListener('message', onWin); if (bc) bc.close(); clearTimeout(timer);
+        if ($('#dlg').dataset.oauth === st) { delete $('#dlg').dataset.oauth; if ($('#dlg').open) closeDialog(); }
+      };
+      try { bc = new BroadcastChannel('apiman-oauth'); bc.onmessage = (e) => done(e.data); } catch { /* opener message only */ }
+      window.addEventListener('message', onWin);
+      const timer = setTimeout(() => { cleanup(); reject(new Error('Sign-in timed out after 10 minutes.')); }, 10 * 60_000);
+      if ($('#dlg').open) { toast(`Finish signing in to ${url.host} in the window that opened.`); return; } // never replace a dialog with unsaved edits
+      openDialog({
+        title: 'Sign in',
+        body: [h('p', { class: 'hint' }, `Finish signing in to ${url.host} in the window that opened. This dialog closes by itself when you're done.`),
+          h('p', { class: 'hint' }, 'If the provider says the redirect URI is wrong, register this one for your client: ', h('code', null, oauthRedirectUri()))],
+        buttons: [], cancel: 'Cancel',
+        onClose: () => { cleanup(); reject(new Error('Sign-in cancelled.')); },
+      });
+      $('#dlg').dataset.oauth = st;
+    });
+    if (msg.error) throw new Error(`Sign-in failed: ${msg.error}${msg.errorDescription ? ` (${msg.errorDescription})` : ''}`);
+    return { code: msg.code, verifier };
+  } finally {
+    const p2 = ls.get('apiman:oauthPending', {}); delete p2[st]; ls.set('apiman:oauthPending', p2);
+  }
+}
+
+/**
+ * A usable access token for this auth config: the cached one, a refreshed one, or a new one.
+ * interactive=false (Runner, Diff runs) never opens a sign-in window.
+ */
+async function oauthToken(auth, vars, { interactive = true, force = false } = {}) {
+  const c = oauthResolved(auth, vars);
+  if (!c.tokenUrl) throw new Error('Set the Token URL in the OAuth 2.0 auth settings.');
+  if (!c.clientId) throw new Error('Set the Client ID in the OAuth 2.0 auth settings.');
+  const key = await oauthKey(c);
+  const have = oauthLoad(key);
+  if (!force && oauthFresh(have)) return have;
+  let tok = null;
+  if (!force && have && have.refreshToken) {
+    try { tok = await oauthTokenRequest(c, { grant_type: 'refresh_token', refresh_token: have.refreshToken, ...(c.scope ? { scope: c.scope } : {}) }); } catch { tok = null; }
+    if (tok && !tok.refreshToken) tok.refreshToken = have.refreshToken; // providers may keep the old one valid
+  }
+  if (!tok) {
+    if (c.grant === 'client_credentials') tok = await oauthTokenRequest(c, { grant_type: 'client_credentials', ...(c.scope ? { scope: c.scope } : {}) });
+    else if (c.grant === 'password') tok = await oauthTokenRequest(c, { grant_type: 'password', username: c.username, password: c.password, ...(c.scope ? { scope: c.scope } : {}) });
+    else {
+      if (!interactive) throw new Error(have ? 'The OAuth 2.0 token expired and couldn\'t be refreshed. Open the request and click "Get new token".' : 'No OAuth 2.0 token yet. Open the request\'s Auth tab and click "Get new token".');
+      const { code, verifier } = await oauthAuthorize(c);
+      tok = await oauthTokenRequest(c, { grant_type: 'authorization_code', code, redirect_uri: oauthRedirectUri(), ...(verifier ? { code_verifier: verifier } : {}) });
+    }
+  }
+  oauthStore(key, tok);
+  return tok;
+}
+async function oauthClear(auth, vars) { oauthStore(await oauthKey(oauthResolved(auth, vars)), null); }
+async function oauthPeek(auth, vars) { try { return oauthLoad(await oauthKey(oauthResolved(auth, vars))); } catch { return null; } }
+
+/** The OAuth 2.0 part of the auth form. vars() gives the variables to resolve {{…}} with. */
+function oauthFields(model, field, onChange, vars) {
+  const sel = (label, key, opts, onPick) => h('div', { class: 'field narrow' }, h('label', null, label),
+    h('select', { onchange: (e) => { model[key] = e.target.value; onChange(); if (onPick) onPick(); } },
+      ...opts.map(([v, l]) => h('option', { value: v, ...(String(model[key] ?? opts[0][0]) === v ? { selected: true } : {}) }, l))));
+  const box = h('div', { class: 'oauth' });
+  const status = h('div', { class: 'oauth-status', role: 'status', 'aria-live': 'polite' });
+  const showStatus = async () => {
+    const tok = await oauthPeek(model, vars());
+    if (!tok || !tok.accessToken) { status.replaceChildren(h('span', { class: 'hint' }, model.grant === 'authorization_code' || !model.grant ? 'No token yet. Click "Get new token" to sign in.' : 'No token yet. One is fetched automatically when you send.')); return; }
+    const left = tok.expiresAt ? Math.round((tok.expiresAt - Date.now()) / 60000) : null;
+    status.replaceChildren(h('span', { class: `pill ${oauthFresh(tok) ? 'ok' : 'warn'}` }, oauthFresh(tok) ? 'Token ready' : 'Expired'),
+      h('span', { class: 'hint' }, left == null ? ' No expiry given.' : left > 0 ? ` Expires in ${left < 120 ? `${left} min` : `${Math.round(left / 60)} h`}.` : tok.refreshToken ? ' Refreshes automatically on the next send.' : ' Get a new one.'),
+      h('code', { class: 'oauth-tok', title: 'Start of the access token' }, `${tok.accessToken.slice(0, 12)}…`));
+  };
+  const onToken = () => { if (box.isConnected) showStatus(); else window.removeEventListener('apiman:oauth', onToken); };
+  window.addEventListener('apiman:oauth', onToken);
+  const draw = () => {
+    const grant = model.grant || 'authorization_code';
+    const kids = [sel('Grant type', 'grant', OAUTH_GRANTS, draw)];
+    if (grant === 'authorization_code') kids.push(field('Auth URL', 'authUrl', { placeholder: 'https://login.example.com/oauth2/authorize' }));
+    kids.push(field('Token URL', 'tokenUrl', { placeholder: 'https://login.example.com/oauth2/token' }));
+    kids.push(h('div', { class: 'grid-2' }, field('Client ID', 'clientId', { placeholder: '{{clientId}}' }), field('Client secret', 'clientSecret', { secret: true, placeholder: grant === 'authorization_code' ? 'Optional with PKCE' : '{{clientSecret}}' })));
+    if (grant === 'password') kids.push(h('div', { class: 'grid-2' }, field('Username', 'username'), field('Password', 'password', { secret: true })));
+    kids.push(h('div', { class: 'grid-2' }, field('Scope', 'scope', { placeholder: 'openid profile api.read' }), field('Audience (optional)', 'audience', { placeholder: 'https://api.example.com' })));
+    kids.push(h('div', { class: 'grid-2' }, sel('Send client credentials', 'clientAuth', [['header', 'As Basic auth header'], ['body', 'In the request body']]),
+      field('Header prefix', 'headerPrefix', { placeholder: 'Bearer' })));
+    if (grant === 'authorization_code') {
+      kids.push(h('label', { class: 'check' }, h('input', { type: 'checkbox', ...(model.pkce !== false ? { checked: true } : {}), onchange: (e) => { model.pkce = e.target.checked; onChange(); } }), ' Use PKCE (recommended)'));
+      kids.push(h('div', { class: 'field' }, h('label', null, 'Callback URL to register with your provider'),
+        h('div', { class: 'secret-field' }, h('input', { value: oauthRedirectUri(), readonly: true, spellcheck: 'false' }),
+          h('button', { type: 'button', class: 'btn small', onclick: () => navigator.clipboard.writeText(oauthRedirectUri()).then(() => toast('Copied'), () => toast('Copying was blocked by the browser.')) }, 'Copy'))));
+    }
+    kids.push(h('div', { class: 'oauth-actions' }, status,
+      h('button', { type: 'button', class: 'btn small primary', onclick: async (e) => {
+        const btn = e.currentTarget; btn.disabled = true;
+        try { await oauthToken(model, vars(), { force: true }); toast('Got a new access token.'); } catch (err) { toast(err.message); } finally { btn.disabled = false; showStatus(); }
+      } }, 'Get new token'),
+      h('button', { type: 'button', class: 'btn small', onclick: async () => { await oauthClear(model, vars()); showStatus(); toast('Token cleared.'); } }, 'Clear token')));
+    kids.push(h('p', { class: 'hint' }, 'Tokens are fetched and refreshed automatically when you send. They stay in this browser tab only and are never saved into collection files. Settings use your saved variables, so scripts can\'t redirect your client secret.'));
+    box.replaceChildren(...kids);
+    linkLabels(box);
+    showStatus();
+  };
+  draw();
+  return box;
 }
 
 // =====================================================================================================
@@ -2251,7 +2460,7 @@ function renderHeaders() {
 }
 
 /** Shared auth form, used for requests, folders and collections. */
-function authForm(model, { allowInherit, inheritText, onChange }) {
+function authForm(model, { allowInherit, inheritText, onChange, vars = () => merged(scopesFor(cur() && cur().cid)) }) {
   const wrap = h('div', { class: 'auth-form' });
   const draw = () => {
     const field = (label, key, { secret, placeholder } = {}) => {
@@ -2265,14 +2474,15 @@ function authForm(model, { allowInherit, inheritText, onChange }) {
           h('button', { class: 'btn icon', type: 'button', title: 'Show / hide', 'aria-label': 'Show or hide', onclick: (e) => { reveal = !reveal; input.type = reveal ? 'text' : 'password'; e.currentTarget.replaceChildren(icon(reveal ? 'eyeOff' : 'eye')); } }, icon('eye')))
           : input);
     };
-    const types = [...(allowInherit ? [['inherit', 'Inherit from parent']] : []), ['noauth', 'No auth'], ['bearer', 'Bearer token'], ['basic', 'Basic auth'], ['apikey', 'API key']];
+    const types = [...(allowInherit ? [['inherit', 'Inherit from parent']] : []), ['noauth', 'No auth'], ['bearer', 'Bearer token'], ['basic', 'Basic auth'], ['apikey', 'API key'], ['oauth2', 'OAuth 2.0']];
     if (model.type === 'unsupported') types.push(['unsupported', `${model.raw.type} (not supported)`]);
     const sel = h('select', {
       'aria-label': 'Auth type',
       onchange: (e) => {
         const type = e.target.value;
         for (const k of Object.keys(model)) delete model[k];
-        Object.assign(model, { type }, type === 'apikey' ? { in: 'header', key: '', value: '' } : {});
+        Object.assign(model, { type }, type === 'apikey' ? { in: 'header', key: '', value: '' } : {},
+          type === 'oauth2' ? { grant: 'authorization_code', pkce: true, clientAuth: 'header', headerPrefix: 'Bearer' } : {});
         onChange();
         draw();
       },
@@ -2289,6 +2499,7 @@ function authForm(model, { allowInherit, inheritText, onChange }) {
           h('option', { value: 'header', ...(model.in !== 'query' ? { selected: true } : {}) }, 'Header'),
           h('option', { value: 'query', ...(model.in === 'query' ? { selected: true } : {}) }, 'Query parameter'))));
     }
+    if (model.type === 'oauth2') kids.push(oauthFields(model, field, onChange, vars));
     if (model.type === 'unsupported') kids.push(h('p', { class: 'note warn' }, `The "${model.raw.type}" auth from Postman isn't supported yet. It stays in the file unchanged but isn't sent. Pick another type to replace it.`));
     if (['bearer', 'basic', 'apikey'].includes(model.type)) kids.push(h('p', { class: 'hint' }, 'Tip: keep secrets in an environment as Secret variables and reference them like {{token}}.'));
     wrap.replaceChildren(...kids);
@@ -2306,7 +2517,7 @@ function renderAuth() {
     inheritText: () => {
       const { auth, from } = effectiveAuth({ auth: { type: 'inherit' } }, t.cid, t.itemId);
       if (!t.cid) return 'This request isn\'t saved in a collection yet, so there is nothing to inherit. Save it, or pick an auth type here.';
-      const label = { noauth: 'no auth', bearer: 'a Bearer token', basic: 'Basic auth', apikey: 'an API key' }[auth.type] || auth.type;
+      const label = { noauth: 'no auth', bearer: 'a Bearer token', basic: 'Basic auth', apikey: 'an API key', oauth2: 'OAuth 2.0' }[auth.type] || auth.type;
       return `Inherits ${label} from ${from}. Change it in the collection or folder settings.`;
     },
     onChange: () => { renderCounts(); markDirty(); },
@@ -3420,7 +3631,7 @@ async function editContainer(cid, folderId) {
   const varsBox = h('div');
   if (isCol) kvTable(varsBox, model.vars, { secret: true, placeholders: ['Variable', 'Value'] });
   const defs = [
-    { key: 'auth', label: 'Auth', content: authForm(model.auth, { allowInherit: !isCol, inheritText: () => 'Uses the auth of the parent folder or collection.', onChange: () => {} }) },
+    { key: 'auth', label: 'Auth', content: authForm(model.auth, { allowInherit: !isCol, inheritText: () => 'Uses the auth of the parent folder or collection.', onChange: () => {}, vars: () => merged(scopesFor(cid)) }) },
     ...(isCol ? [{ key: 'vars', label: 'Variables', content: [varsBox, h('p', { class: 'hint' }, 'Use as {{name}} anywhere in this collection. Environment values win over these when both exist.')] }] : []),
     { key: 'scripts', label: 'Scripts', content: scriptsPair(model) },
     { key: 'docs', label: 'Docs', content: h('textarea', { class: 'prose', rows: 8, value: model.docs, oninput: (e) => { model.docs = e.target.value; } }) },
@@ -4259,7 +4470,9 @@ const SECRET_HEADER = /^(authorization|proxy-authorization|cookie|x-api-key|api-
 function codeWire(mask) {
   const t = cur();
   const sc = scopesFor(t.cid);
-  const built = buildWire(t.ed, requestSnapshot(t.ed), merged(sc), effectiveAuth(t.ed, t.cid, t.itemId));
+  const ai = effectiveAuth(t.ed, t.cid, t.itemId);
+  if (ai.auth.type === 'oauth2') ai.auth = { ...ai.auth, _token: { accessToken: '<access-token>' } }; // the real one is fetched when sending
+  const built = buildWire(t.ed, requestSnapshot(t.ed), merged(sc), ai);
   if (built.error) return built;
   const w = built.wire;
   if (mask) {
