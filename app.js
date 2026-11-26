@@ -173,6 +173,7 @@ function applyAppearance(s = state.settings) {
   root.dataset.wrap = s.wrap === false ? 'off' : 'on';
   if (initResizers.autoStack) initResizers.autoStack();
   if (initResizers.refresh) initResizers.refresh();
+  if (typeof updateDock === 'function') requestAnimationFrame(updateDock); // text size changes the drawer's width
   if (!isPhone()) { $('#btnSide')?.setAttribute('aria-expanded', String(!s.sideHidden)); $('#btnSide')?.setAttribute('aria-label', s.sideHidden ? 'Show sidebar' : 'Hide sidebar'); }
 }
 
@@ -1762,7 +1763,7 @@ function hideMenu(refocus = false) {
   if (showMenu.row) { showMenu.row.classList.remove('menu-open'); showMenu.row = null; }
   if (showMenu.anchor) {
     showMenu.anchor.setAttribute('aria-expanded', 'false');
-    if (refocus && showMenu.anchor.isConnected) showMenu.anchor.focus();
+    if (refocus && showMenu.anchor.isConnected) showMenu.anchor.focus({ preventScroll: true });
     showMenu.anchor = null;
   }
 }
@@ -1969,12 +1970,12 @@ function renderTabs() {
     }),
     h('button', { class: 'newtab', title: 'New request tab', 'aria-label': 'New request tab', onclick: () => { openTab(newTab()); $('#url').focus(); } }, icon('plus')),
     h('button', { class: 'newtab alltabs', title: 'All open tabs', 'aria-label': 'All open tabs', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
-      onclick: (e) => showMenu(e.currentTarget, state.tabs.map((t, i) => ({
+      onclick: (e) => { const strip = $('#tabstrip'), keep = strip.scrollLeft; requestAnimationFrame(() => { strip.scrollLeft = keep; }); showMenu(e.currentTarget, state.tabs.map((t, i) => ({
         label: h('span', { class: 'mi-tab' }, h('span', { class: `mtag ${t.ed.method}` }, t.ed.method), h('span', { class: 'mi-name' }, t.ed.name, t.dirty ? h('span', { class: 'dirty-dot', 'aria-label': ' (unsaved)' }) : null),
           h('span', { class: 'mi-sub' }, (t.ed.url || '').replace(/^[a-z]+:\/\//i, '') || 'no URL yet')),
         current: i === state.active,
         onClick: () => { state.active = i; persistTabs(); renderAll(); requestAnimationFrame(() => $('#tabstrip .rtab.on')?.focus()); },
-      }))) }, icon('chevron')));
+      }))); } }, icon('chevron')));
   const on = strip.querySelector('.rtab.on');
   if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
@@ -2796,14 +2797,23 @@ function openDialog(opts) {
   if ($('#dlg').open) { dialogQueue.push(opts); return; }
   renderDialog(opts);
 }
+/** Settings docks beside the app only while the app keeps at least 1000px; otherwise it overlays. */
+function canDock() { return innerWidth - Math.min(400 * cssScale(), innerWidth) >= 1000; }
+function updateDock() {
+  const dlg = $('#dlg');
+  if (!dlg.open || !dlg.classList.contains('drawer')) return;
+  const docked = canDock();
+  document.documentElement.classList.toggle('drawer-open', docked); // too narrow now: the drawer overlays, the app gets its width back
+  document.documentElement.classList.toggle('drawer-over', !docked && !dlg.matches(':modal'));
+}
+window.addEventListener('resize', () => requestAnimationFrame(updateDock));
 function renderDialog({ title, body, buttons = [], wide = false, confirm = false, tall = false, drawer = false, cancel = 'Cancel', onClose, focus, onOpen }) {
   const dlg = $('#dlg');
   dlg.classList.toggle('wide', wide);
   dlg.classList.toggle('confirm', confirm);
   $('#dlgBody').classList.toggle('tall', tall); // dialogs with tabs keep one height, so nothing jumps under the cursor
   $('#dlg').classList.toggle('drawer', drawer); // docked at the side: the app shrinks beside it, so previews stay visible
-  const drawerW = Math.min(400 * cssScale(), innerWidth);
-  const docked = drawer && innerWidth - drawerW >= 1000; // the app keeps a representative width beside it
+  const docked = drawer && canDock(); // the app keeps a representative width beside it
   document.documentElement.classList.toggle('drawer-open', docked);
   dlg.classList.toggle('docked', docked);
   // Every dialog gets the same footer: [destructive/left actions]  ...  Cancel  Primary
@@ -3765,7 +3775,8 @@ function bindEditor() {
     const res = cur() && cur().out && cur().out.res;
     if (!res || res.binary) return;
     let text = res.body;
-    try { JSON.parse(text); text = prettyJson(text, Number(state.settings.tabSize) || 2); } catch { /* raw */ }
+    const shown = $('#respTools .seg-btn.on')?.dataset.view || 'pretty';
+    if (shown !== 'raw') { try { JSON.parse(text); text = prettyJson(text, Number(state.settings.tabSize) || 2); } catch { /* not JSON: exact text */ } } // Raw: exact bytes
     const btn = $('#btnCopyBody'), lbl = btn.querySelector('.lbl');
     navigator.clipboard.writeText(text).then(() => { // confirm where you clicked
       btn.classList.add('done'); if (lbl) lbl.textContent = 'Copied'; btn.setAttribute('aria-label', 'Copied');
@@ -4168,6 +4179,16 @@ async function start() {
     if ($('.resp-col .tab.on')?.dataset.tab !== 'rbody') $('#tab-rbody').click();
     openFind();
   });
+  $('#tabstrip').addEventListener('contextmenu', (e) => {
+    const tab = e.target.closest('.rtab');
+    if (!tab) return;
+    e.preventDefault();
+    const i = [...$$('#tabstrip .rtab')].indexOf(tab);
+    showMenu(tab, [
+      { label: 'Close tab', onClick: () => closeTab(i) },
+      { label: 'Close other tabs', onClick: async () => { const keep = state.tabs[i]; for (let j = state.tabs.length - 1; j >= 0; j--) if (state.tabs[j] !== keep) await closeTab(j); } },
+    ]);
+  });
   $('#sideBody').addEventListener('contextmenu', (e) => {
     const btn = e.target.closest('.row')?.querySelector('.acts button[aria-label="More actions"]');
     if (!btn) return;
@@ -4225,7 +4246,7 @@ async function start() {
   dlgEl.addEventListener('cancel', () => { closingSeq = dialogSeq; });
   dlgEl.addEventListener('submit', (e) => { if (e.submitter && e.submitter.value === 'cancel') closingSeq = dialogSeq; });
   $('#dlg').addEventListener('close', () => {
-    document.documentElement.classList.remove('drawer-open'); // the app takes the full width again
+    document.documentElement.classList.remove('drawer-open', 'drawer-over'); // the app takes the full width again
     $('#dlg').classList.remove('docked');
     requestAnimationFrame(() => initResizers.refresh && initResizers.refresh());
     requestAnimationFrame(() => requestAnimationFrame(() => fitTabs.resp && fitTabs.resp()));

@@ -902,3 +902,11 @@ dialog.drawer:not(.docked)::backdrop { background: rgb(10 14 18 / 0.35); } /* ov
   .resp-col .CodeMirror-linenumber { padding: 0 var(--s1) 0 var(--s2); }
   #respTools { padding-left: var(--s2); padding-right: var(--s2); }
 }
+/* round 21 */
+:root.drawer-over dialog.drawer.docked { box-shadow: -12px 0 32px rgb(0 0 0 / 0.35); } /* overlaying (window got narrow): lift it off the app */
+.side-body .row.hist { padding-left: var(--s2); }
+@media (forced-colors: active) { /* Windows high contrast: selection stays visible without our gradients */
+  .seg-btn.on, .tab.on, .rtab.on { outline: 2px solid Highlight; outline-offset: -2px; }
+  .reqbar:has(#url:focus) { outline: 2px solid Highlight; }
+  .resizer::after { background: CanvasText; }
+}
