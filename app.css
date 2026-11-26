@@ -532,6 +532,29 @@ img.preview { max-width: 100%; border-radius: var(--r-lg); border: 1px solid var
 .empty-state kbd { font: var(--fs-xs) var(--font-code); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; color: var(--ink-2); }
 .test-row { display: flex; gap: var(--s3); align-items: flex-start; padding: var(--s2) 0; border-bottom: 1px solid var(--line); font-size: var(--fs-sm); }
 .test-row .msg { color: var(--muted); }
+/* Diff tab */
+.diff { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; }
+.diff-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); font-size: var(--fs-sm); }
+.diff-bar label { display: flex; align-items: center; gap: var(--s2); color: var(--muted); min-width: 0; max-width: 100%; }
+.diff-bar select { min-width: 0; max-width: 100%; }
+.diff-bar .diff-ignore { flex: 1 1 200px; min-width: 0; font-family: var(--font-code); font-size: var(--fs-sm); }
+.diff-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s4); font-size: var(--fs-sm); color: var(--muted); }
+.diff-meta b { color: var(--ink); font-weight: 600; }
+.diff-meta .chg b { color: var(--warn); }
+.diff-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2) var(--s3); margin-top: var(--s2); }
+.diff-head h3 { margin: 0; font-size: var(--fs-sm); font-weight: 600; }
+.diff-head .seg { margin-left: auto; }
+.diff-table td.del { color: var(--err); }
+.diff-table td.ins { color: var(--ok); }
+.diff-table td { white-space: pre-wrap; }
+.line-diff { overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+.line-diff table { border-collapse: collapse; width: 100%; font: var(--fs-code)/1.5 var(--font-code); }
+.line-diff td { padding: 0 var(--s2); vertical-align: top; white-space: pre-wrap; word-break: break-word; }
+.line-diff td.n { width: 1%; color: var(--muted); text-align: right; user-select: none; white-space: nowrap; }
+.line-diff .sign { display: inline-block; width: 1.5ch; user-select: none; color: var(--muted); }
+.line-diff tr.del { background: color-mix(in srgb, var(--err) 12%, transparent); }
+.line-diff tr.ins { background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.line-diff tr.gap td { padding: var(--s1) var(--s2); background: color-mix(in srgb, var(--muted) 7%, transparent); }
 .console .line { font: var(--fs-code)/1.5 var(--font-code); padding: 6px 0; border-bottom: 1px solid var(--line); white-space: pre-wrap; word-break: break-word; display: flex; gap: var(--s3); }
 .console .line.error { color: var(--err); } .console .line.warn { color: var(--warn); }
 .console .src { color: var(--muted); flex: none; min-width: 120px; }

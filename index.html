@@ -166,6 +166,7 @@
             <button class="tab" role="tab" id="tab-rheaders" aria-controls="pane-rheaders" aria-selected="false" data-tab="rheaders">Headers<span class="count" id="cntRHeaders"></span></button>
             <button class="tab" role="tab" id="tab-rcookies" aria-controls="pane-rcookies" aria-selected="false" data-tab="rcookies">Cookies<span class="count" id="cntRCookies"></span></button>
             <button class="tab" role="tab" id="tab-rtests" aria-controls="pane-rtests" aria-selected="false" data-tab="rtests">Tests<span class="count" id="cntRTests"></span></button>
+            <button class="tab" role="tab" id="tab-rdiff" aria-controls="pane-rdiff" aria-selected="false" data-tab="rdiff" title="Compare with the previous response, a pinned one, or another environment">Diff<span class="count" id="cntRDiff"></span></button>
             <button class="tab" role="tab" id="tab-rconsole" aria-controls="pane-rconsole" aria-selected="false" data-tab="rconsole">Console<span class="count" id="cntRConsole"></span></button>
             </div>
             <div class="resp-meta" id="respStatus" role="status" aria-live="polite"></div>
@@ -199,6 +200,7 @@
           <div class="pane" role="tabpanel" id="pane-rheaders" aria-labelledby="tab-rheaders" data-pane="rheaders" hidden><table class="grid" id="respHeaders"></table></div>
           <div class="pane" role="tabpanel" id="pane-rcookies" aria-labelledby="tab-rcookies" data-pane="rcookies" hidden><div id="respCookies"></div></div>
           <div class="pane" role="tabpanel" id="pane-rtests" aria-labelledby="tab-rtests" data-pane="rtests" hidden><div id="respTests"></div></div>
+          <div class="pane" role="tabpanel" id="pane-rdiff" aria-labelledby="tab-rdiff" data-pane="rdiff" hidden><div id="respDiff" class="diff"></div></div>
           <div class="pane" role="tabpanel" id="pane-rconsole" aria-labelledby="tab-rconsole" data-pane="rconsole" hidden><div id="respConsole" class="console"></div></div>
         </section>
       </div>

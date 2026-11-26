@@ -188,6 +188,7 @@ const state = {
   view: 'collections',
   filter: '',
   history: ls.get('apiman:history', []),
+  diffIgnore: ls.get('apiman:diffIgnore', ''), // Diff: fields to ignore, kept across requests
 };
 const GLOBALS_ID = 'globals.json';
 
@@ -676,11 +677,11 @@ const itemMethod = (it) => String((it.request && typeof it.request === 'object' 
 const envObj = (doc) => Object.fromEntries((doc && doc.values || []).filter((v) => v && v.key && v.enabled !== false).map((v) => [v.key, String(v.value ?? '')]));
 const colObj = (col) => Object.fromEntries((col && col.variable || []).filter((v) => v && v.key && !v.disabled).map((v) => [v.key, String(v.value ?? '')]));
 
-function scopesFor(cid) {
+function scopesFor(cid, envId = state.activeEnv) {
   return {
     globals: envObj(state.envs[GLOBALS_ID]),
     collection: colObj(cid && state.cols[cid]),
-    environment: envObj(state.activeEnv && state.envs[state.activeEnv]),
+    environment: envObj(envId && state.envs[envId]),
     local: {},
   };
 }
@@ -1220,20 +1221,20 @@ async function guardVarChanges(cid, ed, before, after, ask, logs) {
  * Runs the whole pipeline for an editor model. Used by Send (ask = confirm dialog) and by the
  * collection runner (ask = null: anything that needs approval is blocked).
  */
-async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true, ask = null, runScopes = null }) {
+async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true, ask = null, runScopes = null, envId = state.activeEnv }) {
+  // envId: the environment active when the request started (variable changes go there), or the one a Diff compares with
   const logs = [], tests = [], warnings = [];
-  const envId = state.activeEnv; // variable changes go to the environment that was active when the request started
-  const before = runScopes ? JSON.parse(JSON.stringify(runScopes)) : scopesFor(cid);
+  const before = runScopes ? JSON.parse(JSON.stringify(runScopes)) : scopesFor(cid, envId);
   let scopes = JSON.parse(JSON.stringify(before));
   scopes.local = {};
   let req = requestSnapshot(ed);
   // The destination baseline always comes from the SAVED (user-approved) variables, never from values
   // scripts carried over in memory during a run.
-  const trusted = merged(scopesFor(cid));
+  const trusted = merged(scopesFor(cid, envId));
   const plannedOrigin = originOf(resolve(ed.url, trusted));
   const preScripts = scriptChain(cid, itemId, ed, 'prerequest');
   const info = { requestName: ed.name, requestId: itemId || '', iteration, eventName: 'prerequest' };
-  const envName = state.activeEnv && state.envs[state.activeEnv] ? state.envs[state.activeEnv].name : '';
+  const envName = envId && state.envs[envId] ? state.envs[envId].name : '';
 
   for (const s of preScripts) {
     const out = await runScript(s.code, { vars: scopes, request: req, response: null, info, envName });
@@ -1383,6 +1384,7 @@ function setActiveEnv(id) {
   renderEnvPicker();
   renderResolved();
   renderAuth();
+  renderDiff();
 }
 
 // =====================================================================================================
@@ -2458,7 +2460,7 @@ function renderResponse() {
   });
   $('#btnSend').textContent = t.sending ? 'Cancel' : 'Send';
   $('#btnSend').classList.toggle('busy', !!t.sending);
-  const clearCounts = () => { for (const id of ['#cntRHeaders', '#cntRCookies', '#cntRTests', '#cntRConsole']) $(id).textContent = ''; };
+  const clearCounts = () => { for (const id of ['#cntRHeaders', '#cntRCookies', '#cntRTests', '#cntRDiff', '#cntRConsole']) $(id).textContent = ''; };
   if ((t.sending && !stale) || !out) {
     status.replaceChildren(t.sending ? h('span', { class: 'sending' }, 'Sending… ', h('b', { class: 'elapsed' }, '0.0 s')) : '');
     clearCounts();
@@ -2471,6 +2473,7 @@ function renderResponse() {
       : [h('p', { class: 'hint' }, 'Send the request to see its response here.'),
         h('p', { class: 'hint' }, h('kbd', null, MOD), ' + ', h('kbd', null, 'Enter'), ' sends, ',
           h('kbd', null, MOD), ' + ', h('kbd', null, 'S'), ' saves, ', h('kbd', null, MOD), ' + ', h('kbd', null, 'F'), ' searches a response.')]));
+    renderDiff();
     return;
   }
   const res = out.res;
@@ -2531,6 +2534,7 @@ function renderResponse() {
   $('#respConsole').replaceChildren(...(out.logs && out.logs.length
     ? out.logs.map((l) => h('div', { class: `line ${l.level}` }, h('span', { class: 'src' }, l.src || ''), l.text))
     : [h('p', { class: 'hint' }, 'console.log() output from scripts appears here.')]));
+  renderDiff();
 }
 
 const REASONS = { 200: 'OK', 201: 'Created', 202: 'Accepted', 204: 'No Content', 301: 'Moved Permanently', 302: 'Found', 304: 'Not Modified',
@@ -2701,6 +2705,294 @@ function prettyJson(text, indent) {
   }
   return out;
 }
+// ---------- response diff ----------
+// Compare the latest response with the previous one, a pinned one, or the same request sent with another
+// environment (staging vs prod). JSON is compared by field, so key order and formatting never show up as changes.
+const VOLATILE_HEADERS = /^(date|age|expires|last-modified|etag|via|server-timing|set-cookie|content-length|report-to|nel|traceparent|tracestate|cf-ray|x-request-id|x-correlation-id|x-trace-id|x-amzn-requestid|x-amzn-trace-id|x-amz-cf-id|x-amz-cf-pop|x-amz-request-id|x-runtime|x-response-time|x-cache|x-cache-hits|x-served-by|x-timer|x-github-request-id|(x-)?ratelimit-(remaining|reset|used))$/i;
+const DIFF_LIMIT = 2_000_000; // characters per body
+
+/** Field-level JSON diff. Arrays of objects with a unique id/_id/uuid/key are matched by it, others by position. */
+function diffJson(a, b, ignore = () => false, limit = 1000) {
+  const changes = [];
+  let ignored = 0, truncated = false;
+  const kindOf = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);
+  const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
+  const step = (path, k) => (typeof k === 'number' ? `${path}[${k}]` : /^[A-Za-z_$][\w$-]*$/.test(k) ? (path ? `${path}.${k}` : k) : `${path}[${JSON.stringify(k)}]`);
+  const idKey = (x, y) => {
+    const objs = (arr) => arr.length && arr.every((o) => o && typeof o === 'object' && !Array.isArray(o));
+    if (!objs(x) || !objs(y)) return null;
+    for (const k of ['id', '_id', 'uuid', 'key']) {
+      const ok = (arr) => arr.every((o) => typeof o[k] === 'string' || typeof o[k] === 'number') && new Set(arr.map((o) => o[k])).size === arr.length;
+      if (ok(x) && ok(y)) return k;
+    }
+    return null;
+  };
+  const add = (c) => { if (changes.length >= limit) truncated = true; else changes.push(c); };
+  const walk = (x, y, path, key) => {
+    if (truncated) return;
+    if (path && ignore(path, key)) { if (!same(x, y)) ignored++; return; }
+    const kx = kindOf(x), ky = kindOf(y);
+    if (kx !== ky) { add({ type: 'changed', path, before: x, after: y }); return; }
+    if (kx === 'object') {
+      for (const k of Object.keys(x)) {
+        const p = step(path, k);
+        if (!Object.hasOwn(y, k)) { if (ignore(p, k)) ignored++; else add({ type: 'removed', path: p, before: x[k] }); } else walk(x[k], y[k], p, k);
+      }
+      for (const k of Object.keys(y)) if (!Object.hasOwn(x, k)) { const p = step(path, k); if (ignore(p, k)) ignored++; else add({ type: 'added', path: p, after: y[k] }); }
+      return;
+    }
+    if (kx === 'array') {
+      const id = idKey(x, y);
+      if (id) {
+        const at = (o) => `${path}[${id}=${JSON.stringify(o[id])}]`;
+        const inY = new Map(y.map((o) => [o[id], o]));
+        const inX = new Set(x.map((o) => o[id]));
+        const n0 = changes.length;
+        for (const o of x) { if (inY.has(o[id])) walk(o, inY.get(o[id]), at(o), null); else add({ type: 'removed', path: at(o), before: o }); }
+        for (const o of y) if (!inX.has(o[id])) add({ type: 'added', path: at(o), after: o });
+        if (changes.length === n0 && x.map((o) => o[id]).join('\u0000') !== y.map((o) => o[id]).join('\u0000')) add({ type: 'changed', path: path || '(root)', note: 'same items, different order' });
+        return;
+      }
+      for (let i = 0; i < Math.max(x.length, y.length); i++) {
+        if (i >= y.length) add({ type: 'removed', path: step(path, i), before: x[i] });
+        else if (i >= x.length) add({ type: 'added', path: step(path, i), after: y[i] });
+        else walk(x[i], y[i], step(path, i), null);
+      }
+      return;
+    }
+    if (x !== y) add({ type: 'changed', path, before: x, after: y });
+  };
+  walk(a, b, '', null);
+  return { changes, ignored, truncated };
+}
+
+/**
+ * "Ignore" list: a bare name (updatedAt) ignores that field anywhere; a path (data.items[*].etag, meta.*) ignores
+ * that path and everything under it. * matches within one segment, [*] any index or id.
+ */
+function diffIgnoreMatcher(spec) {
+  const tokens = String(spec || '').split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+  const names = new Set(tokens.filter((t) => /^[\w$-]+$/.test(t)));
+  const res = tokens.filter((t) => !names.has(t)).map((t) => new RegExp('^' + t.replace(/^\$\.?/, '').split('*')
+    .map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^.\\[\\]]*') + '(?=$|[.[])'));
+  return (path, key) => (key != null && names.has(String(key))) || res.some((re) => re.test(path));
+}
+
+/** Line diff (LCS after trimming the common start and end). Very large middles fall back to remove-all/add-all. */
+function lineDiff(a, b) {
+  const A = a.split('\n'), B = b.split('\n');
+  let s = 0;
+  while (s < A.length && s < B.length && A[s] === B[s]) s++;
+  let e = 0;
+  while (e < A.length - s && e < B.length - s && A[A.length - 1 - e] === B[B.length - 1 - e]) e++;
+  const a2 = A.slice(s, A.length - e), b2 = B.slice(s, B.length - e);
+  const ops = A.slice(0, s).map((l) => [' ', l]);
+  const n = a2.length, m = b2.length;
+  let coarse = false;
+  if ((n + 1) * (m + 1) > 4_000_000) {
+    coarse = true;
+    a2.forEach((l) => ops.push(['-', l]));
+    b2.forEach((l) => ops.push(['+', l]));
+  } else {
+    const w = m + 1, dp = new Uint32Array((n + 1) * w);
+    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i * w + j] = a2[i] === b2[j] ? dp[(i + 1) * w + j + 1] + 1 : Math.max(dp[(i + 1) * w + j], dp[i * w + j + 1]);
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (a2[i] === b2[j]) { ops.push([' ', a2[i]]); i++; j++; } else if (dp[(i + 1) * w + j] >= dp[i * w + j + 1]) ops.push(['-', a2[i++]]); else ops.push(['+', b2[j++]]);
+    }
+    while (i < n) ops.push(['-', a2[i++]]);
+    while (j < m) ops.push(['+', b2[j++]]);
+  }
+  A.slice(A.length - e).forEach((l) => ops.push([' ', l]));
+  return { ops, coarse };
+}
+
+/** A copy without the ignored fields (same paths as diffJson), so the Lines view hides them too. */
+function pruneIgnored(v, ignore, path = '', key = null) {
+  const step = (k) => (typeof k === 'number' ? `${path}[${k}]` : /^[A-Za-z_$][\w$-]*$/.test(k) ? (path ? `${path}.${k}` : k) : `${path}[${JSON.stringify(k)}]`);
+  if (Array.isArray(v)) {
+    const id = ['id', '_id', 'uuid', 'key'].find((k) => v.length && v.every((o) => o && typeof o === 'object' && (typeof o[k] === 'string' || typeof o[k] === 'number')));
+    return v.map((x, i) => pruneIgnored(x, ignore, id ? `${path}[${id}=${JSON.stringify(x[id])}]` : step(i), null));
+  }
+  if (v && typeof v === 'object') {
+    const o = {};
+    for (const k of Object.keys(v)) { const p = step(k); if (!ignore(p, k)) o[k] = pruneIgnored(v[k], ignore, p, k); }
+    return o;
+  }
+  return v;
+}
+const sortKeysDeep = (v) => (Array.isArray(v) ? v.map(sortKeysDeep) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeysDeep(v[k])])) : v);
+const parseJsonOrNull = (text) => { try { return { v: JSON.parse(text) }; } catch { return null; } };
+
+/** Everything the Diff tab shows, computed from two outs. */
+function compareOuts(before, after, ignoreSpec) {
+  const rb = before.res, ra = after.res;
+  const ignore = diffIgnoreMatcher(ignoreSpec);
+  const r = { status: [rb.status, ra.status], time: [rb.timeMs, ra.timeMs], size: [rb.size, ra.size], headers: [], hiddenHeaders: 0 };
+  const hmap = (res) => { const m = new Map(); for (const [k, v] of res.headers || []) { const key = String(k).toLowerCase(); m.set(key, m.has(key) ? `${m.get(key)}, ${v}` : String(v)); } return m; };
+  const hb = hmap(rb), ha = hmap(ra);
+  for (const k of new Set([...hb.keys(), ...ha.keys()])) {
+    if (hb.get(k) === ha.get(k)) continue;
+    if (VOLATILE_HEADERS.test(k) || ignore(k, k)) { r.hiddenHeaders++; continue; }
+    r.headers.push({ name: k, type: !hb.has(k) ? 'added' : !ha.has(k) ? 'removed' : 'changed', before: hb.get(k), after: ha.get(k) });
+  }
+  if (rb.binary || ra.binary) { r.body = { kind: 'binary', same: rb.bodyBase64 === ra.bodyBase64 && rb.size === ra.size }; return r; }
+  const tb = rb.body ?? '', ta = ra.body ?? '';
+  if (tb.length > DIFF_LIMIT || ta.length > DIFF_LIMIT) { r.body = { kind: 'large', same: tb === ta }; return r; }
+  const jb = tb.trim() ? parseJsonOrNull(tb) : null, ja = ta.trim() ? parseJsonOrNull(ta) : null;
+  if (jb && ja) {
+    const d = diffJson(jb.v, ja.v, ignore);
+    const canon = (v) => JSON.stringify(sortKeysDeep(pruneIgnored(v, ignore)), null, 2);
+    r.body = { kind: 'json', ...d, lines: () => lineDiff(canon(jb.v), canon(ja.v)) };
+  } else {
+    const d = lineDiff(tb, ta);
+    r.body = { kind: 'text', lines: () => d, count: d.ops.filter((o) => o[0] !== ' ').length };
+  }
+  return r;
+}
+const diffCount = (r) => (r.status[0] !== r.status[1] ? 1 : 0) + r.headers.length
+  + (r.body.kind === 'json' ? r.body.changes.length : r.body.kind === 'text' ? r.body.count : r.body.same ? 0 : 1);
+
+function diffBaseline(t) {
+  const w = t.diffWith || 'prev';
+  if (w === 'pinned') return t.pinned ? { out: t.pinned, label: 'Pinned' } : null;
+  if (w.startsWith('env:')) {
+    const id = w.slice(4);
+    const o = t.envOuts && t.envOuts[id];
+    const name = id ? (state.envs[id] && state.envs[id].name) || 'Removed environment' : 'No environment';
+    return o ? { out: o, label: name, envId: id, pending: o.pending } : { out: null, label: name, envId: id };
+  }
+  return t.prevOut && t.prevOut.res && !t.prevOut.error ? { out: t.prevOut, label: 'Previous' } : null;
+}
+
+async function runInEnv(t, envId) {
+  t.envOuts = t.envOuts || {};
+  t.envOuts[envId] = { pending: true };
+  renderDiff();
+  const out = await execute({ ed: t.ed, cid: t.cid, itemId: t.itemId, persist: false, envId,
+    ask: (m) => ask({ title: 'Review this script change', message: m, ok: 'Allow', danger: true, pre: true }) });
+  t.envOuts[envId] = out;
+  if (cur() === t) renderDiff();
+}
+
+function renderDiff() {
+  const t = cur();
+  const root = $('#respDiff');
+  const cnt = $('#cntRDiff');
+  if (!t || !root) return;
+  const out = t.out;
+  cnt.textContent = '';
+  cnt.className = 'count';
+  const activeName = state.activeEnv && state.envs[state.activeEnv] ? state.envs[state.activeEnv].name : 'No environment';
+  // Compare-with picker
+  const envChoices = [...(state.activeEnv ? [{ id: '', name: 'No environment' }] : []), ...state.envList.filter((e) => e.id !== state.activeEnv)];
+  const picker = h('select', { 'aria-label': 'Compare the latest response with', onchange: (e) => { t.diffWith = e.target.value; renderDiff(); } },
+    h('option', { value: 'prev' }, 'Previous response'),
+    h('option', { value: 'pinned', ...(t.pinned ? {} : { disabled: true }) }, t.pinned ? `Pinned response (${t.pinned.res.status}, ${new Date(t.pinned.pinnedAt).toLocaleTimeString()})` : 'Pinned response (pin one first)'),
+    ...(envChoices.length ? [h('optgroup', { label: `This request with another environment (now: ${activeName})` },
+      ...envChoices.map((e) => h('option', { value: `env:${e.id}` }, `Send with ${e.name}`)))] : []));
+  picker.value = t.diffWith || 'prev';
+  if (picker.value !== (t.diffWith || 'prev')) { t.diffWith = 'prev'; picker.value = 'prev'; }
+  const ignoreIn = h('input', { type: 'text', class: 'diff-ignore', spellcheck: 'false', 'aria-label': 'Fields to ignore',
+    placeholder: 'Ignore fields: updatedAt, data.items[*].etag', value: state.diffIgnore || '',
+    oninput: debounce((e) => { state.diffIgnore = e.target.value; ls.set('apiman:diffIgnore', state.diffIgnore); renderDiff(); requestAnimationFrame(() => { const el = $('#respDiff .diff-ignore'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }); }, 350) });
+  const hasOut = out && out.res && !out.error;
+  const pin = h('button', { type: 'button', class: 'btn small', disabled: !hasOut, title: 'Keep this response to compare later responses with',
+    onclick: () => { t.pinned = { ...out, pinnedAt: Date.now() }; t.diffWith = 'pinned'; toast('Pinned. Later responses are compared with this one.'); renderDiff(); } }, 'Pin this response');
+  const base = diffBaseline(t);
+  const bar = h('div', { class: 'diff-bar' }, h('label', null, 'Compare with ', picker), pin, ignoreIn);
+  const body = [];
+  const hint = (...x) => body.push(h('div', { class: 'empty-state' }, h('p', { class: 'hint' }, ...x)));
+  if (!hasOut) {
+    hint('Send the request; Diff then compares each response with the one before it, a response you pin, or the same request sent with another environment.');
+  } else if (base && base.envId !== undefined && (!base.out || base.pending)) {
+    if (base.pending) hint(`Sending this request with ${base.label}…`);
+    else {
+      body.push(h('div', { class: 'empty-state' },
+        h('p', { class: 'hint' }, `Send this request again with the variables of "${base.label}" (its URL, credentials and all), then compare that response with the one from "${activeName}". Variable changes from its scripts aren't saved.`),
+        h('button', { type: 'button', class: 'btn primary', onclick: () => runInEnv(t, base.envId) }, `Send with ${base.label}`)));
+    }
+  } else if (!base) {
+    hint(t.diffWith === 'pinned' ? 'Pin a response first.' : 'Send the request again to compare the new response with this one. Or pin this response, or pick an environment above to compare against.');
+  } else if (base.out.error || !base.out.res) {
+    body.push(h('p', { class: 'note err' }, `The ${base.label} request failed: ${base.out.error || 'no response'}`));
+    if (base.envId !== undefined) body.push(h('button', { type: 'button', class: 'btn small', onclick: () => runInEnv(t, base.envId) }, 'Try again'));
+  } else {
+    const r = compareOuts(base.out, out, state.diffIgnore);
+    const n = diffCount(r);
+    cnt.textContent = String(n);
+    cnt.className = `count ${n ? '' : 'pass'}`; // a difference isn't a failure
+    const leftLabel = base.label, rightLabel = base.envId !== undefined ? activeName : 'Latest';
+    const delta = (x, y, fmt) => (x === y ? fmt(y) : `${fmt(x)} → ${fmt(y)}`);
+    body.push(h('div', { class: 'diff-meta' },
+      h('span', { class: r.status[0] === r.status[1] ? '' : 'chg' }, 'Status ', h('b', null, delta(r.status[0], r.status[1], String))),
+      h('span', null, 'Time ', h('b', null, delta(r.time[0], r.time[1], fmtMs))),
+      h('span', null, 'Size ', h('b', null, delta(r.size[0], r.size[1], fmtSize))),
+      base.envId !== undefined ? h('button', { type: 'button', class: 'btn small ghost', onclick: () => runInEnv(t, base.envId) }, `Resend with ${base.label}`) : null));
+    const val = (v) => (v === undefined ? '' : typeof v === 'string' ? JSON.stringify(v) : JSON.stringify(v));
+    const short = (s) => (s.length > 300 ? s.slice(0, 300) + '…' : s);
+    const pill = (type) => h('span', { class: `pill ${type === 'added' ? 'ok' : type === 'removed' ? 'err' : 'warn'}` }, type[0].toUpperCase() + type.slice(1));
+    const table = (rows, cols) => h('table', { class: 'grid diff-table' }, h('thead', null, h('tr', null, ...cols.map((c) => h('th', null, c)))), h('tbody', null, rows));
+    // body
+    const b = r.body;
+    if (b.kind === 'json') {
+      const view = t.diffView || 'fields';
+      const toggle = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Diff view' }, ...[['fields', 'Fields'], ['lines', 'Lines']].map(([k, l]) =>
+        h('button', { type: 'button', class: `seg-btn${view === k ? ' on' : ''}`, role: 'radio', 'aria-checked': String(view === k), onclick: () => { t.diffView = k; renderDiff(); } }, l)));
+      body.push(h('div', { class: 'diff-head' }, h('h3', null, 'Body'), h('span', { class: 'hint' }, b.changes.length ? `${b.changes.length}${b.truncated ? '+' : ''} field change${b.changes.length === 1 ? '' : 's'}` : 'Same JSON', b.ignored ? `, ${b.ignored} ignored` : ''), toggle));
+      if (view === 'lines') body.push(renderLineDiff(b.lines(), leftLabel, rightLabel));
+      else if (b.changes.length) {
+        body.push(table(b.changes.map((c) => h('tr', null, h('td', null, pill(c.type)), h('td', { class: 'mono' }, c.path || '(root)'),
+          h('td', { class: 'mono del' }, c.note ? '' : short(val(c.before))), h('td', { class: 'mono ins' }, c.note || short(val(c.after))))), ['', 'Field', leftLabel, rightLabel]));
+        if (b.truncated) body.push(h('p', { class: 'hint' }, 'Showing the first 1000 changes.'));
+      } else body.push(h('p', { class: 'hint' }, 'The JSON bodies match (key order and formatting are ignored).'));
+    } else if (b.kind === 'text') {
+      body.push(h('div', { class: 'diff-head' }, h('h3', null, 'Body'), h('span', { class: 'hint' }, b.count ? `${b.count} changed line${b.count === 1 ? '' : 's'}` : 'Same text')));
+      if (b.count) body.push(renderLineDiff(b.lines(), leftLabel, rightLabel));
+    } else {
+      body.push(h('div', { class: 'diff-head' }, h('h3', null, 'Body'), h('span', { class: 'hint' }, b.same ? 'Same' : 'Different', b.kind === 'large' ? ' (too large to compare line by line here)' : ' (binary)')));
+    }
+    // headers
+    body.push(h('div', { class: 'diff-head' }, h('h3', null, 'Headers'), h('span', { class: 'hint' },
+      r.headers.length ? `${r.headers.length} changed` : 'Same', r.hiddenHeaders ? `; ${r.hiddenHeaders} that change on every response (Date, request ids…) not shown` : '')));
+    if (r.headers.length) body.push(table(r.headers.map((c) => h('tr', null, h('td', null, pill(c.type)), h('td', { class: 'mono' }, c.name),
+      h('td', { class: 'mono del' }, short(c.before ?? '')), h('td', { class: 'mono ins' }, short(c.after ?? '')))), ['', 'Header', leftLabel, rightLabel]));
+  }
+  root.replaceChildren(bar, ...body);
+}
+
+function renderLineDiff({ ops, coarse }, leftLabel, rightLabel) {
+  const CONTEXT = 3;
+  const rows = [];
+  let ln = 0, rn = 0;
+  const keep = ops.map((o, i) => o[0] !== ' ' || ops.slice(Math.max(0, i - CONTEXT), i + CONTEXT + 1).some((x) => x[0] !== ' '));
+  for (let i = 0; i < ops.length; i++) {
+    const [op, text] = ops[i];
+    if (!keep[i]) {
+      let j = i; while (j < ops.length && !keep[j]) j++;
+      const skipped = j - i;
+      const from = i;
+      const row = h('tr', { class: 'gap' }, h('td', { colspan: 3 }, h('button', { type: 'button', class: 'btn small ghost', onclick: () => {
+        const extra = [];
+        let a = ln0, b = rn0;
+        for (let k = from; k < from + skipped; k++) { a++; b++; extra.push(h('tr', null, h('td', { class: 'n' }, String(a)), h('td', { class: 'n' }, String(b)), h('td', { class: 'mono' }, ops[k][1]))); }
+        row.replaceWith(...extra);
+      } }, `Show ${skipped} unchanged line${skipped === 1 ? '' : 's'}`)));
+      const ln0 = ln, rn0 = rn;
+      rows.push(row);
+      ln += skipped; rn += skipped; i = j - 1;
+      continue;
+    }
+    if (op !== '+') ln++;
+    if (op !== '-') rn++;
+    rows.push(h('tr', { class: op === '+' ? 'ins' : op === '-' ? 'del' : '' }, h('td', { class: 'n' }, op === '+' ? '' : String(ln)), h('td', { class: 'n' }, op === '-' ? '' : String(rn)),
+      h('td', { class: 'mono' }, h('span', { class: 'sign', 'aria-hidden': 'true' }, op === ' ' ? ' ' : op), text)));
+  }
+  return h('div', { class: 'line-diff' },
+    coarse ? h('p', { class: 'hint' }, 'Too many changed lines to align precisely; showing removed then added lines.') : null,
+    h('table', { 'aria-label': `Line changes from ${leftLabel} to ${rightLabel}` }, h('tbody', null, rows)));
+}
+
 function escapeHtml(s) { return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function highlightJson(json) {
   return escapeHtml(json).replace(/(&quot;(?:\\.|(?!&quot;)[^\\])*?&quot;)(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g, (m, str, colon, lit) => {
