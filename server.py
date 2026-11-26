@@ -37,7 +37,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,120}\.json$")
+# Names as people really write them ("Orders (v2).json", "Café API.json"): Unicode letters and digits, spaces and
+# common punctuation. Never a path separator, a leading dot or "..", so a segment can't climb out or hide.
+NAME_CHARS = r"[\w\u0300-\u036f .()+,&@'!#\[\]~-]"  # + combining marks: macOS stores "é" as e + ´
+ID_RE = re.compile(rf"^[^\W_]{NAME_CHARS}{{0,120}}\.json$")
+FOLDER_RE = re.compile(rf"^[^\W_]{NAME_CHARS}{{0,120}}$")  # one folder level of an id: no "..", never hidden
+MAX_DEPTH = 8                     # folder levels searched below the data folder
+MAX_SCAN_FILES = 5000             # .json files looked at per listing
+MAX_SCAN_FILE = 20 * 1024 * 1024  # larger files are never read while listing
 METHOD_RE = re.compile(r"^[A-Z]{1,16}$")
 MAX_REQUEST = 50 * 1024 * 1024    # what the browser may send us
 MAX_RESPONSE = 20 * 1024 * 1024   # what we read back from the target API
@@ -99,53 +106,226 @@ def validate_environment(data):
         raise ValueError("Not a Postman environment (needs name and values[]).")
 
 
-class Store:
-    """One document = one JSON file in a folder."""
+def classify(data):
+    """What a JSON document is, by content (Postman exports keep working whatever their file name)."""
+    if isinstance(data, dict):
+        if isinstance(data.get("info"), dict) and isinstance(data.get("item"), list):
+            return "collections"
+        if isinstance(data.get("values"), list) and "item" not in data:
+            return "environments"
+    return None
 
-    def __init__(self, root, validate, name_of):
+
+def doc_name(kind, data, path):
+    name = data["info"].get("name") if kind == "collections" else data.get("name")
+    return name if isinstance(name, str) and name.strip() else Path(path).stem
+
+
+class Discovery:
+    """Finds every collection and environment anywhere in the data folder, classified by content.
+    Skips hidden folders (.apiman, .git, ...), node_modules, symlinks, anything deeper than MAX_DEPTH folders and
+    files over MAX_SCAN_FILE, and stops after MAX_SCAN_FILES .json files. Results are cached by (path, mtime, size)."""
+
+    def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.validate = validate
-        self.name_of = name_of
+        self._cache = {}  # absolute path -> (mtime_ns, size, kind, name)
+        self._lock = threading.Lock()
 
-    def path(self, doc_id):
-        if not ID_RE.fullmatch(doc_id):  # fullmatch: "$" would also accept a trailing newline
+    def info(self, path, st=None):
+        """(kind, name) of one file; kind is None when it's neither a collection nor an environment."""
+        try:
+            st = st or os.stat(path, follow_symlinks=False)
+        except OSError:
+            return None, None
+        key = str(path)
+        with self._lock:
+            hit = self._cache.get(key)
+        if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+            return hit[2], hit[3]
+        kind = name = None
+        if st.st_size <= MAX_SCAN_FILE:
+            try:
+                data = json.loads(Path(path).read_bytes().decode("utf-8-sig"))
+                kind = classify(data)
+                name = kind and doc_name(kind, data, path)
+            except (OSError, ValueError):
+                pass
+        with self._lock:
+            self._cache[key] = (st.st_mtime_ns, st.st_size, kind, name)
+        return kind, name
+
+    def scan(self):
+        """[(folder segments, file name, kind, name)] for every collection and environment in the data folder."""
+        found, seen, count = [], set(), 0
+        level = [()]  # breadth-first: when the file limit is reached, what's nearer the top is listed
+        while level and count < MAX_SCAN_FILES:
+            nxt = []
+            for segs in level:
+                try:
+                    with os.scandir(self.root.joinpath(*segs)) as it:
+                        entries = sorted(it, key=lambda e: e.name)
+                except OSError:
+                    continue
+                for e in entries:
+                    try:
+                        if e.is_symlink():
+                            continue  # never followed: a link could lead out of the data folder
+                        if e.is_dir(follow_symlinks=False):
+                            # hidden folders (.apiman, .git) and names no id can address are skipped
+                            if len(segs) < MAX_DEPTH and FOLDER_RE.fullmatch(e.name) and e.name != "node_modules":
+                                nxt.append((*segs, e.name))
+                            continue
+                        if not (e.name.lower().endswith(".json") and e.is_file(follow_symlinks=False)):
+                            continue
+                        if count >= MAX_SCAN_FILES:
+                            break
+                        count += 1
+                        if not ID_RE.fullmatch(e.name):
+                            continue  # a file name no id can address
+                        seen.add(e.path)
+                        kind, name = self.info(e.path, e.stat(follow_symlinks=False))
+                        if kind:
+                            found.append((segs, e.name, kind, name))
+                    except OSError:
+                        continue
+            level = nxt
+        with self._lock:  # forget files that are gone
+            for k in [k for k in self._cache if k not in seen]:
+                del self._cache[k]
+        return found
+
+
+class Store:
+    """Collections or environments: one document = one JSON file anywhere in the data folder.
+
+    Ids are POSIX paths relative to the data folder ("Orders.json", "payments/v2/Orders.json"). For environments,
+    an id without "/" means environments/<id> (so existing ids keep working); any other is relative to the data
+    folder, written "./Local.json" for a file at the top."""
+
+    def __init__(self, discovery, kind, validate, default_dir=()):
+        self.disc = discovery
+        self.data = discovery.root
+        self.kind = kind
+        self.validate = validate
+        self.default_dir = tuple(default_dir)
+        self.root = self.data.joinpath(*self.default_dir)  # where new documents go when no folder is given
+
+    # ---- ids <-> paths ----
+    @staticmethod
+    def folder_segments(folder):
+        """Validated folder segments: "a/b" -> ("a", "b"); "" or None -> ()."""
+        if folder is None or folder == "":
+            return ()
+        if not isinstance(folder, str):
+            raise ValueError("Invalid folder")
+        segs = tuple(folder.strip("/").split("/"))
+        if len(segs) > MAX_DEPTH or not all(FOLDER_RE.fullmatch(s) for s in segs):
+            raise ValueError("Invalid folder: use letters, digits, spaces, '.', '_' or '-', "
+                             f"not starting with '.', at most {MAX_DEPTH} levels")
+        return segs
+
+    def segments(self, doc_id):
+        """(folder segments, file name) of an id, validated segment by segment."""
+        if not isinstance(doc_id, str):
             raise ValueError("Invalid id")
-        p = (self.root / doc_id).resolve()
-        if p.parent != self.root:  # no ../ escapes
+        if self.kind == "environments":
+            if "/" not in doc_id:
+                doc_id = "/".join((*self.default_dir, doc_id))
+            elif doc_id.startswith("./"):
+                doc_id = doc_id[2:]
+        *folder, name = doc_id.split("/")
+        if not ID_RE.fullmatch(name):  # fullmatch: "$" would also accept a trailing newline
             raise ValueError("Invalid id")
+        if len(folder) > MAX_DEPTH or not all(FOLDER_RE.fullmatch(s) for s in folder):  # no "", ".", "..", hidden
+            raise ValueError("Invalid id")
+        return tuple(folder), name
+
+    def id_of(self, segs, name):
+        if self.kind == "environments":
+            if segs == self.default_dir:
+                return name
+            if not segs:
+                return "./" + name
+        return "/".join((*segs, name))
+
+    @staticmethod
+    def _check_clash(parent, name):
         # macOS/Windows file systems ignore case: "foo.json" must not silently alias "Foo.json"
-        clash = next((q.name for q in self.root.glob("*.json") if q.name.lower() == doc_id.lower() and q.name != doc_id), None)
+        try:
+            names = os.listdir(parent)
+        except (FileNotFoundError, NotADirectoryError):
+            return
+        clash = next((n for n in names if n.lower() == name.lower() and n != name), None)
         if clash:
             raise ValueError(f"Invalid id: {clash} already exists")
+
+    def _safe_dir(self, segs, create=False):
+        """The folder for these segments: inside the data folder and reached without any symlink."""
+        d = self.data
+        for s in segs:
+            self._check_clash(d, s)
+            d = d / s
+            if create and not d.exists() and not d.is_symlink():
+                d.mkdir(exist_ok=True)
+        real = d.resolve()
+        if real != d or not real.is_relative_to(self.data):  # no symlinked folder, no escape
+            raise ValueError("Invalid id")
+        if d.exists() and not d.is_dir():
+            raise ValueError("Invalid id: a file is in the way of that folder")
+        return d
+
+    def path(self, doc_id):
+        segs, name = self.segments(doc_id)
+        parent = self._safe_dir(segs)
+        p = (parent / name).resolve()
+        if p.parent != parent:  # a symlinked file may not point anywhere else
+            raise ValueError("Invalid id")
+        self._check_clash(parent, name)
         return p
 
+    def _own(self, doc_id):
+        """The path of an existing document of this kind. Other JSON in the data folder is never read or changed."""
+        p = self.path(doc_id)
+        if not p.is_file() or self.disc.info(p)[0] != self.kind:
+            raise FileNotFoundError(doc_id)
+        return p
+
+    # ---- documents ----
     def list(self):
         out = []
-        for p in sorted(self.root.glob("*.json"), key=lambda p: p.name.lower()):
-            try:
-                name = self.name_of(json.loads(p.read_text("utf-8")))
-            except Exception:
-                name = p.stem + " (unreadable)"
-            out.append({"id": p.name, "name": name})
+        for segs, fname, kind, name in self.disc.scan():
+            if kind == self.kind:
+                top = self.kind == "environments" and segs == self.default_dir
+                out.append({"id": self.id_of(segs, fname), "name": name, "folder": "" if top else "/".join(segs)})
+        out.sort(key=lambda d: (d["folder"].lower(), d["name"].lower(), d["id"].lower()))
         return out
 
     def get(self, doc_id):
-        return json.loads(self.path(doc_id).read_text("utf-8"))
+        return self.get_with_version(doc_id)[0]
+
+    def exists(self, doc_id):
+        try:
+            self._own(doc_id)
+            return True
+        except FileNotFoundError:
+            return False
 
     def version(self, doc_id):
         # a content hash, not mtime: coarse timestamps (network shares, FAT) can't hide a change
-        return hashlib.sha256(self.path(doc_id).read_bytes()).hexdigest()[:32]
+        return hashlib.sha256(self._own(doc_id).read_bytes()).hexdigest()[:32]
 
     def get_with_version(self, doc_id):
-        raw = self.path(doc_id).read_bytes()  # one read: the content and its version always match
-        return json.loads(raw.decode("utf-8")), hashlib.sha256(raw).hexdigest()[:32]
+        raw = self._own(doc_id).read_bytes()  # one read: the content and its version always match
+        return json.loads(raw.decode("utf-8-sig")), hashlib.sha256(raw).hexdigest()[:32]
 
     def put(self, doc_id, data):
+        """Writes the document in place: an existing id keeps its folder and file name."""
         self.validate(data)
         p = self.path(doc_id)
+        if p.exists() and (not p.is_file() or self.disc.info(p)[0] != self.kind):
+            raise ValueError("Invalid id: that file isn't " + ("a collection" if self.kind == "collections" else "an environment"))
         # Atomic write: a crash mid-save never leaves a half-written file.
-        fd, tmp = tempfile.mkstemp(dir=self.root, suffix=".tmp")
+        fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -163,32 +343,55 @@ class Store:
 
     _create_lock = threading.Lock()  # two quick imports with the same name must not pick the same file
 
-    def create(self, data):
+    def create(self, data, folder=None):
         with self._create_lock:
-            return self._create(data)
+            return self._create(data, folder)
 
-    def _create(self, data):
+    def _create(self, data, folder=None):
         self.validate(data)
-        base = re.sub(r"[^A-Za-z0-9._-]+", "-", self.name_of(data)).strip("-._")[:80] or "untitled"
+        segs = self.default_dir if folder in (None, "") else self.folder_segments(folder)
+        name = data["info"]["name"] if self.kind == "collections" else data["name"]
+        base = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-._")[:80] or "untitled"
         if base.lower() == "globals":
             base = "globals-env"  # globals.json is the Globals document, never a normal environment
-        existing = {q.name.lower() for q in self.root.glob("*.json")}  # case-insensitive, like macOS/Windows
-        doc_id, n = f"{base}.json", 2
-        while doc_id.lower() in existing:
-            doc_id, n = f"{base}-{n}.json", n + 1
+        parent = self._safe_dir(segs, create=True)  # the folder is created if missing
+        existing = {n.lower() for n in os.listdir(parent)}  # case-insensitive, like macOS/Windows
+        fname, n = f"{base}.json", 2
+        while fname.lower() in existing:
+            fname, n = f"{base}-{n}.json", n + 1
+        doc_id = self.id_of(segs, fname)
         self.put(doc_id, data)
         return doc_id
 
     def delete(self, doc_id):
-        self.path(doc_id).unlink()
+        self._own(doc_id).unlink()
+
+    def find(self, ref):
+        """A document by id or by name (case-insensitive), for `server.py run`. Returns its id or None."""
+        try:
+            if self.exists(ref):
+                return self.id_of(*self.segments(ref))
+        except ValueError:
+            pass
+        for key in ("id", "name"):
+            hits = [d["id"] for d in self.list() if d[key].lower() in (ref.lower(), ref.lower() + ".json")]
+            if len(hits) > 1:
+                raise ValueError(f"{ref!r} matches several documents: {', '.join(hits)}")
+            if hits:
+                return hits[0]
+        return None
 
 
-def make_stores(root):
-    root = Path(root).expanduser().resolve()
-    return {
-        "collections": Store(root, validate_collection, lambda d: d["info"]["name"]),
-        "environments": Store(root / "environments", validate_environment, lambda d: d["name"]),
+def make_stores(root, create=True):
+    disc = Discovery(root)
+    stores = {
+        "collections": Store(disc, "collections", validate_collection),
+        "environments": Store(disc, "environments", validate_environment, ("environments",)),
     }
+    if create:
+        for s in stores.values():
+            s.root.mkdir(parents=True, exist_ok=True)
+    return stores
 
 
 class TooLarge(ValueError):
@@ -446,7 +649,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("Invalid request body")
                     data = body.get("collection") or body.get("document") or {
                         "info": {"name": body.get("name") or "New collection", "schema": SCHEMA_V21}, "item": []}
-                    return self.reply(201, {"id": store.create(data)})
+                    return self.reply(201, {"id": store.create(data, body.get("folder"))})
                 if doc_id and method == "GET":
                     data, version = store.get_with_version(doc_id)
                     return self.reply(200, data, {"X-Version": version})
@@ -454,14 +657,14 @@ class Handler(BaseHTTPRequestHandler):
                     expected = self.headers.get("If-Match")
                     body = self.read_json()  # read before locking: a slow client never blocks other saves
                     with store._create_lock:  # check-then-write must not interleave with another save
-                        if expected and (not store.path(doc_id).exists() or store.version(doc_id) != expected):
+                        if expected and (not store.exists(doc_id) or store.version(doc_id) != expected):
                             return self.reply(409, {"error": "This document was changed or deleted elsewhere since it was loaded."})
                         store.put(doc_id, body)
                         return self.reply(200, {"ok": True}, {"X-Version": store.version(doc_id)})
                 if doc_id and method == "DELETE":
                     expected = self.headers.get("If-Match")
                     with store._create_lock:
-                        if expected and store.path(doc_id).exists() and store.version(doc_id) != expected:
+                        if expected and store.exists(doc_id) and store.version(doc_id) != expected:
                             return self.reply(409, {"error": "This document was changed elsewhere; reload before deleting it."})
                         store.delete(doc_id)
                     return self.reply(200, {"ok": True})
@@ -584,11 +787,25 @@ def junit_report(results, suite_name, path):
     ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
 
 
+def resolve_run_file(ref, kind, data_dir):
+    """`server.py run` takes a file path, or the id or name of a document anywhere in the data folder
+    ("payments/v2/Orders.json", "Orders", "environments/team/Staging.json", "Staging")."""
+    if Path(ref).expanduser().is_file() or not Path(data_dir).expanduser().is_dir():
+        return ref
+    try:
+        store = make_stores(data_dir, create=False)[kind]  # only reads: nothing is created in the data folder
+        doc_id = store.find(ref)
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"error: {e}")
+    return str(store.path(doc_id)) if doc_id else ref  # not found: load_json_file reports the missing file
+
+
 def run_main(argv):
     ap = argparse.ArgumentParser(prog="server.py run", description="Run a collection headlessly, e.g. in CI. Exits 1 when a test fails or a request can't be sent.")
-    ap.add_argument("collection", help="Postman v2.1 collection JSON file")
-    ap.add_argument("-e", "--env", help="environment JSON file")
-    ap.add_argument("-g", "--globals", help="globals JSON file")
+    ap.add_argument("collection", help="Postman v2.1 collection JSON file, or the id or name of one in the data folder")
+    ap.add_argument("-e", "--env", help="environment JSON file, or the id or name of one in the data folder")
+    ap.add_argument("-g", "--globals", help="globals JSON file (or id in the data folder, e.g. globals.json)")
+    ap.add_argument("--data", default=str(HERE / "collections"), help="data folder searched for ids and names (default: ./collections)")
     ap.add_argument("--var", action="append", default=[], metavar="KEY=VALUE", help="set an environment variable (repeatable), e.g. --var token=$API_TOKEN")
     ap.add_argument("--folder", help="run only the folder with this name")
     ap.add_argument("-n", "--iterations", type=int, default=1)
@@ -609,10 +826,10 @@ def run_main(argv):
     if not browser:
         raise SystemExit("error: no Chrome, Chromium or Edge found. Install one, or pass --browser /path/to/chrome (or set APIMAN_BROWSER).")
 
-    col = load_json_file(args.collection, "collection")
+    col = load_json_file(resolve_run_file(args.collection, "collections", args.data), "collection")
     if not (isinstance(col, dict) and isinstance(col.get("info"), dict) and isinstance(col.get("item"), list)):
         raise SystemExit("error: that file isn't a Postman v2.1 collection (export it from Postman or ApiMan as JSON).")
-    env = load_json_file(args.env, "environment") if args.env else None
+    env = load_json_file(resolve_run_file(args.env, "environments", args.data), "environment") if args.env else None
     if env is not None and not (isinstance(env, dict) and isinstance(env.get("values"), list)):
         raise SystemExit("error: that file isn't a Postman environment.")
     for kv in args.var:
@@ -630,7 +847,7 @@ def run_main(argv):
         env.setdefault("name", "Environment")
         (data / "environments" / "env.json").write_text(json.dumps(env), encoding="utf-8")
     if args.globals:
-        g = load_json_file(args.globals, "globals")
+        g = load_json_file(resolve_run_file(args.globals, "environments", args.data), "globals")
         g["_postman_variable_scope"] = "globals"
         g.setdefault("name", "Globals")
         (data / "environments" / "globals.json").write_text(json.dumps(g), encoding="utf-8")

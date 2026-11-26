@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import server
 
@@ -168,7 +169,7 @@ class ServerTest(unittest.TestCase):
         coll["item"].append({"name": "r2", "request": {"method": "POST", "url": "y"}})
         self.assertEqual(self.call("PUT", f"/api/collections/{cid}", coll)[0], 200)
         self.assertEqual(len(self.call("GET", f"/api/collections/{cid}")[1]["item"]), 2)
-        self.assertIn({"id": cid, "name": "My API"}, self.call("GET", "/api/collections")[1])
+        self.assertIn({"id": cid, "name": "My API", "folder": ""}, self.call("GET", "/api/collections")[1])
 
         self.assertEqual(self.call("POST", "/api/collections", {"collection": {"values": []}})[0], 400)
         self.assertEqual(self.call("DELETE", f"/api/collections/{cid}")[0], 200)
@@ -302,6 +303,258 @@ class ServerTest(unittest.TestCase):
     def test_only_whitelisted_static_files_are_served(self):
         self.assertEqual(self.call("GET", "/server.py")[0], 404)
         self.assertEqual(self.call("GET", "/../server.py")[0], 404)
+
+
+class NestedFoldersTest(unittest.TestCase):
+    """Collections and environments anywhere in the data folder (each test gets a fresh data folder)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.handler = type("NestedHandler", (server.Handler,), {})
+        cls.app = start(cls.handler)
+        cls.base = f"http://127.0.0.1:{cls.app.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.app.shutdown()
+        cls.app.server_close()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.outside = tempfile.TemporaryDirectory()
+        self.handler.stores = server.make_stores(self.tmp.name)
+        self.root = self.handler.stores["collections"].root
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        self.outside.cleanup()
+
+    call = ServerTest.call
+
+    def write(self, rel, obj, base=None):
+        p = (base or self.root) / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(obj if isinstance(obj, str) else json.dumps(obj), "utf-8")
+        return p
+
+    @staticmethod
+    def coll(name):
+        return {"info": {"name": name}, "item": []}
+
+    @staticmethod
+    def env(name):
+        return {"name": name, "values": []}
+
+    def listing(self, kind):
+        status, res = self.call("GET", f"/api/{kind}")
+        self.assertEqual(status, 200)
+        return [(d["folder"], d["id"], d["name"]) for d in res]
+
+    def q(self, doc_id):
+        return urllib.parse.quote(doc_id, safe="")
+
+    def test_names_as_people_write_them_are_found_and_editable(self):
+        import unicodedata
+        names = ["Orders (v2).json", "Café API.json", "R&D + QA [old].json", unicodedata.normalize("NFD", "Équipe.json")]
+        for n in names:
+            self.write(f"Équipe (2024)/{n}", self.coll(n[:-5]))
+        found = {i for _, i, _ in self.listing("collections")}
+        self.assertEqual(found, {f"Équipe (2024)/{n}" for n in names})
+        doc_id = "Équipe (2024)/Orders (v2).json"
+        self.assertEqual(self.call("GET", f"/api/collections/{self.q(doc_id)}")[0], 200)
+        self.assertEqual(self.call("PUT", f"/api/collections/{self.q(doc_id)}", self.coll("Renamed"))[0], 200)
+        self.assertEqual(json.loads((self.root / doc_id).read_text("utf-8"))["info"]["name"], "Renamed")
+        for bad in ["Équipe (2024)/../x.json", "a/\\b.json", "a:b/x.json", "a/x?.json"]:
+            self.assertNotEqual(self.call("GET", f"/api/collections/{self.q(bad)}")[0], 200, bad)
+
+    def test_nested_collections_are_found_at_every_depth(self):
+        self.write("Top.json", self.coll("Top"))
+        self.write("payments/Pay.json", self.coll("Pay"))
+        self.write("payments/v2/deep/Orders.json", self.coll("Orders"))
+        self.write("a/b/c/d/e/f/g/h/Eight.json", self.coll("Eight"))          # 8 folder levels: found
+        self.write("a/b/c/d/e/f/g/h/i/Nine.json", self.coll("Nine"))          # 9: too deep
+        self.assertEqual(self.listing("collections"), [
+            ("", "Top.json", "Top"),
+            ("a/b/c/d/e/f/g/h", "a/b/c/d/e/f/g/h/Eight.json", "Eight"),
+            ("payments", "payments/Pay.json", "Pay"),
+            ("payments/v2/deep", "payments/v2/deep/Orders.json", "Orders"),
+        ])
+        # the id arrives URL-encoded as one segment, or with literal "/"
+        self.assertEqual(self.call("GET", "/api/collections/" + self.q("payments/v2/deep/Orders.json"))[1]["info"]["name"], "Orders")
+        self.assertEqual(self.call("GET", "/api/collections/payments/v2/deep/Orders.json")[1]["info"]["name"], "Orders")
+        self.assertNotIn("Nine", str(self.listing("collections")))
+
+    def test_postman_export_file_names_are_detected_by_content(self):
+        self.write("exports/Orders API.postman_collection.json", self.coll("Orders API"))
+        self.write("exports/Staging.postman_environment.json", self.env("Staging"))
+        self.assertEqual(self.listing("collections"), [("exports", "exports/Orders API.postman_collection.json", "Orders API")])
+        self.assertEqual(self.listing("environments"), [("exports", "exports/Staging.postman_environment.json", "Staging")])
+
+    def test_other_json_is_ignored_and_never_touched(self):
+        pkg = self.write("package.json", {"name": "web", "version": "1.0.0"})
+        self.write("tsconfig.json", "{not json")
+        self.write("list.json", "[1, 2]")
+        self.write("both.json", {"values": [], "item": []})   # neither a collection nor an environment
+        self.write("Real.json", self.coll("Real"))
+        self.assertEqual([i for _, i, _ in self.listing("collections")], ["Real.json"])
+        self.assertEqual(self.listing("environments"), [])
+        before = pkg.read_bytes()
+        self.assertEqual(self.call("GET", "/api/collections/package.json")[0], 404)
+        self.assertEqual(self.call("GET", "/api/environments/.%2Fpackage.json")[0], 404)
+        self.assertEqual(self.call("DELETE", "/api/collections/package.json")[0], 404)
+        self.assertEqual(self.call("PUT", "/api/collections/package.json", self.coll("x"))[0], 400)
+        self.assertEqual(pkg.read_bytes(), before)
+        # a collection id can't be used to read or overwrite an environment, and the other way round
+        self.write("environments/Staging.json", self.env("Staging"))
+        self.assertEqual(self.call("GET", "/api/collections/" + self.q("environments/Staging.json"))[0], 404)
+        self.assertEqual(self.call("PUT", "/api/environments/.%2FReal.json", self.env("x"))[0], 400)
+
+    def test_environment_files_anywhere_get_the_contract_ids(self):
+        self.write("environments/Staging.json", self.env("Staging"))
+        self.write("environments/globals.json", {"name": "Globals", "values": [], "_postman_variable_scope": "globals"})
+        self.write("environments/team/Dev.json", self.env("Dev"))
+        self.write("Local.json", self.env("Local"))
+        self.write("payments/Pay.postman_environment.json", self.env("Pay"))
+        self.assertEqual(self.listing("environments"), [
+            ("", "globals.json", "Globals"), ("", "./Local.json", "Local"), ("", "Staging.json", "Staging"),
+            ("environments/team", "environments/team/Dev.json", "Dev"),
+            ("payments", "payments/Pay.postman_environment.json", "Pay"),
+        ])
+        for eid, name in (("Staging.json", "Staging"), ("environments/Staging.json", "Staging"), ("./Local.json", "Local"),
+                          ("environments/team/Dev.json", "Dev"), ("payments/Pay.postman_environment.json", "Pay")):
+            self.assertEqual(self.call("GET", "/api/environments/" + self.q(eid))[1]["name"], name, eid)
+        self.assertEqual(self.call("GET", "/api/environments/Local.json")[0], 404)  # bare = environments/Local.json
+        self.assertEqual(self.listing("collections"), [])
+
+    def test_legacy_ids_still_work(self):
+        self.write("Orders.json", self.coll("Orders"))
+        self.write("environments/Staging.json", self.env("Staging"))
+        self.assertEqual(self.call("PUT", "/api/collections/Orders.json", self.coll("Orders 2"))[0], 200)
+        self.assertEqual(self.call("GET", "/api/collections/Orders.json")[1]["info"]["name"], "Orders 2")
+        self.assertEqual(self.call("PUT", "/api/environments/Staging.json", self.env("Staging 2"))[0], 200)
+        self.assertEqual(json.loads((self.root / "environments" / "Staging.json").read_text())["name"], "Staging 2")
+        self.assertEqual(self.call("POST", "/api/environments", {"document": self.env("Prod")})[1]["id"], "Prod.json")
+        self.assertEqual(self.call("POST", "/api/collections", {"collection": self.coll("New")})[1]["id"], "New.json")
+        self.assertEqual(self.call("DELETE", "/api/collections/Orders.json")[0], 200)
+        self.assertEqual(self.call("DELETE", "/api/environments/Staging.json")[0], 200)
+        self.assertFalse((self.root / "Orders.json").exists() or (self.root / "environments" / "Staging.json").exists())
+
+    def test_create_in_a_folder_creates_the_folder(self):
+        status, res = self.call("POST", "/api/collections", {"collection": self.coll("Orders"), "folder": "teams/alpha"})
+        self.assertEqual((status, res["id"]), (201, "teams/alpha/Orders.json"))
+        p = self.root / "teams" / "alpha" / "Orders.json"
+        self.assertEqual(p.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.call("POST", "/api/collections", {"collection": self.coll("orders"), "folder": "teams/alpha"})[1]["id"],
+                         "teams/alpha/orders-2.json")                                         # case-insensitive per folder
+        self.assertEqual(self.call("POST", "/api/collections", {"collection": self.coll("Orders")})[1]["id"], "Orders.json")
+        self.assertIn(("teams/alpha", "teams/alpha/Orders.json", "Orders"), self.listing("collections"))
+        env = lambda folder, name="Staging": self.call("POST", "/api/environments", {"document": self.env(name), "folder": folder})
+        self.assertEqual(env("payments")[1]["id"], "payments/Staging.json")
+        self.assertEqual(env("")[1]["id"], "Staging.json")
+        self.assertEqual(env("environments/team")[1]["id"], "environments/team/Staging.json")
+        self.assertEqual(env("payments", "Globals")[1]["id"], "payments/globals-env.json")
+        for bad in ("../x", ".hidden", "a/../b", "a//b", "a\\b", "/".join("abcdefghi"), 5):
+            self.assertEqual(env(bad)[0], 400, bad)
+        self.assertEqual(self.call("POST", "/api/collections", {"collection": self.coll("X"), "folder": "Teams"})[0], 400)  # "teams" exists
+        self.assertFalse((self.root.parent / "x").exists())
+        self.assertEqual(list(self.root.rglob("*.tmp")), [])
+
+    def test_invalid_ids_are_rejected(self):
+        self.write("ok/Fine.json", self.coll("Fine"))
+        bad = ["../secret.json", "ok/../Fine.json", "/etc/passwd.json", "./Fine.json", "ok/./Fine.json", ".apiman/state.json",
+               "ok/.git/x.json", "ok//Fine.json", "ok\\Fine.json", "/".join("abcdefghi") + "/x.json", "ok/Fine.json\n", "ok/Fine.txt"]
+        for doc_id in bad:
+            for method in ("GET", "PUT", "DELETE"):
+                status = self.call(method, "/api/collections/" + self.q(doc_id), self.coll("x") if method == "PUT" else None)[0]
+                self.assertIn(status, (400, 404), (method, doc_id))
+        for doc_id in ("../secret.json", "./../secret.json", "environments/../x.json", ".apiman/state.json"):
+            self.assertEqual(self.call("GET", "/api/environments/" + self.q(doc_id))[0], 400, doc_id)
+        self.assertEqual(self.call("PUT", "/api/environments/" + self.q("./../x.json"), self.env("x"))[0], 400)
+        self.assertFalse((self.root.parent / "x.json").exists())
+        # a file where a folder should be: a clear 400, not a dropped connection
+        self.assertEqual(self.call("PUT", "/api/collections/" + self.q("ok/Fine.json/x.json"), self.coll("x"))[0], 400)
+        self.assertEqual(self.call("POST", "/api/collections", {"collection": self.coll("X"), "folder": "ok/Fine.json"})[0], 400)
+        self.assertEqual(self.call("PUT", "/api/collections/" + self.q("missing/x.json"), self.coll("x"))[0], 404)
+
+    def test_symlinks_never_lead_out_of_the_data_folder(self):
+        out = Path(self.outside.name)
+        self.write("Secret.json", self.coll("Secret"), base=out)
+        os.symlink(out, self.root / "linked")                          # symlinked folder: skipped
+        os.symlink(out / "Secret.json", self.root / "Link.json")       # symlinked file pointing outside
+        self.write("real/Inner.json", self.coll("Inner"))
+        os.symlink(self.root / "real", self.root / "alias")            # even a link inside the data folder
+        self.assertEqual([i for _, i, _ in self.listing("collections")], ["real/Inner.json"])
+        for doc_id in ("linked/Secret.json", "Link.json", "alias/Inner.json"):
+            self.assertEqual(self.call("GET", "/api/collections/" + self.q(doc_id))[0], 400, doc_id)
+            self.assertEqual(self.call("PUT", "/api/collections/" + self.q(doc_id), self.coll("pwned"))[0], 400, doc_id)
+        self.assertEqual(self.call("POST", "/api/collections", {"collection": self.coll("X"), "folder": "linked"})[0], 400)
+        self.assertEqual(json.loads((out / "Secret.json").read_text())["info"]["name"], "Secret")
+        self.assertEqual(os.listdir(out), ["Secret.json"])
+
+    def test_hidden_folders_and_node_modules_are_never_listed(self):
+        for rel in (".apiman/Hidden.json", ".git/Hidden.json", "node_modules/pkg/Hidden.json", "a/.cache/Hidden.json", ".Hidden.json"):
+            self.write(rel, self.coll("Hidden"))
+            self.write(rel.replace("Hidden.json", "HiddenEnv.json"), self.env("Hidden"))
+        self.assertEqual(self.listing("collections"), [])
+        self.assertEqual(self.listing("environments"), [])
+        self.assertEqual(self.call("PUT", "/api/collections/" + self.q(".apiman/state.json"), self.coll("x"))[0], 400)
+        self.assertEqual(self.call("POST", "/api/collections", {"collection": self.coll("X"), "folder": ".apiman"})[0], 400)
+
+    def test_put_on_a_nested_id_writes_in_place(self):
+        p = self.write("payments/v2/Orders.postman_collection.json", self.coll("Orders"))
+        os.chmod(p, 0o640)
+        cid = self.q("payments/v2/Orders.postman_collection.json")
+        req = urllib.request.Request(f"{self.base}/api/collections/{cid}", headers={server.TOKEN_HEADER: server.SESSION_TOKEN})
+        with urllib.request.urlopen(req) as r:
+            version = r.headers["X-Version"]
+        renamed = {"info": {"name": "Orders (renamed)"}, "item": [{"name": "r"}]}
+        self.assertEqual(self.call("PUT", f"/api/collections/{cid}", renamed, headers={"If-Match": version})[0], 200)
+        self.assertEqual(json.loads(p.read_text())["info"]["name"], "Orders (renamed)")
+        self.assertEqual(p.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(sorted(str(x.relative_to(self.root)) for x in self.root.rglob("*") if x.is_file()),
+                         ["payments/v2/Orders.postman_collection.json"])
+        self.assertEqual(self.call("PUT", f"/api/collections/{cid}", self.coll("stale"), headers={"If-Match": version})[0], 409)
+        self.assertEqual(self.call("DELETE", f"/api/collections/{cid}", headers={"If-Match": version})[0], 409)
+        self.assertEqual(self.listing("collections"), [("payments/v2", "payments/v2/Orders.postman_collection.json", "Orders (renamed)")])
+        self.assertEqual(self.call("PUT", "/api/collections/" + self.q("payments/v2/orders.postman_collection.json"), self.coll("x"))[0], 400)
+
+    def test_listing_follows_changes_and_stops_at_the_file_limit(self):
+        p = self.write("A.json", self.coll("First"))
+        self.assertEqual(self.listing("collections"), [("", "A.json", "First")])
+        p.write_text(json.dumps(self.coll("Second name")), "utf-8")      # the cache notices the change (size/mtime)
+        self.assertEqual(self.listing("collections"), [("", "A.json", "Second name")])
+        p.write_text(json.dumps(self.env("Now an env")), "utf-8")
+        self.assertEqual(self.listing("collections"), [])
+        for i in range(5):
+            self.write(f"many/C{i}.json", self.coll(f"C{i}"))
+        old = server.MAX_SCAN_FILES
+        server.MAX_SCAN_FILES = 3
+        try:
+            self.assertEqual(len(self.listing("collections")), 2)            # A.json counts too; the rest is still listed
+        finally:
+            server.MAX_SCAN_FILES = old
+        big = self.write("Big.json", json.dumps(self.coll("Big")))
+        old = server.MAX_SCAN_FILE
+        server.MAX_SCAN_FILE = big.stat().st_size - 1
+        try:
+            self.assertNotIn("Big.json", [i for _, i, _ in self.listing("collections")])
+        finally:
+            server.MAX_SCAN_FILE = old
+
+    def test_run_finds_documents_by_id_or_name_in_nested_folders(self):
+        self.write("payments/v2/Orders.postman_collection.json", self.coll("Orders API"))
+        self.write("environments/team/Staging.json", self.env("Staging"))
+        self.write("environments/globals.json", self.env("Globals"))
+        data = str(self.root)
+        target = str(self.root / "payments" / "v2" / "Orders.postman_collection.json")
+        self.assertEqual(server.resolve_run_file("payments/v2/Orders.postman_collection.json", "collections", data), target)
+        self.assertEqual(server.resolve_run_file("orders api", "collections", data), target)
+        self.assertEqual(server.resolve_run_file("Staging", "environments", data), str(self.root / "environments" / "team" / "Staging.json"))
+        self.assertEqual(server.resolve_run_file("globals.json", "environments", data), str(self.root / "environments" / "globals.json"))
+        self.assertEqual(server.resolve_run_file("Nope", "collections", data), "Nope")  # reported as a missing file later
+        self.write("other/Orders.json", self.coll("Orders API"))
+        with self.assertRaises(SystemExit):
+            server.resolve_run_file("Orders API", "collections", data)            # ambiguous name: refused, not guessed
 
 
 if __name__ == "__main__":
