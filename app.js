@@ -1472,9 +1472,17 @@ async function closeTab(i) {
 }
 
 function writeTabs() {
+  let budget = 2 * 1024 * 1024; // all kept responses together stay well inside the browser's storage quota
+  const keepOut = (t) => {
+    if (state.settings.history === false || !t.out || !t.out.res) return undefined; // History off: nothing about responses is kept
+    const json = JSON.stringify(t.out);
+    if (json.length > 256 * 1024 || json.length > budget) return undefined;
+    budget -= json.length;
+    return t.out;
+  };
   ls.set('apiman:tabs', {
     active: state.active,
-    tabs: state.tabs.map((t) => (t.cid ? { cid: t.cid, itemId: t.itemId, ed: t.dirty ? edForStorage(t.ed) : null } : { ed: edForStorage(t.ed) })),
+    tabs: state.tabs.map((t) => (t.cid ? { cid: t.cid, itemId: t.itemId, ed: t.dirty ? edForStorage(t.ed) : null, out: keepOut(t) } : { ed: edForStorage(t.ed), out: keepOut(t) })),
   });
 }
 const persistTabs = debounce(writeTabs, 300);
@@ -1489,10 +1497,10 @@ async function restoreTabs() {
         if (!state.cols[s.cid]) await loadCol(s.cid);
         const loc = locate(state.cols[s.cid], s.itemId);
         if (!loc) continue;
-        state.tabs.push(newTab({ cid: s.cid, itemId: s.itemId, ed: s.ed ? { ...blankEd(), ...s.ed, body: { ...blankBody(), ...s.ed.body } } : fromItem(loc.item), dirty: !!s.ed }));
+        state.tabs.push(newTab({ cid: s.cid, itemId: s.itemId, ed: s.ed ? { ...blankEd(), ...s.ed, body: { ...blankBody(), ...s.ed.body } } : fromItem(loc.item), dirty: !!s.ed, out: s.out && s.out.res ? s.out : null }));
       } else if (s.ed) {
         const ed = { ...blankEd(), ...s.ed, body: { ...blankBody(), ...s.ed.body } };
-        state.tabs.push(newTab({ ed, dirty: !!(ed.url || ed.headers.length || ed.body.mode !== 'none' || ed.pre || ed.test) }));
+        state.tabs.push(newTab({ ed, dirty: !!(ed.url || ed.headers.length || ed.body.mode !== 'none' || ed.pre || ed.test), out: s.out && s.out.res ? s.out : null }));
       }
     } catch { /* skip broken entries */ }
   }
@@ -1502,8 +1510,13 @@ async function restoreTabs() {
 function markDirty() {
   const t = cur();
   if (!t) return;
-  if (!t.dirty) { t.dirty = true; renderTabs(); }
-  $('#dirtyDot').hidden = false;
+  let dirty = true;
+  if (t.cid) { // compare with the saved request: undoing your edit clears the dot
+    const loc = state.cols[t.cid] && locate(state.cols[t.cid], t.itemId);
+    try { if (loc && JSON.stringify(edForStorage(t.ed)) === JSON.stringify(edForStorage(fromItem(loc.item)))) dirty = false; } catch { /* keep dirty */ }
+  }
+  if (t.dirty !== dirty) { t.dirty = dirty; renderTabs(); }
+  $('#dirtyDot').hidden = !dirty;
   persistTabs();
 }
 
@@ -2740,6 +2753,7 @@ async function send() {
   if (t.sending !== ctrl) return; // superseded
   t.sending = null;
   t.out = out;
+  persistTabs(); // the last response survives a reload
   if (out.tests.some((x) => x.passed === false)) t.respTab = 'rtests';
   else if (out.error && out.logs.some((l) => l.level === 'error')) t.respTab = 'rconsole';
   else if (t.respTab === 'rtests' || t.respTab === 'rconsole') t.respTab = 'rbody';
@@ -2830,7 +2844,7 @@ function openDialog(opts) {
   renderDialog(opts);
 }
 /** Settings docks beside the app only while the app keeps at least 1000px; otherwise it overlays. */
-function canDock() { const side = $('.side')?.offsetWidth || 0; return innerWidth > 900 && innerWidth - 440 >= side + 2 * 320 * cssScale() + 16; } // panes stay side by side
+function canDock() { const side = $('.side')?.offsetWidth || 0; return innerWidth > 900 && innerWidth - 360 >= side + 2 * 320 * cssScale() + 16; } // panes stay side by side
 function updateDock() {
   const dlg = $('#dlg');
   if (!dlg.open || !dlg.classList.contains('drawer')) return;
