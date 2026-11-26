@@ -206,8 +206,87 @@ function toast(msg, tone = 'ok') {
 
 const ls = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } },
+  set(k, v) {
+    try { localStorage.setItem(k, JSON.stringify(v)); } catch { return false; }
+    if (STATE_KEYS.includes(k.slice(7)) && k.startsWith('apiman:')) workspace.schedule(); // the data folder keeps a copy
+    return true;
+  },
 };
+
+// Workspace state (settings, open tabs, history, layout…) lives in the data folder, in .apiman/state.json:
+// localStorage is only its synchronous cache. OAuth tokens and kept responses stay session-only, never in the folder.
+const STATE_KEYS = ['settings', 'activeEnv', 'open', 'history', 'tabs', 'diffIgnore', 'layout', 'codeLang', 'sizeUnit'];
+const workspace = {
+  ready: false, // false until the folder's state has been read: nothing is written to it before that
+  dirty: false, timer: 0, queue: Promise.resolve(), warned: false,
+  snapshot() {
+    const snap = {};
+    for (const k of STATE_KEYS) {
+      try { const v = localStorage.getItem(`apiman:${k}`); if (v !== null) snap[k] = JSON.parse(v); } catch { /* skip */ }
+    }
+    return snap;
+  },
+  schedule() {
+    this.dirty = true;
+    if (!this.ready) return;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.flush(), 500);
+  },
+  /** Saves the whole snapshot now (if anything changed). Saves run one after another, so the last one wins. */
+  flush(opts = {}) {
+    clearTimeout(this.timer);
+    if (!this.ready || !this.dirty || !backend || !backend.state) return this.queue;
+    this.dirty = false;
+    const store = backend.state, snap = this.snapshot();
+    this.queue = this.queue.then(() => store.put(snap, opts)).catch((e) => {
+      this.dirty = true;
+      if (!this.warned) { this.warned = true; toast(`Couldn't save your workspace to the data folder: ${e.message}`, 'err'); }
+    });
+    return this.queue;
+  },
+  /** Reads the data folder's state. Present: it wins (copied into localStorage, then re-applied).
+   *  Absent: this browser's state is written there (first run). Returns true when the folder had none yet. */
+  async load() {
+    this.ready = false;
+    clearTimeout(this.timer);
+    if (!backend.state) { this.ready = true; return false; } // data kept in this browser: nothing to sync
+    let saved;
+    try { saved = await backend.state.get(); } catch (e) {
+      toast(`Couldn't read your workspace from the data folder, so it won't be saved there: ${e.message}`, 'err');
+      return false; // stays not ready: never overwrite a file we couldn't read
+    }
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      for (const k of STATE_KEYS) {
+        try {
+          if (saved[k] !== undefined) localStorage.setItem(`apiman:${k}`, JSON.stringify(saved[k]));
+          else localStorage.removeItem(`apiman:${k}`);
+        } catch { /* storage blocked: the in-memory state below still uses it */ }
+      }
+      rehydrate();
+      this.dirty = false;
+      this.ready = true;
+      return false;
+    }
+    this.ready = true;
+    this.dirty = true;
+    await this.flush();
+    return true;
+  },
+};
+
+/** Re-reads everything start-up took from localStorage (after the data folder's state replaced it). */
+function rehydrate() {
+  state.settings = { ...DEFAULT_SETTINGS, ...ls.get('apiman:settings', {}) };
+  if (backend && backend.mode !== 'local') state.settings.insecure = false;
+  state.activeEnv = String(ls.get('apiman:activeEnv', '') || '');
+  const open = ls.get('apiman:open', []);
+  state.open = new Set(Array.isArray(open) ? open : []);
+  const hist = ls.get('apiman:history', []);
+  state.history = Array.isArray(hist) ? hist : [];
+  state.diffIgnore = String(ls.get('apiman:diffIgnore', '') ?? '');
+  if (initResizers.load) initResizers.load();
+  applyTheme(); // and the rest of Appearance
+}
 
 function download(filename, data, type = 'application/json') {
   const blob = data instanceof Blob ? data : new Blob([data], { type });
@@ -458,6 +537,45 @@ function folderStore(rootDir, kind) {
   };
 }
 
+/** Workspace state in the data folder (contract: backend.state). Local mode: the server's /api/state. */
+function serverState() {
+  return {
+    get: async () => (await api('GET', '/api/state')).state ?? null,
+    async put(obj, { unloading = false } = {}) {
+      const body = JSON.stringify(obj);
+      const r = await fetch('/api/state', { // keepalive lets a save started while the page closes finish (browsers cap it at 64 KB)
+        method: 'PUT', body, keepalive: unloading && body.length < 60000,
+        headers: { 'Content-Type': 'application/json', ...(API_TOKEN ? { 'X-ApiMan-Token': API_TOKEN } : {}) },
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    },
+  };
+}
+/** Website mode with a folder: <folder>/.apiman/state.json, through the directory handle. */
+function folderState(rootDir) {
+  const missing = (e) => { if (e.name === 'NotFoundError') return null; throw e; };
+  return {
+    async get() {
+      const dir = await rootDir.getDirectoryHandle('.apiman').catch(missing);
+      const file = dir && await dir.getFileHandle('state.json').catch(missing);
+      if (!file) return null;
+      const v = JSON.parse(await (await file.getFile()).text());
+      return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+    },
+    async put(obj) {
+      const dir = await rootDir.getDirectoryHandle('.apiman', { create: true });
+      await dir.getFileHandle('.gitignore').catch(async () => { // history and tabs can hold tokens: git never picks this folder up
+        const g = await (await dir.getFileHandle('.gitignore', { create: true })).createWritable();
+        await g.write("# ApiMan's private, local-only state\n*\n");
+        await g.close();
+      });
+      const w = await (await dir.getFileHandle('state.json', { create: true })).createWritable(); // replaced as a whole on close
+      await w.write(JSON.stringify(obj));
+      await w.close();
+    },
+  };
+}
+
 // The chosen folder handle survives reloads in IndexedDB (localStorage can't hold it).
 function idbHandle(op, value) {
   return new Promise((resolve, reject) => {
@@ -545,12 +663,12 @@ async function browserSend(wire, signal) {
   };
 }
 
-let backend = null; // { mode, collections, environments, send }
+let backend = null; // { mode, collections, environments, state, send }; state is null when data stays in this browser
 
 function makeBackend(mode, dir) {
-  if (mode === 'local') return { mode, collections: serverStore('collections'), environments: serverStore('environments'), send: serverSend };
-  if (dir) return { mode, dir, collections: folderStore(dir, 'collections'), environments: folderStore(dir, 'environments'), send: browserSend };
-  return { mode, collections: browserStore('collections'), environments: browserStore('environments'), send: browserSend };
+  if (mode === 'local') return { mode, collections: serverStore('collections'), environments: serverStore('environments'), state: serverState(), send: serverSend };
+  if (dir) return { mode, dir, collections: folderStore(dir, 'collections'), environments: folderStore(dir, 'environments'), state: folderState(dir), send: browserSend };
+  return { mode, collections: browserStore('collections'), environments: browserStore('environments'), state: null, send: browserSend };
 }
 
 // =====================================================================================================
@@ -2634,7 +2752,7 @@ function renderTabs() {
 
 function renderWelcome() {
   const hasData = state.colList.length > 0 || state.history.length > 0;
-  const where = backend && backend.mode === 'local' ? 'on this computer' : 'in this browser';
+  const where = backend && (backend.mode === 'local' || backend.dir) ? 'on this computer' : 'in this browser';
   const kbd = ui.kbd;
   const cols = [];
   if (state.history.length) {
@@ -4022,7 +4140,7 @@ function renderDialog({ title, body, buttons = [], wide = false, confirm = false
 function closeDialog() { $('#dlg').close(); }
 
 /** Themed replacement for prompt()/confirm(): resolves to the entered text / true, or null / false when cancelled. */
-function ask({ title, message, input, ok = 'OK', danger = false, pre = false }) {
+function ask({ title, message, input, ok = 'OK', cancel = 'Cancel', danger = false, pre = false }) {
   return new Promise((resolve) => {
     let settled = false;
     const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
@@ -4040,8 +4158,9 @@ function ask({ title, message, input, ok = 'OK', danger = false, pre = false }) 
         field ? ui.field(input.label, field) : null,
       ],
       confirm: true,
+      cancel: false, // the footer below already has it
       buttons: [
-        { label: 'Cancel', onClick: () => { settle(field ? null : false); return true; } },
+        { label: cancel, onClick: () => { settle(field ? null : false); return true; } },
         { label: ok, primary: !danger, danger, solid: danger, onClick: submit },
       ],
       onClose: () => settle(field ? null : false),
@@ -5559,17 +5678,31 @@ function bindChrome() {
 }
 
 // ---------- browser-mode folder ----------
-async function useFolder(dir) {
-  backend = makeBackend('browser', dir);
-  state.cols = {};
-  state.envs = {};
-  state.tabs = state.tabs.filter((t) => !t.cid);
-  state.active = state.tabs.length - 1;
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+/** The side-foot line and button once a folder holds the data. */
+function showFolder(dir) {
   $('#dataDir').textContent = `Folder "${dir.name}" on this computer`;
+  $('#dataDir').title = 'Collections, environments, open tabs and settings are saved in this folder.';
   const btn = $('#btnFolder');
+  btn.hidden = false;
   btn.textContent = 'Change folder';
   btn.onclick = () => pickFolder().catch((e) => e.name !== 'AbortError' && toast(e.message, 'err'));
+}
+/** Switches the data to this folder: its workspace state wins; a folder used for the first time is offered this browser's data. */
+async function useFolder(dir, { starting = false } = {}) {
+  if (!starting) { writeTabs(); await workspace.flush(); } // the old place keeps your latest tabs
+  backend = makeBackend('browser', dir);
+  showFolder(dir);
+  const fresh = await workspace.load();
+  if (fresh) await offerCopyIn(dir);
+  if (starting) return;
+  if (!fresh) { try { sessionStorage.removeItem('apiman:outs'); } catch { /* none */ } } // kept responses belonged to the old tabs
+  state.cols = {};
+  state.envs = {};
+  state.tabs = [];
+  state.active = -1;
   await Promise.all([refreshCollections(), refreshEnvironments()]);
+  await restoreTabs();
   renderEnvPicker();
   renderAll();
 }
@@ -5578,7 +5711,87 @@ async function pickFolder() {
   const dir = await window.showDirectoryPicker({ id: 'apiman', mode: 'readwrite' });
   await idbHandle('set', dir);
   await useFolder(dir);
-  toast(`Saving to the "${dir.name}" folder`);
+  toast(`Saving to the "${dir.name}" folder`, 'ok');
+}
+/** Start-up question in website mode: where your data lives. Resolves to a usable folder handle, or null to keep
+ *  it in this browser for now (remembered until this browser session ends, so the next visit asks again). */
+function askDataFolder(remembered) {
+  return new Promise((resolve) => {
+    let done = false;
+    const settle = (v) => { if (!done) { done = true; resolve(v); } };
+    const keepHere = () => { try { sessionStorage.setItem('apiman:browserOnly', '1'); } catch { /* asks again */ } settle(null); return true; };
+    const choose = () => {
+      // Called straight from the click, so the browser lets the folder picker / permission prompt open.
+      const p = remembered
+        ? remembered.requestPermission({ mode: 'readwrite' }).then((r) => (r === 'granted' ? remembered : null))
+        : window.showDirectoryPicker({ id: 'apiman', mode: 'readwrite' });
+      return p.then(async (dir) => {
+        if (!dir) { toast('ApiMan needs permission to use the folder. Choose Reconnect and allow it.', 'warn'); return false; }
+        if (!remembered) await idbHandle('set', dir).catch(() => {});
+        settle(dir);
+        return true;
+      }, (e) => { if (e.name !== 'AbortError') toast(e.message, 'err'); return false; });
+    };
+    openDialog({
+      title: remembered ? `Reconnect the “${remembered.name}” folder?` : 'Where should ApiMan keep your data?',
+      body: ui.hint(remembered
+        ? 'Your collections, environments, open tabs and settings are saved in this folder. The browser asks for permission again after it restarts.'
+        : 'Choose a folder on this computer for your collections, environments, open tabs and settings. They are saved there as plain files you can back up. If you keep them in this browser instead, ApiMan asks again on your next visit.'),
+      confirm: true,
+      cancel: false,
+      buttons: [
+        { label: 'Keep in this browser for now', onClick: keepHere },
+        { label: remembered ? 'Reconnect' : 'Choose folder…', primary: true, onClick: choose },
+      ],
+      onClose: () => settle(null), // closed with Esc or the close button: this browser, and ask again next time
+    });
+  });
+}
+/** A folder used for the first time: copy this browser's collections and environments in (never deletes, never
+ *  overwrites: a clashing name gets a new file name). The workspace state was already written by workspace.load(). */
+async function offerCopyIn(dir) {
+  const src = { collections: browserStore('collections'), environments: browserStore('environments') };
+  const lists = { collections: await src.collections.list(), environments: await src.environments.list() };
+  const what = [lists.collections.length && plural(lists.collections.length, 'collection'), lists.environments.length && plural(lists.environments.length, 'environment')].filter(Boolean).join(' and ');
+  if (!what) return;
+  if (!(await ask({
+    title: `Copy your browser data into “${dir.name}”?`,
+    message: `This browser holds ${what}. Copy them into the folder? Nothing is deleted from this browser, and files already in the folder are kept.`,
+    ok: 'Copy into folder', cancel: 'Not now',
+  }))) return;
+  try {
+    const moved = { collections: new Map(), environments: new Map() };
+    for (const kind of ['collections', 'environments']) {
+      const dest = backend[kind];
+      const have = new Set((await dest.list()).map((d) => d.id.toLowerCase()));
+      for (const { id } of lists[kind]) {
+        const doc = await src[kind].get(id);
+        if (kind === 'environments' && id === GLOBALS_ID && have.has(GLOBALS_ID)) { // one Globals: add the variables it lacks
+          const g = await dest.get(GLOBALS_ID);
+          const keys = new Set((g.values || []).map((v) => v.key));
+          g.values = [...(g.values || []), ...(doc.values || []).filter((v) => !keys.has(v.key))];
+          await dest.put(GLOBALS_ID, g);
+          continue;
+        }
+        let nid = id;
+        if (have.has(id.toLowerCase())) nid = await dest.create(doc); else await dest.put(id, doc);
+        have.add(nid.toLowerCase());
+        if (nid !== id) moved[kind].set(id, nid);
+      }
+    }
+    // Tabs, open folders and the chosen environment follow a copy that got a new file name.
+    const col = (id) => moved.collections.get(id) || id;
+    const tabs = ls.get('apiman:tabs', null);
+    if (tabs && Array.isArray(tabs.tabs) && moved.collections.size) ls.set('apiman:tabs', { ...tabs, tabs: tabs.tabs.map((t) => (t && t.cid ? { ...t, cid: col(t.cid) } : t)) });
+    if (moved.collections.size) {
+      state.open = new Set([...state.open].map((k) => { const i = String(k).indexOf(':'); return i === -1 ? col(k) : col(k.slice(0, i)) + k.slice(i); }));
+      saveOpen();
+    }
+    if (moved.environments.has(state.activeEnv)) { state.activeEnv = moved.environments.get(state.activeEnv); ls.set('apiman:activeEnv', state.activeEnv); }
+    toast(`Copied ${what} into "${dir.name}"`, 'ok');
+  } catch (e) {
+    toast(`Couldn't copy everything into the folder: ${e.message}`, 'err');
+  }
 }
 
 // =====================================================================================================
@@ -5697,6 +5910,15 @@ function initResizers() {
   initResizers.setSide = (px) => setSideW(px);
   initResizers.showSide = () => setSideW(ls.get('apiman:layout', {}).side || 288, false);
   initResizers.snapshot = () => ({ ...ls.get('apiman:layout', {}) });
+  initResizers.load = () => { // the data folder's layout replaced localStorage's
+    for (const k of Object.keys(layout)) delete layout[k];
+    Object.assign(layout, ls.get('apiman:layout', {}));
+    if (!layout.v2) { if (!layout.reqH || layout.reqH === 50) layout.reqH = 35; layout.v2 = true; ls.set('apiman:layout', layout); }
+    setSideW(layout.side || 288, false);
+    root.style.setProperty('--req-w', `${layout.req || 50}%`);
+    root.style.setProperty('--req-h', `${layout.reqH || 35}%`);
+    initResizers.refresh();
+  };
   initResizers.restore = (snap) => {
     Object.assign(layout, { side: snap.side, req: snap.req, reqH: snap.reqH });
     ls.set('apiman:layout', layout);
@@ -5976,26 +6198,33 @@ async function start() {
     badge.className = 'pill';
     badge.title = 'Requests are sent by this browser, so the API must allow CORS. Run ApiMan locally to call any API.';
     state.settings.insecure = false;
-    $('#dataDir').textContent = /\.github\.io$/.test(location.hostname)
-      ? `Saved in this browser. Note: every site on ${location.hostname} can read this browser storage, so keep real secrets in local mode (python3 server.py) or a folder.`
-      : 'Saved in this browser.';
+    const shared = /\.github\.io$/.test(location.hostname)
+      ? ` Note: every site on ${location.hostname} can read this browser storage, so keep real secrets in local mode (python3 server.py) or a folder.` : '';
+    $('#dataDir').textContent = window.showDirectoryPicker
+      ? `Saved in this browser.${shared}`
+      : `Saved in this browser. To keep your data in a folder on this computer, open ApiMan in Chrome or Edge, or run it locally (python3 server.py).${shared}`;
     if (window.showDirectoryPicker) {
       const btn = $('#btnFolder');
       btn.hidden = false;
       btn.onclick = () => pickFolder().catch((e) => e.name !== 'AbortError' && toast(e.message, 'err'));
-      const dir = await idbHandle('get').catch(() => null);
-      if (dir) {
-        if ((await dir.queryPermission({ mode: 'readwrite' })) === 'granted') {
-          backend = makeBackend('browser', dir);
-          $('#dataDir').textContent = `Folder "${dir.name}" on this computer`;
-          btn.textContent = 'Change folder';
-        } else {
-          btn.textContent = `Reconnect folder "${dir.name}"`;
-          btn.onclick = async () => { if ((await dir.requestPermission({ mode: 'readwrite' })) === 'granted') await useFolder(dir); };
-        }
+      let dir = await idbHandle('get').catch(() => null);
+      renderAll(); // the app is drawn (empty) behind the question below, not a blank page
+      let browserOnly = false;
+      try { browserOnly = sessionStorage.getItem('apiman:browserOnly') === '1'; } catch { /* ask */ }
+      if (dir && (await dir.queryPermission({ mode: 'readwrite' }).catch(() => 'denied')) !== 'granted') {
+        const remembered = dir;
+        btn.textContent = `Reconnect folder "${remembered.name}"`;
+        btn.onclick = async () => { if ((await remembered.requestPermission({ mode: 'readwrite' })) === 'granted') await useFolder(remembered); };
+        dir = browserOnly ? null : await askDataFolder(remembered);
+      } else if (!dir && !browserOnly) {
+        dir = await askDataFolder(null);
       }
+      if (dir) await useFolder(dir, { starting: true });
     }
   }
+  if (!backend.dir) await workspace.load(); // local mode: the server's data folder; browser storage: nothing to read
+  window.addEventListener('pagehide', () => workspace.flush({ unloading: true })); // after writeTabs (bindChrome)
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') workspace.flush({ unloading: true }); });
   try {
     await Promise.all([refreshCollections(), refreshEnvironments()]);
     await restoreTabs();

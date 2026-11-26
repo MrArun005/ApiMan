@@ -2,8 +2,10 @@
 
 A private, local API client in the spirit of Postman. You don't need an account, and nothing syncs to the cloud. It reads and writes Postman files, so you can move your collections back and forth.
 
-- **Local mode** (`python3 server.py`): requests go out from your own computer, so they work over your VPN, reach internal hosts, and have no CORS limits. Collections are plain JSON files in a folder.
-- **Website mode** (GitHub Pages): open the page and send requests straight from the browser. The API must allow cross-site requests (CORS). Data stays in your browser, or in a folder you pick (Chrome/Edge).
+- **Local mode** (`python3 server.py`): requests go out from your own computer, so they work over your VPN, reach internal hosts, and have no CORS limits. Everything is saved in the data folder (`collections/`, or `--data`).
+- **Website mode** (GitHub Pages): open the page and send requests straight from the browser. The API must allow cross-site requests (CORS). In Chrome and Edge, ApiMan asks on start which folder on your computer to keep your data in (and offers to copy in what the browser already holds); you can also keep it in the browser for now. Firefox and Safari can't open folders, so data stays in the browser there.
+
+**Where your data lives.** In the data folder, collections are `*.json`, environments are `environments/*.json`, and your workspace (settings, open tabs, history, layout) is `.apiman/state.json`. The browser only keeps a cache of it, so clearing browser storage loses nothing. OAuth tokens and kept responses are never written to the folder: they last only as long as the browser tab.
 
 ```bash
 git clone https://github.com/MrArun005/ApiMan.git && cd ApiMan
