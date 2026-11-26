@@ -1,5 +1,6 @@
 // ApiMan layout check: drives the real app through every width / sidebar / layout / text / density /
-// divider combination and asserts the layout rules a reviewer checks by hand. Read-only: it never saves.
+// divider combination, and the Diff / Tests / Scripts / OAuth surfaces, and asserts the layout rules a reviewer
+// checks by hand (see DESIGN.md). Read-only: it never saves.
 //
 //   PLAYWRIGHT=/path/to/node_modules/playwright CHROMIUM=/path/to/Chromium node tools/layout-check.mjs
 //
@@ -83,10 +84,12 @@ const measure = () => page.evaluate(() => {
   // 6. the response scrolls inside its own panel and keeps a usable height
   const body = document.querySelector('#respBody'), rb = R(body);
   const scroller = body.querySelector('.CodeMirror-scroll') || body;
-  if (!phone && rb.bottom > innerHeight + 1) fails.push(`response body runs past the window (${Math.round(rb.bottom)})`);
-  if (phone && rb.height > innerHeight * 0.7 + 2) fails.push(`phone response not capped (${Math.round(rb.height)})`);
-  if (scroller.scrollHeight <= scroller.clientHeight && body.scrollHeight <= body.clientHeight) fails.push('large response does not scroll inside its panel');
-  if (rb.height < 120) fails.push(`response body only ${Math.round(rb.height)}px tall`);
+  if (vis(body)) { // only while the Body tab is showing
+    if (!phone && rb.bottom > innerHeight + 1) fails.push(`response body runs past the window (${Math.round(rb.bottom)})`);
+    if (phone && rb.height > innerHeight * 0.7 + 2) fails.push(`phone response not capped (${Math.round(rb.height)})`);
+    if (scroller.scrollHeight <= scroller.clientHeight && body.scrollHeight <= body.clientHeight) fails.push('large response does not scroll inside its panel');
+    if (rb.height < 120) fails.push(`response body only ${Math.round(rb.height)}px tall`);
+  }
   // 7. readable text and clickable targets
   // the divider really resizes: a sane range, never inverted
   const sp = document.querySelector('#splitResizer'), mn = +sp.getAttribute('aria-valuemin'), mx = +sp.getAttribute('aria-valuemax');
@@ -102,6 +105,14 @@ const measure = () => page.evaluate(() => {
     const fs = parseFloat(getComputedStyle(el).fontSize);
     if (fs < 9.5) { fails.push(`tiny text ${fs}px in ${name(el)}`); break; }
   }
+  // 8. notes, hints, result rows and toasts stay inside their section, and are never cut to a few letters
+  for (const el of document.querySelectorAll('.hint, .note, .data-dir, .test-row, .toast.show')) {
+    if (!vis(el) || el.closest('dialog:not([open]), [hidden], .CodeMirror')) continue;
+    const box = el.matches('.toast') ? (phone || de.dataset.sideHidden === 'true' || de.dataset.side === 'right' ? null : document.querySelector('.side'))
+      : el.closest('.pane, .side, dialog[open], #welcomeInner');
+    if (box && vis(box)) { const r = R(el), b = R(box); if (r.right > b.right + 1 || r.left < b.left - 1) fails.push(`${name(el)} spills out of ${name(box)}`); }
+    if (getComputedStyle(el).textOverflow === 'ellipsis' && el.scrollWidth > el.clientWidth + 1) fails.push(`note cut short: ${name(el)}`);
+  }
   return fails;
 });
 
@@ -110,6 +121,13 @@ const apply = (side, layout, [text, density]) => page.evaluate(([side, layout, t
   applyAppearance(state.settings);
 }, [side, layout, text, density]);
 
+// Measure only once the layout has stopped moving (a fixed wait sometimes caught a relayout half done).
+const settle = () => page.evaluate(() => new Promise((done) => {
+  const snap = () => [...document.querySelectorAll('.side, .main, #reqTabs, #respTabs, .side .seg')].map((e) => { const r = e.getBoundingClientRect(); return `${r.left},${r.width},${e.scrollWidth}`; }).join('|');
+  let last = '', same = 0, n = 0;
+  const tick = () => { const now = snap(); same = now === last ? same + 1 : 0; last = now; if (same >= 3 || ++n > 60) done(); else requestAnimationFrame(tick); };
+  setTimeout(() => requestAnimationFrame(tick), 60);
+}));
 const results = new Map(); // failure text -> combos
 let combos = 0;
 for (const [w, h] of WIDTHS) {
@@ -119,13 +137,35 @@ for (const [w, h] of WIDTHS) {
     await apply(side, layout, sc);
     await page.evaluate(() => document.querySelector('#splitResizer').dispatchEvent(new MouseEvent('dblclick', { bubbles: true })));
     if (split !== 'default') { await page.focus('#splitResizer'); await page.keyboard.press(split); }
-    await page.waitForTimeout(120);
+    await settle();
     const fails = await measure();
     combos++;
     const tag = `${w} ${side} ${layout} text${sc[0]} dens${sc[1]} ${split}`;
     for (const f of fails) { const key = f.replace(/\d+(\.\d+)?/g, '#'); if (!results.has(key)) results.set(key, { example: f, combos: [] }); results.get(key).combos.push(tag); }
   }
 }
+
+// The other surfaces (Diff, Tests, Scripts, the OAuth form) at every width and the extreme text sizes, with a long
+// toast showing: the same rules apply. A second send gives Diff something to compare. The scratch tab is never saved.
+await page.click('#btnSend');
+await page.waitForFunction(() => /\d{3}/.test(document.querySelector('#respStatus').textContent) && !document.querySelector('#respStatus .sending'), null, { timeout: 15000 });
+await page.evaluate(() => { cur().ed.auth = { type: 'oauth2', grant: 'authorization_code', pkce: true, clientAuth: 'header', headerPrefix: 'Bearer' }; renderAuth(); });
+for (const [w, h] of WIDTHS) for (const sc of [[1, 1], [1.5, 1.4]]) for (const [req, resp] of [['auth', 'rdiff'], ['scripts', 'rtests']]) {
+  await page.setViewportSize({ width: w, height: h });
+  await apply('left', 'auto', sc);
+  await page.evaluate(([req, resp]) => {
+    document.querySelector('#splitResizer').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    document.querySelector(`#reqTabs [data-tab=${req}]`).click();
+    document.querySelector(`#tab-${resp}`).click();
+    toast('A long message that has to wrap inside the sidebar instead of spilling over the editor next to it.');
+  }, [req, resp]);
+  await settle();
+  const fails = await measure();
+  combos++;
+  const tag = `${w} ${req}+${resp} text${sc[0]} dens${sc[1]}`;
+  for (const f of fails) { const key = f.replace(/\d+(\.\d+)?/g, '#'); if (!results.has(key)) results.set(key, { example: f, combos: [] }); results.get(key).combos.push(tag); }
+}
+await page.evaluate(() => { cur().ed.auth = { type: 'inherit' }; renderAuth(); document.querySelector('#reqTabs [data-tab=params]').click(); document.querySelector('#tab-rbody').click(); });
 
 // Settings dialog at every width and the extreme text sizes: nothing cut, nothing overlapping.
 for (const [w, h] of WIDTHS) for (const sc of [[1, 1], [1.3, 1.25]]) {

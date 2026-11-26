@@ -12,7 +12,8 @@ python3 server.py --data ~/my-apis    # keep collections + environments somewher
 python3 server.py --ca-file ~/company-root-ca.pem   # trust internal HTTPS certificates
 python3 server.py run api.json -e staging.json --junit report.xml   # run a collection headlessly (CI)
 python3 test_server.py                # server self-check
-node tools/layout-check.mjs           # layout check: 508 width/sidebar/layout/text/density/divider combinations (needs Playwright)
+node tools/layout-check.mjs           # layout check: 544 combinations of width, sidebar, layout, text, density, divider and panel (needs Playwright)
+node tools/ui-lint.mjs                # UI rules from DESIGN.md: button styles and where primary buttons may go
 ```
 
 You only need Python 3. There's nothing to install.

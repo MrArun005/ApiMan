@@ -1512,14 +1512,13 @@ function oauthFields(model, field, onChange, vars) {
     h('select', { onchange: (e) => { model[key] = e.target.value; onChange(); if (onPick) onPick(); } },
       ...opts.map(([v, l]) => h('option', { value: v, ...(String(model[key] ?? opts[0][0]) === v ? { selected: true } : {}) }, l))));
   const box = h('div', { class: 'oauth' });
-  const status = h('div', { class: 'oauth-status', role: 'status', 'aria-live': 'polite' });
+  const status = h('p', { class: 'hint', role: 'status', 'aria-live': 'polite' });
   const showStatus = async () => {
     const tok = await oauthPeek(model, vars());
-    if (!tok || !tok.accessToken) { status.replaceChildren(h('span', { class: 'hint' }, model.grant === 'authorization_code' || !model.grant ? 'No token yet. Click "Get new token" to sign in.' : 'No token yet. One is fetched automatically when you send.')); return; }
+    if (!tok || !tok.accessToken) { status.textContent = model.grant === 'authorization_code' || !model.grant ? 'No token yet: you\'ll sign in on the first send.' : 'No token yet: one is fetched on the first send.'; return; }
     const left = tok.expiresAt ? Math.round((tok.expiresAt - Date.now()) / 60000) : null;
-    status.replaceChildren(h('span', { class: `pill ${oauthFresh(tok) ? 'ok' : 'warn'}` }, oauthFresh(tok) ? 'Token ready' : 'Expired'),
-      h('span', { class: 'hint' }, left == null ? ' No expiry given.' : left > 0 ? ` Expires in ${left < 120 ? `${left} min` : `${Math.round(left / 60)} h`}.` : tok.refreshToken ? ' Refreshes automatically on the next send.' : ' Get a new one.'),
-      h('code', { class: 'oauth-tok', title: 'Start of the access token' }, `${tok.accessToken.slice(0, 12)}…`));
+    status.textContent = !oauthFresh(tok) ? (tok.refreshToken ? 'Token expired: it refreshes on the next send.' : 'Token expired: get a new one.')
+      : `Token ready${left == null ? '' : `, expires in ${left < 120 ? `${left} min` : `${Math.round(left / 60)} h`}`}.`;
   };
   const onToken = () => { if (box.isConnected) showStatus(); else window.removeEventListener('apiman:oauth', onToken); };
   window.addEventListener('apiman:oauth', onToken);
@@ -1530,22 +1529,23 @@ function oauthFields(model, field, onChange, vars) {
     kids.push(field('Token URL', 'tokenUrl', { placeholder: 'https://login.example.com/oauth2/token' }));
     kids.push(h('div', { class: 'grid-2' }, field('Client ID', 'clientId', { placeholder: '{{clientId}}' }), field('Client secret', 'clientSecret', { secret: true, placeholder: grant === 'authorization_code' ? 'Optional with PKCE' : '{{clientSecret}}' })));
     if (grant === 'password') kids.push(h('div', { class: 'grid-2' }, field('Username', 'username'), field('Password', 'password', { secret: true })));
-    kids.push(h('div', { class: 'grid-2' }, field('Scope', 'scope', { placeholder: 'openid profile api.read' }), field('Audience (optional)', 'audience', { placeholder: 'https://api.example.com' })));
+    kids.push(h('div', { class: 'grid-2' }, field('Scope', 'scope', { placeholder: 'openid profile api.read' }), field('Audience', 'audience', { placeholder: 'Optional' })));
     kids.push(h('div', { class: 'grid-2' }, sel('Send client credentials', 'clientAuth', [['header', 'As Basic auth header'], ['body', 'In the request body']]),
       field('Header prefix', 'headerPrefix', { placeholder: 'Bearer' })));
     if (grant === 'authorization_code') {
-      kids.push(h('label', { class: 'check' }, h('input', { type: 'checkbox', ...(model.pkce !== false ? { checked: true } : {}), onchange: (e) => { model.pkce = e.target.checked; onChange(); } }), ' Use PKCE (recommended)'));
-      kids.push(h('div', { class: 'field' }, h('label', null, 'Callback URL to register with your provider'),
+      kids.push(h('label', { class: 'check' }, h('input', { type: 'checkbox', ...(model.pkce !== false ? { checked: true } : {}), onchange: (e) => { model.pkce = e.target.checked; onChange(); } }),
+        h('span', null, 'Use PKCE', h('small', null, 'Recommended. Required for clients without a secret.'))));
+      kids.push(h('div', { class: 'field' }, h('label', null, 'Callback URL (register it with your provider)'),
         h('div', { class: 'secret-field' }, h('input', { value: oauthRedirectUri(), readonly: true, spellcheck: 'false' }),
-          h('button', { type: 'button', class: 'btn small', onclick: () => navigator.clipboard.writeText(oauthRedirectUri()).then(() => toast('Copied'), () => toast('Copying was blocked by the browser.')) }, 'Copy'))));
+          h('button', { type: 'button', class: 'btn icon', title: 'Copy', 'aria-label': 'Copy the callback URL', onclick: () => navigator.clipboard.writeText(oauthRedirectUri()).then(() => toast('Copied'), () => toast('Copying was blocked by the browser.')) }, icon('copy')))));
     }
-    kids.push(h('div', { class: 'oauth-actions' }, status,
-      h('button', { type: 'button', class: 'btn small primary', onclick: async (e) => {
+    kids.push(status, h('div', { class: 'actions' },
+      h('button', { type: 'button', class: 'btn small', onclick: async (e) => {
         const btn = e.currentTarget; btn.disabled = true;
-        try { await oauthToken(model, vars(), { force: true }); toast('Got a new access token.'); } catch (err) { toast(err.message); } finally { btn.disabled = false; showStatus(); }
+        try { await oauthToken(model, vars(), { force: true }); toast('Got a new token'); } catch (err) { toast(err.message); } finally { btn.disabled = false; showStatus(); }
       } }, 'Get new token'),
-      h('button', { type: 'button', class: 'btn small', onclick: async () => { await oauthClear(model, vars()); showStatus(); toast('Token cleared.'); } }, 'Clear token')));
-    kids.push(h('p', { class: 'hint' }, 'Tokens are fetched and refreshed automatically when you send. They stay in this browser tab only and are never saved into collection files. Settings use your saved variables, so scripts can\'t redirect your client secret.'));
+      h('button', { type: 'button', class: 'btn small', onclick: async () => { await oauthClear(model, vars()); showStatus(); toast('Token cleared'); } }, 'Clear token')));
+    kids.push(h('p', { class: 'hint' }, 'Tokens stay in this browser tab, never in collection files.'));
     box.replaceChildren(...kids);
     linkLabels(box);
     showStatus();
@@ -3017,7 +3017,7 @@ function addToTests(t, code, what) {
   t.ed.test = (t.ed.test.trim() ? t.ed.test.replace(/\s*$/, '\n\n') : '') + code + '\n';
   t.scriptKind = 'test'; // show where it went
   if (cur() === t) { renderScripts(); renderCounts(); markDirty(); }
-  toast(`${what} to this request's Tests script (Scripts → Tests). It runs on the next send${t.cid ? '; save to keep it' : ''}.`);
+  toast(`${what} to Scripts → Tests. It runs on the next send.`);
 }
 
 function jsonValueMenu(cm, path, anchor) {
@@ -3259,79 +3259,69 @@ function renderDiff() {
   cnt.textContent = '';
   cnt.className = 'count';
   const activeName = state.activeEnv && state.envs[state.activeEnv] ? state.envs[state.activeEnv].name : 'No environment';
-  // Compare-with picker
+  const hasOut = out && out.res && !out.error;
+  const base = diffBaseline(t);
+  // Toolbar: the same .pane-tools row as the Body view (select, filter, then text actions on the right).
   const envChoices = [...(state.activeEnv ? [{ id: '', name: 'No environment' }] : []), ...state.envList.filter((e) => e.id !== state.activeEnv)];
-  const picker = h('select', { 'aria-label': 'Compare the latest response with', onchange: (e) => { t.diffWith = e.target.value; renderDiff(); } },
-    h('option', { value: 'prev' }, 'Previous response'),
-    h('option', { value: 'pinned', ...(t.pinned ? {} : { disabled: true }) }, t.pinned ? `Pinned response (${t.pinned.res.status}, ${new Date(t.pinned.pinnedAt).toLocaleTimeString()})` : 'Pinned response (pin one first)'),
-    ...(envChoices.length ? [h('optgroup', { label: `This request with another environment (now: ${activeName})` },
-      ...envChoices.map((e) => h('option', { value: `env:${e.id}` }, `Send with ${e.name}`)))] : []));
+  const picker = h('select', { 'aria-label': 'Compare the latest response with', title: 'Compare the latest response with…', onchange: (e) => { t.diffWith = e.target.value; renderDiff(); } },
+    h('option', { value: 'prev' }, 'vs previous response'),
+    h('option', { value: 'pinned', ...(t.pinned ? {} : { disabled: true }) }, t.pinned ? `vs pinned (${t.pinned.res.status}, ${new Date(t.pinned.pinnedAt).toLocaleTimeString([], { hour12: false })})` : 'vs pinned (pin one first)'),
+    ...(envChoices.length ? [h('optgroup', { label: `Send again with another environment (now: ${activeName})` }, ...envChoices.map((e) => h('option', { value: `env:${e.id}` }, `vs ${e.name}`)))] : []));
   picker.value = t.diffWith || 'prev';
   if (picker.value !== (t.diffWith || 'prev')) { t.diffWith = 'prev'; picker.value = 'prev'; }
-  const ignoreIn = h('input', { type: 'text', class: 'diff-ignore', spellcheck: 'false', 'aria-label': 'Fields to ignore',
-    placeholder: 'Ignore fields: updatedAt, data.items[*].etag', value: state.diffIgnore || '',
+  const ignoreIn = h('input', { type: 'search', class: 'diff-ignore', spellcheck: 'false', 'aria-label': 'Fields to ignore', placeholder: 'Ignore fields',
+    title: 'Comma-separated: a name (updatedAt) ignores it anywhere, a path (data.items[*].etag) ignores that path', value: state.diffIgnore || '',
     oninput: debounce((e) => { state.diffIgnore = e.target.value; ls.set('apiman:diffIgnore', state.diffIgnore); renderDiff(); requestAnimationFrame(() => { const el = $('#respDiff .diff-ignore'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }); }, 350) });
-  const hasOut = out && out.res && !out.error;
-  const pin = h('button', { type: 'button', class: 'btn small', disabled: !hasOut, title: 'Keep this response to compare later responses with',
-    onclick: () => { t.pinned = { ...out, pinnedAt: Date.now() }; t.diffWith = 'pinned'; toast('Pinned. Later responses are compared with this one.'); renderDiff(); } }, 'Pin this response');
-  const base = diffBaseline(t);
-  const bar = h('div', { class: 'diff-bar' }, h('label', null, 'Compare with ', picker), pin, ignoreIn);
+  const actions = h('div', { class: 'tool-group' },
+    base && base.envId !== undefined && base.out && !base.pending ? h('button', { type: 'button', class: 'btn small ghost', title: `Send this request with ${base.label} again`, onclick: () => runInEnv(t, base.envId) }, 'Resend') : null,
+    h('button', { type: 'button', class: 'btn small ghost', disabled: !hasOut, title: 'Keep this response to compare later responses with',
+      onclick: () => { t.pinned = { ...out, pinnedAt: Date.now() }; t.diffWith = 'pinned'; toast('Pinned'); renderDiff(); } }, 'Pin'));
+  const bar = h('div', { class: 'pane-tools' }, picker, ignoreIn, actions);
   const body = [];
-  const hint = (...x) => body.push(h('div', { class: 'empty-state' }, h('p', { class: 'hint' }, ...x)));
+  const empty = (...kids) => body.push(h('div', { class: 'empty-state' }, ...kids));
   if (!hasOut) {
-    hint('Send the request; Diff then compares each response with the one before it, a response you pin, or the same request sent with another environment.');
+    empty(h('p', { class: 'hint' }, 'Send the request. Each response is then compared with the previous one, a pinned one, or the same request sent with another environment.'));
   } else if (base && base.envId !== undefined && (!base.out || base.pending)) {
-    if (base.pending) hint(`Sending this request with ${base.label}…`);
-    else {
-      body.push(h('div', { class: 'empty-state' },
-        h('p', { class: 'hint' }, `Send this request again with the variables of "${base.label}" (its URL, credentials and all), then compare that response with the one from "${activeName}". Variable changes from its scripts aren't saved.`),
-        h('button', { type: 'button', class: 'btn primary', onclick: () => runInEnv(t, base.envId) }, `Send with ${base.label}`)));
-    }
+    if (base.pending) empty(h('p', { class: 'hint' }, `Sending with ${base.label}…`));
+    else empty(h('p', { class: 'hint' }, `Sends this request again with the variables of ${base.label}, then compares the two responses. Scripts' variable changes aren't saved.`),
+      h('div', { class: 'actions' }, h('button', { type: 'button', class: 'btn small', onclick: () => runInEnv(t, base.envId) }, `Send with ${base.label}`)));
   } else if (!base) {
-    hint(t.diffWith === 'pinned' ? 'Pin a response first.' : 'Send the request again to compare the new response with this one. Or pin this response, or pick an environment above to compare against.');
+    empty(h('p', { class: 'hint' }, t.diffWith === 'pinned' ? 'Pin a response first.' : 'Send again to compare the next response with this one, or pin this one.'));
   } else if (base.out.error || !base.out.res) {
     body.push(h('p', { class: 'note err' }, `The ${base.label} request failed: ${base.out.error || 'no response'}`));
-    if (base.envId !== undefined) body.push(h('button', { type: 'button', class: 'btn small', onclick: () => runInEnv(t, base.envId) }, 'Try again'));
+    if (base.envId !== undefined) body.push(h('div', { class: 'actions' }, h('button', { type: 'button', class: 'btn small', onclick: () => runInEnv(t, base.envId) }, 'Try again')));
   } else {
     const r = compareOuts(base.out, out, state.diffIgnore);
     const n = diffCount(r);
     cnt.textContent = String(n);
-    cnt.className = `count ${n ? '' : 'pass'}`; // a difference isn't a failure
-    const leftLabel = base.label, rightLabel = base.envId !== undefined ? activeName : 'Latest';
-    const delta = (x, y, fmt) => (x === y ? fmt(y) : `${fmt(x)} → ${fmt(y)}`);
-    body.push(h('div', { class: 'diff-meta' },
-      h('span', { class: r.status[0] === r.status[1] ? '' : 'chg' }, 'Status ', h('b', null, delta(r.status[0], r.status[1], String))),
-      h('span', null, 'Time ', h('b', null, delta(r.time[0], r.time[1], fmtMs))),
-      h('span', null, 'Size ', h('b', null, delta(r.size[0], r.size[1], fmtSize))),
-      base.envId !== undefined ? h('button', { type: 'button', class: 'btn small ghost', onclick: () => runInEnv(t, base.envId) }, `Resend with ${base.label}`) : null));
-    const val = (v) => (v === undefined ? '' : typeof v === 'string' ? JSON.stringify(v) : JSON.stringify(v));
+    cnt.className = `count ${n ? '' : 'pass'}`;
+    const left = base.label, right = base.envId !== undefined ? activeName : 'latest';
+    const pair = (x, y, fmt) => (x === y ? fmt(y) : h('b', null, `${fmt(x)} → ${fmt(y)}`));
+    body.push(h('p', { class: 'hint' }, `${left} → ${right}: status `, pair(r.status[0], r.status[1], String), ', time ', pair(r.time[0], r.time[1], fmtMs), ', size ', pair(r.size[0], r.size[1], fmtSize)));
+    const val = (v) => (v === undefined ? '–' : JSON.stringify(v));
     const short = (s) => (s.length > 300 ? s.slice(0, 300) + '…' : s);
-    const pill = (type) => h('span', { class: `pill ${type === 'added' ? 'ok' : type === 'removed' ? 'err' : 'warn'}` }, type[0].toUpperCase() + type.slice(1));
-    const table = (rows, cols) => h('table', { class: 'grid diff-table' }, h('thead', null, h('tr', null, ...cols.map((c) => h('th', null, c)))), h('tbody', null, rows));
-    // body
+    // One change per row, like the Tests tab: pill, what changed, then before → after.
+    const row = (type, name, before, after) => h('div', { class: 'test-row' },
+      h('span', { class: `pill ${type === 'added' ? 'ok' : type === 'removed' ? 'err' : 'warn'}` }, type[0].toUpperCase() + type.slice(1)),
+      h('div', null, h('div', { class: 'mono' }, name), h('div', { class: 'msg mono' }, before, ' → ', after)));
+    const section = (title, summary, extra) => h('div', { class: 'pane-tools diff-section' }, h('span', { class: 'label' }, title), h('span', { class: 'hint' }, summary), extra);
     const b = r.body;
     if (b.kind === 'json') {
       const view = t.diffView || 'fields';
       const toggle = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Diff view' }, ...[['fields', 'Fields'], ['lines', 'Lines']].map(([k, l]) =>
         h('button', { type: 'button', class: `seg-btn${view === k ? ' on' : ''}`, role: 'radio', 'aria-checked': String(view === k), onclick: () => { t.diffView = k; renderDiff(); } }, l)));
-      body.push(h('div', { class: 'diff-head' }, h('h3', null, 'Body'), h('span', { class: 'hint' }, b.changes.length ? `${b.changes.length}${b.truncated ? '+' : ''} field change${b.changes.length === 1 ? '' : 's'}` : 'Same JSON', b.ignored ? `, ${b.ignored} ignored` : ''), toggle));
-      if (view === 'lines') body.push(renderLineDiff(b.lines(), leftLabel, rightLabel));
-      else if (b.changes.length) {
-        body.push(table(b.changes.map((c) => h('tr', null, h('td', null, pill(c.type)), h('td', { class: 'mono' }, c.path || '(root)'),
-          h('td', { class: 'mono del' }, c.note ? '' : short(val(c.before))), h('td', { class: 'mono ins' }, c.note || short(val(c.after))))), ['', 'Field', leftLabel, rightLabel]));
-        if (b.truncated) body.push(h('p', { class: 'hint' }, 'Showing the first 1000 changes.'));
-      } else body.push(h('p', { class: 'hint' }, 'The JSON bodies match (key order and formatting are ignored).'));
+      body.push(section('Body', `${b.changes.length ? `${b.changes.length}${b.truncated ? '+' : ''} change${b.changes.length === 1 ? '' : 's'}` : 'same JSON'}${b.ignored ? `, ${b.ignored} ignored` : ''}`, toggle));
+      if (view === 'lines') body.push(renderLineDiff(b.lines(), left, right));
+      else body.push(...b.changes.map((c) => row(c.type, c.path || '(root)', c.note ? '' : short(val(c.before)), c.note || short(val(c.after)))));
+      if (b.truncated && view !== 'lines') body.push(h('p', { class: 'hint' }, 'Showing the first 1000 changes.'));
     } else if (b.kind === 'text') {
-      body.push(h('div', { class: 'diff-head' }, h('h3', null, 'Body'), h('span', { class: 'hint' }, b.count ? `${b.count} changed line${b.count === 1 ? '' : 's'}` : 'Same text')));
-      if (b.count) body.push(renderLineDiff(b.lines(), leftLabel, rightLabel));
+      body.push(section('Body', b.count ? `${b.count} changed line${b.count === 1 ? '' : 's'}` : 'same text'));
+      if (b.count) body.push(renderLineDiff(b.lines(), left, right));
     } else {
-      body.push(h('div', { class: 'diff-head' }, h('h3', null, 'Body'), h('span', { class: 'hint' }, b.same ? 'Same' : 'Different', b.kind === 'large' ? ' (too large to compare line by line here)' : ' (binary)')));
+      body.push(section('Body', `${b.same ? 'same' : 'different'}${b.kind === 'large' ? ' (too large to compare here)' : ' (binary)'}`));
     }
-    // headers
-    body.push(h('div', { class: 'diff-head' }, h('h3', null, 'Headers'), h('span', { class: 'hint' },
-      r.headers.length ? `${r.headers.length} changed` : 'Same', r.hiddenHeaders ? `; ${r.hiddenHeaders} that change on every response (Date, request ids…) not shown` : '')));
-    if (r.headers.length) body.push(table(r.headers.map((c) => h('tr', null, h('td', null, pill(c.type)), h('td', { class: 'mono' }, c.name),
-      h('td', { class: 'mono del' }, short(c.before ?? '')), h('td', { class: 'mono ins' }, short(c.after ?? '')))), ['', 'Header', leftLabel, rightLabel]));
+    body.push(section('Headers', `${r.headers.length ? `${r.headers.length} changed` : 'same'}${r.hiddenHeaders ? `, ${r.hiddenHeaders} that change every time not shown` : ''}`));
+    body.push(...r.headers.map((c) => row(c.type, c.name, short(c.before ?? '–'), short(c.after ?? '–'))));
   }
   root.replaceChildren(bar, ...body);
 }
@@ -3472,15 +3462,18 @@ function renderWs(t) {
   t.respTab = 'rbody';
   switchPane('#respTabs', 'rbody');
   $('#respTools').hidden = true;
-  const input = h('textarea', { class: 'code', rows: 3, spellcheck: 'false', 'aria-label': 'Message to send', placeholder: ws.state === 'open' ? 'Message ({{variables}} work). Ctrl/Cmd+Enter sends.' : 'Connect to send messages.', value: t.wsDraft || '',
+  const send = () => { if (wsSend(t, input.value)) { input.value = ''; t.wsDraft = ''; input.focus(); } };
+  const input = h('textarea', { class: 'code short', rows: 3, spellcheck: 'false', 'aria-label': 'Message to send', placeholder: ws.state === 'open' ? 'Message: {{variables}} work' : 'Connect to send messages', value: t.wsDraft || '',
     oninput: (e) => { t.wsDraft = e.target.value; },
-    onkeydown: (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); if (wsSend(t, input.value)) { input.value = ''; t.wsDraft = ''; } } } });
-  const sendBtn = h('button', { type: 'button', class: 'btn primary', disabled: ws.state !== 'open', onclick: () => { if (wsSend(t, input.value)) { input.value = ''; t.wsDraft = ''; input.focus(); } } }, 'Send message');
-  const tools = h('div', { class: 'ws-tools' },
+    onkeydown: (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); send(); } } });
+  // Same building blocks as the rest of the response pane: a .pane-tools row, Console-style lines, small buttons.
+  const tools = h('div', { class: 'pane-tools' },
     h('input', { type: 'search', class: 'ws-filter', placeholder: 'Filter messages', 'aria-label': 'Filter messages', value: t.wsFilter || '', oninput: (e) => { t.wsFilter = e.target.value; renderWsLog(t, false); } }),
-    h('button', { type: 'button', class: 'btn small ghost', onclick: () => { ws.log = []; renderWsLog(t, false); } }, 'Clear'));
-  $('#respBody').replaceChildren(h('div', { class: 'ws' }, tools, h('div', { class: 'ws-log', id: 'wsLog', role: 'log', 'aria-live': 'polite' }),
-    h('div', { class: 'ws-compose' }, input, sendBtn)));
+    h('div', { class: 'tool-group' }, h('button', { type: 'button', class: 'btn small ghost', onclick: () => { ws.log = []; renderWsLog(t, false); } }, 'Clear')));
+  const compose = h('div', { class: 'ws-compose' }, input,
+    h('div', { class: 'pane-tools' }, h('span', { class: 'hint' }, `${MOD}+Enter sends`),
+      h('div', { class: 'tool-group' }, h('button', { type: 'button', class: 'btn small', disabled: ws.state !== 'open', onclick: send }, 'Send'))));
+  $('#respBody').replaceChildren(h('div', { class: 'ws' }, tools, h('div', { class: 'console ws-log', id: 'wsLog', role: 'log', 'aria-live': 'polite' }), compose));
   renderWsLog(t, true);
 }
 function renderWsLog(t, stick) {
@@ -3491,10 +3484,9 @@ function renderWsLog(t, stick) {
   const rows = t.ws.log.filter((m) => !f || String(m.data).toLowerCase().includes(f)).slice(-500).map((m) => {
     let body = String(m.data);
     if ((m.dir === 'in' || m.dir === 'out') && /^\s*[[{]/.test(body)) { try { JSON.parse(body); body = prettyJson(body, 2); } catch { /* as sent */ } }
-    return h('div', { class: `ws-msg ${m.dir}` },
-      h('span', { class: 'ws-dir', 'aria-label': { in: 'Received', out: 'Sent', info: 'Info', err: 'Error' }[m.dir] }, { in: '↓', out: '↑', info: '•', err: '!' }[m.dir]),
-      h('time', null, new Date(m.at).toLocaleTimeString([], { hour12: false }) + '.' + String(m.at % 1000).padStart(3, '0')),
-      h('pre', null, body));
+    const time = new Date(m.at).toLocaleTimeString([], { hour12: false }) + '.' + String(m.at % 1000).padStart(3, '0');
+    return h('div', { class: `line ${m.dir === 'err' ? 'error' : m.dir === 'info' ? 'info' : ''}` }, // the Console tab's line layout
+      h('span', { class: 'src', title: { in: 'Received', out: 'Sent', info: 'Info', err: 'Error' }[m.dir] }, `${{ in: '↓', out: '↑', info: '·', err: '!' }[m.dir]} ${time}`), body);
   });
   box.replaceChildren(...(rows.length ? rows : [h('p', { class: 'hint' }, f ? 'No messages match.' : 'No messages yet.')]));
   if (stick && atEnd) { box.scrollTop = box.scrollHeight; requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; }); } // follow new messages unless you scrolled up
@@ -3967,7 +3959,7 @@ async function importJson(data, label) {
     const col = openApiToCollection(data);
     await importJson(col, label);
     const creds = col.variable.filter((v) => v.key !== 'baseUrl').map((v) => v.key);
-    toast(`Imported "${col.info.name}" from OpenAPI: ${countRequests(col.item)} requests, each with tests from the spec.${creds.length ? ` Fill in ${creds.join(', ')} in the collection's variables.` : ''}`);
+    toast(`Imported ${countRequests(col.item)} requests from "${col.info.name}".${creds.length ? ` Set ${creds.join(', ')} in its variables.` : ''}`);
     return;
   }
   if (data && data.info && Array.isArray(data.item)) {
@@ -5658,7 +5650,9 @@ async function start() {
     badge.className = 'pill ok';
     badge.title = 'Requests go out from this computer, through your VPN, with no CORS limits.';
     const info = await api('GET', '/api/info');
-    $('#dataDir').textContent = `Data folder: ${info.dataDir}`;
+    // one line: "Data folder: …/end/of/the/path", the whole path in the tooltip
+    $('#dataDir').classList.add('path');
+    $('#dataDir').replaceChildren(h('span', null, 'Data folder:'), ' ', h('span', { class: 'dd-path', title: info.dataDir }, h('bdi', null, info.dataDir)));
   } else {
     backend = makeBackend('browser');
     badge.textContent = 'Browser';
