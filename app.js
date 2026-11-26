@@ -3305,7 +3305,11 @@ function codeWire(mask) {
 
 const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 const dq = (s) => JSON.stringify(String(s));
-const psq = (s) => `'${String(s).replace(/'/g, "''")}'`; // PowerShell single-quoted string
+// PowerShell single-quoted string: every quote PowerShell treats as a single quote (incl. ‘ ’ ‚ ‛) is doubled
+const psq = (s) => `'${String(s).replace(/['‘’‚‛]/g, (c) => c + c)}'`;
+// HTTPie request items: backslash-escape the separators (: = @) and backslashes, so names and values are sent
+// literally (a value like "@/etc/passwd" must never become "read this local file").
+const hie = (s) => String(s).replace(/[\\:=@]/g, (c) => `\\${c}`);
 const GENERATORS = {
   curl: { label: 'cURL', gen(w) {
     const lines = [`curl -X ${sq(w.method)} ${sq(w.url)}`];
@@ -3333,9 +3337,10 @@ const GENERATORS = {
     return lines.join('\n');
   } },
   httpie: { label: 'HTTPie', gen(w) {
-    const lines = [`http ${w.body.kind === 'text' ? `--raw ${sq(w.body.text)} ` : ''}${sq(w.method)} ${sq(w.url)}`];
-    for (const [k, v] of w.headers) lines.push(`  ${sq(`${k}:${v}`)}`);
-    if (w.body.kind === 'formdata') for (const f of w.body.fields) lines.push(f.file ? `  ${sq(`${f.key}@${f.file.name}`)}` : `  ${sq(`${f.key}=${f.value}`)}`);
+    const flags = w.body.kind === 'text' ? `--raw ${sq(w.body.text)} ` : w.body.kind === 'formdata' ? '--form ' : '';
+    const lines = [`http ${flags}${sq(w.method)} ${sq(w.url)}`];
+    for (const [k, v] of w.headers) lines.push(`  ${sq(`${hie(k)}:${hie(v)}`)}`);
+    if (w.body.kind === 'formdata') for (const f of w.body.fields) lines.push(f.file ? `  ${sq(`${hie(f.key)}@${f.file.name}`)}` : `  ${sq(`${hie(f.key)}=${hie(f.value)}`)}`);
     if (w.body.kind === 'file') lines.push(`  < ${sq(w.body.file.name)}`);
     return lines.join(' \\\n');
   } },
