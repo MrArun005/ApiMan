@@ -139,7 +139,7 @@ For Claude Desktop, add it under `mcpServers` in its settings file:
 | `list_robot_projects`, `run_robot` | list Robot projects, then run one, a suite, a test or tags, and get the result with each failure's message |
 | `list_runs`, `get_run` | recent runs and their results (runs started from MCP also show in Automation History) |
 
-Responses come back with cookies and credential headers masked. Pre-request and test scripts don't run from MCP,
+Responses come back with cookies, credential headers, token and password fields, and the values of Secret variables and auth credentials hidden (`•••`). Extra `variables` from the assistant may fill in a request but never change its scheme, host or port, so your saved auth can't be sent elsewhere. Pre-request and test scripts don't run from MCP,
 because they run in the app's sandbox, and requests that use OAuth 2.0 need a sign-in in the app.
 
 ## Run collections in CI

@@ -1342,8 +1342,13 @@ class McpServerTest(unittest.TestCase):
             err, text = tool(4, "send_request", collection="Demo", request="Get user", environment="Dev")
             self.assertFalse(err, text)
             sent = json.loads(json.loads(text)["body"])                           # what the echo server received
-            self.assertEqual(sent["auth"], "Bearer s3cret")                        # collection auth, environment variable
+            self.assertEqual(sent["auth"], "Bearer •••")                           # collection auth sent; the secret never handed back
+            self.assertNotIn("s3cret", text)
             self.assertTrue(json.loads(text)["request"]["url"].endswith("/users/7"))  # path variable
+            err, text = tool(7, "send_request", collection="Demo", request="Get user", environment="Dev", variables={"base": "http://evil.example"})
+            self.assertTrue(err); self.assertIn("would change where this request goes", text)   # the token never follows
+            err, text = tool(8, "send_request", collection="Demo", request="Get user", environment="Dev", variables={"token": "other-token-9"})
+            self.assertFalse(err, text); self.assertNotIn("other-token-9", text)  # same server: fine, and that token is hidden too
             err, text = tool(5, "send_request", collection="Demo", request="Get user")
             self.assertTrue(err); self.assertIn("Unknown variables {{base}}, {{token}}", text)
             self.assertEqual(rpc(6, "nope")["error"]["code"], -32601)
