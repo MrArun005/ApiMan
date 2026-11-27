@@ -1351,6 +1351,8 @@ class McpServerTest(unittest.TestCase):
             self.assertTrue(err); self.assertIn("used by this request's auth", text)  # auth's variables can't be swapped
             err, text = tool(9, "send_request", collection="Demo", request="Get user", environment="Dev", variables={"x": "{{token}}"})
             self.assertTrue(err); self.assertIn("plain values", text)              # extras never pull in saved values
+            err, text = tool(10, "send_request", collection="Demo", request="Get user", environment="Dev", variables={"a": "{", "b": "{token}}"})
+            self.assertTrue(err); self.assertIn("plain values", text)              # not even split across two values
             err, text = tool(5, "send_request", collection="Demo", request="Get user")
             self.assertTrue(err); self.assertIn("Unknown variables {{base}}, {{token}}", text)
             self.assertEqual(rpc(6, "nope")["error"]["code"], -32601)
