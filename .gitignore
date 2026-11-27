@@ -6,3 +6,6 @@ __pycache__/
 .claude/worktrees/
 # Robot Framework for Automation (local, per machine)
 .venv-robot/
+# Desktop app build output
+build/
+dist/
