@@ -39,7 +39,12 @@ import concurrent.futures
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+FROZEN = getattr(sys, "frozen", False)  # the packaged desktop app (PyInstaller)
+HERE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))  # app files: next to server.py, or inside the bundle
+# The bundle is read-only and replaced on every update, so the desktop app keeps its data in your home folder.
+DEFAULT_DATA = Path.home() / "ApiMan" if FROZEN else HERE / "collections"
+if FROZEN and sys.platform == "darwin":  # opened from Finder: no shell PATH, so Homebrew's python3 and node (Robot's Browser) go missing
+    os.environ["PATH"] = os.pathsep.join([os.environ.get("PATH", "/usr/bin:/bin"), "/opt/homebrew/bin", "/usr/local/bin"])
 # Names as people really write them ("Orders (v2).json", "Café API.json"): Unicode letters and digits, spaces and
 # common punctuation. Never a path separator, a leading dot or "..", so a segment can't climb out or hide.
 NAME_CHARS = r"[\w\u0300-\u036f .()+,&@'!#\[\]~-]"  # + combining marks: macOS stores "é" as e + ´
@@ -59,6 +64,7 @@ CA_FILE = None  # extra trusted CA bundle (PEM), set by --ca-file
 # so other websites in your browser and requests ApiMan itself proxies can't use the API. (Local programs
 # running as you can read the page, but they can already read your collection files directly.)
 SESSION_TOKEN = secrets.token_urlsafe(32)
+INSTANCE_SECRET = secrets.token_urlsafe(32)  # in <data>/.apiman/instance: lets a second launch recognise this copy
 SERVER_PORT = None  # set in main(); the proxy refuses to call ApiMan itself
 RUN_JOB = None      # `server.py run`: what the headless page should run
 RUN_EVENTS = None   # ...and the queue its results come back on
@@ -406,7 +412,7 @@ def private_dir(root):
     d = Path(root) / ".apiman"
     if not d.is_dir():
         d.mkdir(mode=0o700, exist_ok=True)
-        os.chmod(d, 0o700)  # mkdir's mode is masked by the umask
+    os.chmod(d, 0o700)  # every time: mkdir's mode is masked by the umask, and a loosened folder is tightened again
     ignore = d / ".gitignore"
     if not ignore.exists():
         ignore.write_text("# ApiMan's private, local-only state\n*\n", "utf-8")
@@ -1008,7 +1014,8 @@ def robot_python(project, root, probe=True):
     cands = [os.environ.get("APIMAN_ROBOT_PYTHON")]
     root = Path(root).resolve()
     inside = root in project.parents  # a data-folder project may share a venv with its folder; never above the data folder
-    bases = [project] + ([project.parent] if inside else []) + [HERE]  # a linked one: its own venv or ApiMan's only
+    # a linked one: its own venv, the data folder's or ApiMan's only (the desktop app keeps Robot in <data>/.venv-robot)
+    bases = [project] + ([project.parent] if inside else []) + [root, HERE]
     for base in bases:
         for venv in (".venv", "venv", ".venv-robot"):
             cands += [str(base / venv / b) for b in bins]
@@ -1515,6 +1522,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return self.reply(403, {"error": "Forbidden"})
         path = urllib.parse.urlparse(self.path).path
+        if method == "GET" and path == "/api/instance":  # a second launch asking "is this ApiMan?": answers a challenge, reveals nothing
+            nonce = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("nonce", [""])[0]
+            if not re.fullmatch(r"[0-9a-f]{32}", nonce):
+                return self.reply(400, {"error": "Bad nonce"})
+            return self.reply(200, {"proof": instance_proof(INSTANCE_SECRET, nonce)})
         if path.startswith("/api/") and not hmac.compare_digest(self.headers.get(TOKEN_HEADER, ""), SESSION_TOKEN):
             return self.reply(403, {"error": "Forbidden"})
         try:
@@ -1708,6 +1720,36 @@ def find_browser(explicit=None):
     return None
 
 
+def open_window(url, server, data):
+    """The desktop app's window: Chrome/Edge in app mode with its own profile (kept in <data>/.apiman/window), so
+    it's a separate process and closing it quits ApiMan. False when no such browser is installed."""
+    browser = find_browser()
+    if not browser:
+        return False
+    proc = subprocess.Popen([browser, f"--app={url}", f"--user-data-dir={Path(data) / '.apiman' / 'window'}",
+                             "--no-first-run", "--no-default-browser-check", "--window-size=1440,900"])
+    if server:  # same profile as a running copy: Chrome hands the window to it and this process ends at once
+        threading.Thread(target=lambda: (proc.wait(), server.shutdown()), daemon=True).start()
+    return True
+
+
+def instance_proof(token, nonce):
+    return hmac.new(token.encode(), b"apiman-instance:" + nonce.encode(), "sha256").hexdigest()
+
+
+def is_our_server(url, data):
+    """Whether ApiMan with this data folder is what answers at url. It must prove it knows the secret in
+    <data>/.apiman/instance (owner-only) by signing a fresh random challenge; the secret itself is never sent, so
+    anything squatting on the port learns nothing and gets no window."""
+    try:
+        token = (Path(data) / ".apiman" / "instance").read_text("utf-8").strip()
+        nonce = secrets.token_hex(16)
+        got = json.loads(urllib.request.urlopen(f"{url}/api/instance?nonce={nonce}", timeout=3).read(4096)).get("proof", "")
+        return bool(token) and hmac.compare_digest(str(got), instance_proof(token, nonce))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def load_json_file(path, what):
     try:
         return json.loads(Path(path).expanduser().read_text(encoding="utf-8-sig"))
@@ -1767,7 +1809,7 @@ def run_main(argv):
     ap.add_argument("collection", help="Postman v2.1 collection JSON file, or the id or name of one in the data folder")
     ap.add_argument("-e", "--env", help="environment JSON file, or the id or name of one in the data folder")
     ap.add_argument("-g", "--globals", help="globals JSON file (or id in the data folder, e.g. globals.json)")
-    ap.add_argument("--data", default=str(HERE / "collections"), help="data folder searched for ids and names (default: ./collections)")
+    ap.add_argument("--data", default=str(DEFAULT_DATA), help=f"data folder searched for ids and names (default: {DEFAULT_DATA})")
     ap.add_argument("--var", action="append", default=[], metavar="KEY=VALUE", help="set an environment variable (repeatable), e.g. --var token=$API_TOKEN")
     ap.add_argument("--folder", help="run only the folder with this name")
     ap.add_argument("-n", "--iterations", type=int, default=1)
@@ -1901,11 +1943,15 @@ def main():
         sys.exit(run_main(sys.argv[2:]))
     ap = argparse.ArgumentParser(description="ApiMan local server (or: server.py run COLLECTION.json --help)")
     ap.add_argument("--port", type=int, default=5577)
-    ap.add_argument("--data", default=str(HERE / "collections"),
+    ap.add_argument("--data", default=str(DEFAULT_DATA),
                     help="folder holding collection .json files (environments go in its environments/ subfolder)")
     ap.add_argument("--ca-file", help="PEM file with your company's root CA, for internal HTTPS APIs")
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--window", action=argparse.BooleanOptionalAction, default=FROZEN,
+                    help="open ApiMan in its own app window (Chrome/Edge) and quit when it closes (default in the desktop app)")
     args = ap.parse_args()
+    if sys.stdout is None:  # desktop app without a console: print() must not crash
+        sys.stdout = sys.stderr = open(os.devnull, "w")
 
     global CA_FILE
     if args.ca_file:
@@ -1915,15 +1961,31 @@ def main():
     global SERVER_PORT
     SERVER_PORT = args.port
     Handler.stores = make_stores(args.data)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)  # localhost only, never the LAN
-    url = f"http://127.0.0.1:{args.port}"
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)  # localhost only, never the LAN
+    except OSError:
+        url = f"http://127.0.0.1:{SERVER_PORT}"
+        running = args.window and is_our_server(url, Handler.stores["collections"].root)  # desktop app opened twice
+        if not running:
+            raise
+        if not open_window(url, None, Handler.stores["collections"].root):
+            webbrowser.open(url)
+        return
+    url = f"http://127.0.0.1:{SERVER_PORT}"
+    instance = private_dir(Handler.stores["collections"].root) / "instance"  # proves to a second launch that this is us
+    fd, tmp = tempfile.mkstemp(dir=instance.parent)  # a new owner-only file, renamed over the old: never follows a link
+    with os.fdopen(fd, "w") as f:
+        f.write(INSTANCE_SECRET)
+    os.replace(tmp, instance)
     print(f"ApiMan running at {url}\nData folder: {Handler.stores['collections'].root}\nCtrl+C to stop.")
-    if not args.no_browser:
+    if not args.no_browser and not (args.window and open_window(url, server, Handler.stores["collections"].root)):
         webbrowser.open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        instance.unlink(missing_ok=True)  # stopped: nothing left to recognise
 
 
 if __name__ == "__main__":

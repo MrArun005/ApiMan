@@ -1,0 +1,51 @@
+# Builds the ApiMan desktop app for macOS and Windows on every push to main (download it from the run's
+# artifacts), and attaches both to a GitHub release when you push a version tag: git tag v1.0.0 && git push --tags
+name: Desktop app
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # attach the builds to a release (tags only)
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            zip: ApiMan-macOS.zip
+          - os: windows-latest
+            zip: ApiMan-Windows.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Server self-check
+        run: python test_server.py
+      - name: Build
+        run: |
+          python -m pip install pyinstaller
+          python tools/build_desktop.py
+      - name: Zip (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/ApiMan.app ${{ matrix.zip }}
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/ApiMan -DestinationPath ${{ matrix.zip }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.zip }}
+          path: ${{ matrix.zip }}
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.zip }}
