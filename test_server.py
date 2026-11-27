@@ -190,10 +190,12 @@ class ServerTest(unittest.TestCase):
         env = lambda name: self.call("POST", "/api/environments", {"document": {"name": name, "values": []}})[1]["id"]
         self.assertEqual(env("Globals"), "globals-env.json")                    # never overwrites the Globals doc
         path = server.Handler.stores["collections"].root / "Internal-API.json"
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)                     # new files: owner-only (may hold tokens)
+        if os.name != "nt":  # Windows has no Unix file modes
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)                     # new files: owner-only (may hold tokens)
         os.chmod(path, 0o640)
         self.call("PUT", "/api/collections/Internal-API.json", {"info": {"name": "_Internal API"}, "item": []})
-        self.assertEqual(path.stat().st_mode & 0o777, 0o640)                     # an existing file keeps its chosen mode
+        if os.name != "nt":  # Windows has no Unix file modes
+            self.assertEqual(path.stat().st_mode & 0o777, 0o640)                     # an existing file keeps its chosen mode
         self.assertEqual(list(path.parent.glob("*.tmp")), [])                   # no leftovers
 
     def test_head_is_not_reported_as_broken(self):
@@ -232,8 +234,10 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.call("PUT", "/api/state", {**snap, "oauthTokens": "secret", "outs": [1]}), (200, {"ok": True}))
         self.assertEqual(self.call("GET", "/api/state"), (200, {"state": snap}))       # unknown keys dropped
         self.assertNotIn("secret", state_file.read_text("utf-8"))
-        self.assertEqual(state_file.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(state_file.parent.stat().st_mode & 0o777, 0o700)
+        if os.name != "nt":  # Windows has no Unix file modes
+            self.assertEqual(state_file.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":  # Windows has no Unix file modes
+            self.assertEqual(state_file.parent.stat().st_mode & 0o777, 0o700)
         self.assertEqual(list(state_file.parent.glob("*.tmp")), [])                       # atomic, no leftovers
         self.assertIn("*", (state_file.parent / ".gitignore").read_text())             # git never picks it up
         self.assertNotIn(".apiman", str(self.call("GET", "/api/collections")[1]))        # never listed as a collection
@@ -444,6 +448,20 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(json.loads(logged["reqBody"]), {"user": "a", "password": "•••", "nested": {"token": "•••"}})  # and in JSON bodies
         self.assertEqual(m3["meta"]["calls"], [["POST", "/login", "h"]])             # the calls it made, kept with the run
 
+    def test_second_launch_trusts_only_our_own_server(self):
+        data = self.tmp.name
+        inst = server.private_dir(data) / "instance"
+        inst.write_text(server.SESSION_TOKEN, "utf-8")
+        self.assertTrue(server.is_our_server(self.base, data))                     # ours: knows the token we wrote
+        self.assertFalse(server.is_our_server(self.base, tempfile.mkdtemp()))      # another data folder: no token file
+        inst.write_text("someone-else", "utf-8")
+        self.assertFalse(server.is_our_server(self.base, data))                    # a squatter can't answer with our token
+        squat = start(Echo)                                                        # anything else on the port
+        inst.write_text(server.SESSION_TOKEN, "utf-8")
+        self.assertFalse(server.is_our_server(f"http://127.0.0.1:{squat.server_address[1]}", data))
+        squat.shutdown()
+        inst.unlink()
+
     def test_masking_covers_userinfo_and_form_bodies(self):
         self.assertEqual(server.mask_url("https://bob:pw@h.io/x?token=t&a=1"), "https://•••@h.io/x?token=•••&a=1")
         self.assertEqual(server.mask_url("http://h/x"), "http://h/x")
@@ -614,7 +632,8 @@ class NestedFoldersTest(unittest.TestCase):
         status, res = self.call("POST", "/api/collections", {"collection": self.coll("Orders"), "folder": "teams/alpha"})
         self.assertEqual((status, res["id"]), (201, "teams/alpha/Orders.json"))
         p = self.root / "teams" / "alpha" / "Orders.json"
-        self.assertEqual(p.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":  # Windows has no Unix file modes
+            self.assertEqual(p.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.call("POST", "/api/collections", {"collection": self.coll("orders"), "folder": "teams/alpha"})[1]["id"],
                          "teams/alpha/orders-2.json")                                         # case-insensitive per folder
         self.assertEqual(self.call("POST", "/api/collections", {"collection": self.coll("Orders")})[1]["id"], "Orders.json")
@@ -681,7 +700,8 @@ class NestedFoldersTest(unittest.TestCase):
         renamed = {"info": {"name": "Orders (renamed)"}, "item": [{"name": "r"}]}
         self.assertEqual(self.call("PUT", f"/api/collections/{cid}", renamed, headers={"If-Match": version})[0], 200)
         self.assertEqual(json.loads(p.read_text())["info"]["name"], "Orders (renamed)")
-        self.assertEqual(p.stat().st_mode & 0o777, 0o640)
+        if os.name != "nt":  # Windows has no Unix file modes
+            self.assertEqual(p.stat().st_mode & 0o777, 0o640)
         self.assertEqual(sorted(str(x.relative_to(self.root)) for x in self.root.rglob("*") if x.is_file()),
                          ["payments/v2/Orders.postman_collection.json"])
         self.assertEqual(self.call("PUT", f"/api/collections/{cid}", self.coll("stale"), headers={"If-Match": version})[0], 409)

@@ -1727,6 +1727,18 @@ def open_window(url, server, data):
     return True
 
 
+def is_our_server(url, data):
+    """Whether ApiMan with this data folder is what answers at url: it must accept the session token it wrote to
+    <data>/.apiman/instance (owner-only). Anything else squatting on the port gets no window and no data."""
+    try:
+        token = (Path(data) / ".apiman" / "instance").read_text("utf-8").strip()
+        req = urllib.request.Request(f"{url}/api/info", headers={TOKEN_HEADER: token})
+        info = json.loads(urllib.request.urlopen(req, timeout=3).read(65536))
+        return Path(info.get("dataDir", "")).resolve() == Path(data).resolve()
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def load_json_file(path, what):
     try:
         return json.loads(Path(path).expanduser().read_text(encoding="utf-8-sig"))
@@ -1942,16 +1954,17 @@ def main():
         server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)  # localhost only, never the LAN
     except OSError:
         url = f"http://127.0.0.1:{SERVER_PORT}"
-        try:  # desktop app opened twice: show the running copy instead of failing
-            running = args.window and b"ApiMan" in urllib.request.urlopen(url, timeout=3).read(4096)
-        except OSError:
-            running = False
+        running = args.window and is_our_server(url, Handler.stores["collections"].root)  # desktop app opened twice
         if not running:
             raise
         if not open_window(url, None, Handler.stores["collections"].root):
             webbrowser.open(url)
         return
     url = f"http://127.0.0.1:{SERVER_PORT}"
+    instance = private_dir(Handler.stores["collections"].root) / "instance"  # proves to a second launch that this is us
+    fd = os.open(instance, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(SESSION_TOKEN)
     print(f"ApiMan running at {url}\nData folder: {Handler.stores['collections'].root}\nCtrl+C to stop.")
     if not args.no_browser and not (args.window and open_window(url, server, Handler.stores["collections"].root)):
         webbrowser.open(url)
