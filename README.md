@@ -63,7 +63,7 @@ calls are listed beside it.
 **The Automation dashboard.** Every project at a glance: its last result, a trend of recent runs, its environment and
 whether that environment's app is answering, its paired collection, and the apps running on this computer.
 
-![The Automation dashboard with two project cards, unpaired collections, running apps and environment health](docs/images/automation-dashboard.png)
+![The Automation dashboard: three projects with their last result, a trend of recent runs, environment health and the paired collection](docs/images/dashboard-hero.png)
 
 **A collection as a test suite.** The order-service collection, paired with its Robot project. Each request finds its
 test data (`login.csv`, `list-products.csv`, ...) and which fields that data fills. 108 cases run from one click.
