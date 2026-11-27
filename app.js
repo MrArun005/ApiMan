@@ -467,6 +467,7 @@ function newDocId(name, exists) {
 const API_TOKEN = (() => { const m = document.querySelector('meta[name="apiman-token"]'); const v = m && m.content; return v && v !== '__APIMAN_TOKEN__' ? v : ''; })();
 const lastPutAt = new Map(); // path -> time the last successful write finished
 async function api(method, path, body, signal, headers = {}, retried = false) {
+  if (method !== 'GET') lastWriteAt = Date.now();
   const started = performance.now();
   const r = await fetch(path, {
     method,
@@ -762,6 +763,51 @@ async function browserSend(wire, signal) {
 }
 
 let backend = null; // { mode, collections, environments, state, send }; state is null when data stays in this browser
+let lastWriteAt = 0; // our own last write: a change it makes on disk isn't news
+
+/** Local mode: every few seconds, has anything in the data folder changed (another app, git pull, an editor, a
+ *  teammate's sync)? Then collections, environments and Robot projects reload; tabs you're editing are kept. */
+function watchDataFolder() {
+  let sig = null, busy = false;
+  const tick = async () => {
+    if (busy || document.visibilityState !== 'visible') return;
+    busy = true;
+    try {
+      const r = await api('GET', '/api/changes');
+      if (sig && r.sig !== sig && Date.now() - lastWriteAt > 2000) await reloadFromDisk();
+      sig = r.sig;
+    } catch { /* the server restarting: try again next time */ } finally { busy = false; }
+  };
+  setInterval(tick, 3000);
+  document.addEventListener('visibilitychange', tick);
+  tick();
+}
+async function reloadFromDisk() {
+  const editing = new Set(state.tabs.filter((t) => t.dirty && t.cid).map((t) => t.cid));
+  for (const cid of Object.keys(state.cols)) if (!editing.has(cid)) delete state.cols[cid];
+  await Promise.all([refreshCollections(), refreshEnvironments()]);
+  for (const t of state.tabs) { // a request you haven't edited shows its new version
+    if (!t.cid || t.dirty || !state.cols[t.cid]) continue;
+    const loc = locate(state.cols[t.cid], t.itemId);
+    if (loc) t.ed = fromItem(loc.item);
+  }
+  renderEnvPicker();
+  renderAll();
+  document.dispatchEvent(new Event('apiman:datachanged'));
+}
+/** Settings → Data folder → Change: any folder; ApiMan reads its collections, environments and Robot projects. */
+async function changeDataFolder() {
+  const shell = window.pywebview && window.pywebview.api;
+  const path = shell && shell.choose_folder ? await shell.choose_folder()
+    : await ask({ title: 'Data folder', message: 'The folder with your collections, environments and Robot projects (subfolders are found too):', input: state.dataDir || '', ok: 'Use this folder' });
+  if (!path) return;
+  if (state.tabs.some((t) => t.dirty) && !(await ask({ title: 'Switch folder?', message: 'Tabs with unsaved changes will close, and the changes will be lost.', ok: 'Switch folder', danger: true }))) return;
+  writeTabs();
+  await workspace.flush();
+  const r = await api('POST', '/api/data-folder', { path });
+  toast(`Using ${r.dataDir}`, 'ok');
+  setTimeout(() => location.reload(), 400);
+}
 
 function makeBackend(mode, dir) {
   if (mode === 'local') return { mode, collections: serverStore('collections'), environments: serverStore('environments'), state: serverState(), send: serverSend };
@@ -7384,6 +7430,8 @@ async function openAutomation() {
   });
   setRunButton(false);
   document.title = 'Automation · ApiMan';
+  // files changed on disk (a project added, tests edited): the dashboard shows it; an open project waits for Refresh
+  document.addEventListener('apiman:datachanged', () => { if ($('#dlg').open && !dash.hidden) renderDashboard().catch(() => {}); });
   // only Automation's own window carries the address: the pop-up fallback over the API client must not, or a reload locks it in
   if (automationWin.only && location.hash !== '#automation') history.replaceState(null, '', `${location.pathname}${location.search}#automation`);
   // a run still going (started before this window opened): show it; otherwise the dashboard
@@ -7533,7 +7581,9 @@ function openSettings(initial = null, layoutSnap = null) {
     histCheck,
     backend.mode === 'local' ? insecureCheck
       : ui.hint('Website mode: the browser sends requests, so certificate and CORS rules apply. Run ApiMan locally (python3 server.py) to call any API, including internal ones over VPN.'),
-    ui.hint($('#dataDir').textContent),
+    backend.mode === 'local'
+      ? h('div', { class: 'field-row' }, ui.hint(`Data folder: ${state.dataDir}`, { title: state.dataDir }), ui.button({ label: 'Change…', size: 'small', onClick: () => changeDataFolder().catch((e) => toast(e.message, 'err')) }))
+      : ui.hint($('#dataDir').textContent),
   ];
   openDialog({
     title: 'Settings',
@@ -8321,6 +8371,7 @@ async function start() {
   if (local) {
     const info = await api('GET', '/api/info').catch(() => ({}));
     if (info.run) headlessRun(info.run); // started by `python3 server.py run`
+    watchDataFolder();
     // Automation's own page: opened from "Open in new window", a bookmark or a reload; typing #automation opens it too
     const openAuto = () => { if (location.hash === '#automation' && !$('#dlg').open) openAutomation().catch((e) => toast(e.message, 'err')); };
     window.addEventListener('hashchange', openAuto);

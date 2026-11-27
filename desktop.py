@@ -37,6 +37,12 @@ class Bridge:
         webview.create_window(str(title)[:80] or "ApiMan", self._base + p, js_api=self, width=1400, height=880, min_size=(720, 520))
         return True
 
+    def choose_folder(self):
+        """The system's folder picker; the chosen path, or "" when cancelled."""
+        win = webview.active_window() or (webview.windows[0] if webview.windows else None)
+        picked = win.create_file_dialog(webview.FOLDER_DIALOG) if win else None
+        return str(picked[0]) if picked else ""
+
     def open_auth(self, url):
         u = urllib.parse.urlsplit(str(url or ""))
         if u.scheme not in ("http", "https") or not u.netloc:
