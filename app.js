@@ -850,7 +850,12 @@ function watchDataFolder() {
     busy = true;
     try {
       const r = await api('GET', '/api/changes');
-      if (sig && r.sig !== sig && Date.now() - lastWriteAt > 2000) await reloadFromDisk();
+      if (sig && r.sig !== sig) {
+        // right after our own write the change may be ours, or a file someone dropped in at the same moment: never
+        // swallow it, look again once the write has settled (a reload after our own save costs nothing)
+        if (Date.now() - lastWriteAt < 2000) return;
+        await reloadFromDisk();
+      }
       sig = r.sig;
     } catch { /* the server restarting: try again next time */ } finally { busy = false; }
   };

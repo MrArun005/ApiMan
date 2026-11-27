@@ -45,9 +45,35 @@ jobs:
           name: ${{ matrix.zip }}
           path: ${{ matrix.zip }}
 
+  # Robot Framework automation through ApiMan on both platforms the app ships for: the sample project's API tests,
+  # its UI tests in a headless browser, and Stop. A release waits for it, so the Mac and Windows apps are checked alike.
+  automation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Robot Framework, Browser and RequestsLibrary
+        run: |
+          python -m pip install robotframework robotframework-browser robotframework-requests
+          rfbrowser init chromium
+      - name: Automation through ApiMan
+        run: python tools/ci_automation.py
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, automation]
     runs-on: ubuntu-latest
     permissions:
       contents: write  # create the release and attach the zips
