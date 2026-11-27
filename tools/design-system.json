@@ -156,7 +156,8 @@
       "v",
       "r",
       "mono",
-      "clip"
+      "clip",
+      "wide"
     ],
     "CodeView": [
       "code-editor",
@@ -251,6 +252,25 @@
       "stat-label",
       "stat-value",
       "stat-sub"
+    ],
+    "Plot": [
+      "plot",
+      "spark",
+      "line",
+      "fill",
+      "gridline",
+      "axis",
+      "pt",
+      "donut",
+      "seg",
+      "legend",
+      "legend-item"
+    ],
+    "Panel": [
+      "panels",
+      "panel",
+      "panel-head",
+      "panel-body"
     ]
   },
   "regions": [

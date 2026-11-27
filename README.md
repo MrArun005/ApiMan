@@ -60,11 +60,11 @@ calls are listed beside it.
 
 ![A Robot Framework UI test running in ApiMan's Automation window: the live browser on the left, the steps on the right](docs/images/automation-live.png)
 
-**The Automation dashboard.** The numbers that matter on top (projects, tests, pass rate, what's green now, apps running),
-then every project: its pass-rate ring, last result, a trend of recent runs (each bar's height is how long the run took,
-its colour how it ended), its environment's health and its paired collection.
+**The Automation dashboard.** Your test health at a glance: pass rate, runs, what's failing now, average run time and
+the apps running on this computer; the pass rate of every run over time (failures in red) and runs by result; every
+project with its last run, a trend sparkline, its pass rate and its environment's health; and the latest runs.
 
-![The Automation dashboard: summary tiles with the pass rate, project cards with a pass-rate ring and a trend of recent runs (height = duration, colour = result), unpaired collections, running apps and environment health](docs/images/automation-dashboard.png)
+![The Automation dashboard: KPI tiles, a pass-rate-per-run area chart, a results donut, a projects table with sparklines and pass-rate rings, and the recent runs](docs/images/automation-dashboard.png)
 
 **A collection as a test suite.** The order-service collection, paired with its Robot project. Each request finds its
 test data (`login.csv`, `list-products.csv`, ...) and which fields that data fills. 108 cases run from one click.

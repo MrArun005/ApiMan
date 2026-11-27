@@ -216,8 +216,69 @@ const ui = {
       h('span', { class: cx('stat-value', toneOf(tone)) }, String(value)), sub ? h('span', { class: 'stat-sub', title: sub }, sub) : null));
   },
   stats(...tiles) { return h('div', { class: 'stats' }, ...tiles.flat().filter(Boolean)); },
+  /** Plot: an area chart of shares (0..1) oldest to newest: a smooth line over a soft fill, gridlines at 0/50/100%,
+   *  a point per value (failures stand out). points: [{ value, tone, title }]; xLabels: [first, last]. */
+  area(points, { label = '', tone = '', xLabels = [] } = {}) {
+    const W = 720, H = 210, L = 40, Rt = 12, T = 14, B = 28, n = points.length;
+    const x = (i) => L + (W - L - Rt) * (n === 1 ? 0.5 : i / (n - 1)), y = (v) => T + (H - T - B) * (1 - Math.max(0, Math.min(1, v)));
+    const pts = points.map((p, i) => [x(i), y(p.value)]);
+    const d = smoothPath(pts, T, H - B), gid = `pg${uid().replace(/\W/g, '').slice(0, 10)}`;
+    const grid = [0, 0.5, 1].map((v) => `<line class="gridline" x1="${L}" x2="${W - Rt}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${L - 10}" y="${y(v) + 4}" text-anchor="end" font-size="11">${Math.round(v * 100)}%</text>`).join('');
+    const xs = xLabels.length ? `<text class="axis" x="${L}" y="${H - 8}" font-size="11">${xmlText(xLabels[0])}</text><text class="axis" x="${W - Rt}" y="${H - 8}" text-anchor="end" font-size="11">${xmlText(xLabels[xLabels.length - 1])}</text>` : '';
+    const fill = n ? `<path class="fill" d="${d} L ${pts[n - 1][0]} ${y(0)} L ${pts[0][0]} ${y(0)} Z" fill="url(#${gid})"/>` : '';
+    const dots = points.map((p, i) => `<circle class="pt ${toneOf(p.tone) || ''}" cx="${pts[i][0]}" cy="${pts[i][1]}" r="${p.tone === 'err' || p.tone === 'warn' ? 4.5 : 3.2}"><title>${xmlText(p.title || '')}</title></circle>`).join('');
+    const el = h('div', { role: 'img', 'aria-label': label || null });
+    el.innerHTML = `<svg class="plot ${toneOf(tone) || ''}" viewBox="0 0 ${W} ${H}"><defs><linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".34"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>${grid}${xs}${fill}<path class="line" d="${d}"/>${dots}</svg>`;
+    return el;
+  },
+  /** Plot .spark: a small area trend for a table row; failures marked, the latest dotted. */
+  spark(points, { label = '', tone = '' } = {}) {
+    const W = 132, H = 34, P = 4, n = points.length;
+    const x = (i) => P + (W - 2 * P) * (n === 1 ? 0.5 : i / (n - 1)), y = (v) => P + (H - 2 * P) * (1 - Math.max(0, Math.min(1, v)));
+    const pts = points.map((p, i) => [x(i), y(p.value)]);
+    const d = smoothPath(pts, P, H - P), gid = `ps${uid().replace(/\W/g, '').slice(0, 10)}`;
+    const marks = points.map((p, i) => (p.tone === 'err' || p.tone === 'warn' || i === n - 1 ? `<circle class="pt ${toneOf(p.tone) || ''}" cx="${pts[i][0]}" cy="${pts[i][1]}" r="2.6"><title>${xmlText(p.title || '')}</title></circle>` : '')).join('');
+    const el = h('span', { role: 'img', 'aria-label': label || null, title: label || null });
+    el.innerHTML = `<svg class="plot spark ${toneOf(tone) || ''}" viewBox="0 0 ${W} ${H}"><defs><linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".28"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>${n ? `<path class="fill" d="${d} L ${pts[n - 1][0]} ${H - P} L ${pts[0][0]} ${H - P} Z" fill="url(#${gid})"/>` : ''}<path class="line" d="${d}"/>${marks}</svg>`;
+    return el;
+  },
+  /** Donut: shares of a whole. segs: [{ value, tone, label }]; center: the big text, caption under it. Returns [donut, legend]. */
+  donut(segs, { center = '', caption = '', label = '' } = {}) {
+    const total = segs.reduce((a, s) => a + (s.value || 0), 0), c = 2 * Math.PI * 15.5;
+    let at = 0;
+    const arcs = segs.filter((s) => s.value > 0).map((s) => {
+      const len = (s.value / total) * c, gap = segs.filter((q) => q.value > 0).length > 1 ? 0.8 : 0;
+      const arc = `<circle class="seg ${toneOf(s.tone) || ''}" cx="18" cy="18" r="15.5" stroke-dasharray="${Math.max(0, len - gap).toFixed(2)} ${(c - len + gap).toFixed(2)}" stroke-dashoffset="${(-at).toFixed(2)}"/>`;
+      at += len;
+      return arc;
+    }).join('');
+    const el = h('span', { class: 'donut', role: 'img', 'aria-label': label || null });
+    el.innerHTML = `<svg viewBox="0 0 36 36" aria-hidden="true">${total ? arcs : '<circle class="seg" cx="18" cy="18" r="15.5"/>'}</svg>`;
+    el.append(h('b', null, center, caption ? h('small', null, caption) : null));
+    const legend = h('div', { class: 'legend' }, ...segs.map((s) => h('div', { class: 'legend-item' }, ui.dot({ tone: s.tone }), s.label, h('b', null, String(s.value)))));
+    return [el, legend];
+  },
+  /** Panel: a titled box for a chart. */
+  panel({ title, sub = '', body = [] }) {
+    return h('section', { class: 'panel' }, h('div', { class: 'panel-head' }, h('strong', null, title), sub ? h('span', null, sub) : null), h('div', { class: 'panel-body' }, ...[body].flat().filter(Boolean)));
+  },
+  panels(...p) { return h('div', { class: 'panels' }, ...p.flat().filter(Boolean)); },
 };
 
+/** Text for inside SVG markup built as a string. */
+const xmlText = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+/** A smooth line through points (Catmull-Rom as cubic Béziers), its bends kept between top and bottom. */
+function smoothPath(p, top, bottom) {
+  if (!p.length) return '';
+  if (p.length < 3) return p.map((q, i) => `${i ? 'L' : 'M'} ${q[0].toFixed(1)} ${q[1].toFixed(1)}`).join(' ');
+  const cy = (v) => Math.max(top, Math.min(bottom, v));
+  let d = `M ${p[0][0].toFixed(1)} ${p[0][1].toFixed(1)}`;
+  for (let i = 0; i < p.length - 1; i++) {
+    const p0 = p[i - 1] || p[i], p1 = p[i], p2 = p[i + 1], p3 = p[i + 2] || p2;
+    d += ` C ${(p1[0] + (p2[0] - p0[0]) / 6).toFixed(1)} ${cy(p1[1] + (p2[1] - p0[1]) / 6).toFixed(1)} ${(p2[0] - (p3[0] - p1[0]) / 6).toFixed(1)} ${cy(p2[1] - (p3[1] - p1[1]) / 6).toFixed(1)} ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
+  }
+  return d;
+}
 const uid = () => (crypto.randomUUID ? crypto.randomUUID()
   : 'id-' + Math.random().toString(36).slice(2) + Date.now().toString(36));
 
@@ -6963,76 +7024,94 @@ async function openAutomation() {
       return id && !id.startsWith('file:') ? state.envs[id] : null;
     };
     const runDur = (x) => (x.ended && x.started ? Math.max(0, Math.round((x.ended - x.started) * 1000)) : 0);
-    const card = (r) => {
+    const ago = (ts) => { const sec = Math.max(0, Date.now() / 1000 - (ts || 0)); return sec < 60 ? 'just now' : sec < 3600 ? `${Math.round(sec / 60)} min ago` : sec < 86400 ? `${Math.round(sec / 3600)} h ago` : `${Math.round(sec / 86400)} d ago`; };
+    const shareOf = (x) => { const n = (x.passed || 0) + (x.failed || 0); return n ? (x.passed || 0) / n : 0; };
+    const rateTone = (f) => (f === 1 ? 'ok' : f >= 0.7 ? 'warn' : 'err');
+    const resultPill = (x) => ui.pill(x.status === 'passed' ? 'Passed' : x.status === 'stopped' ? 'Stopped' : x.failed ? `${x.failed} failed` : 'Error', runTone(x.status));
+    /** One project as a table row: what it is, its last run, its trend, pass rate, average time, environment, actions. */
+    const projectRow = (r) => {
       const last = r.runs.find((x) => x.status !== 'running');
       const running = r.runs.find((x) => x.status === 'running');
       const env = envFor(r);
       const urls = envUrls(env);
       const runs = r.runs.filter((x) => x.status !== 'running').slice(0, 20).reverse();
       const passedN = runs.filter((x) => x.status === 'passed').length;
-      const share = runs.length ? passedN / runs.length : 0;
-      const maxDur = Math.max(1, ...runs.map(runDur));
-      const avgDur = runs.length ? Math.round(runs.reduce((a, x) => a + runDur(x), 0) / runs.length) : 0;
-      return ui.card({
-        title: r.name,
-        tone: running ? 'warn' : last ? runTone(last.status) : '',
-        badge: ui.pill(r.linked ? 'Linked' : 'Data folder', 'muted'),
-        dot: running ? ui.dot({ tone: 'warn', label: 'Running now' }) : null,
-        ring: !running && runs.length ? ui.ring(share, { tone: share === 1 ? 'ok' : share >= 0.7 ? 'warn' : 'err', label: `${passedN} of ${runs.length} recent runs passed` }) : null,
-        body: [
-          r.error ? ui.note(r.error, 'err') : ui.meta([
-            h('span', null, ui.value(String(r.tests || 0)), ` test${(r.tests || 0) === 1 ? '' : 's'} in ${r.suites || 0} suite${(r.suites || 0) === 1 ? '' : 's'}`),
-            r.tags && r.tags.length ? h('span', null, r.tags.slice(0, 4).join(', ')) : null,
-          ].filter(Boolean)),
-          last ? ui.meta([h('span', null, ui.pill(last.status === 'passed' ? 'Passed' : last.status === 'stopped' ? 'Stopped' : last.failed ? `${last.failed} failed` : 'Error', runTone(last.status))),
-            h('span', null, fmtWhen(last.started)), h('span', null, ui.value(String(last.passed || 0)), ' passed'), runDur(last) ? h('span', null, 'in ', ui.value(fmtMs(runDur(last)))) : null].filter(Boolean)) : ui.hint('Not run yet.'),
-          // each bar a run: its height how long it took, its colour how it ended (so a flat green run of passes still tells you something)
-          runs.length > 1 ? ui.chart(runs.map((x, i) => ({ value: Math.max(0.16, Math.sqrt(runDur(x) / maxDur)), /* square root: one slow run doesn't flatten the rest */ tone: runTone(x.status), on: i === runs.length - 1,
-            title: `${fmtWhen(x.started)}: ${x.status}, ${x.passed || 0} passed, ${x.failed || 0} failed, ${fmtMs(runDur(x))}` })), { small: true, label: `Last ${runs.length} runs: duration and result` }) : null,
-          runs.length > 1 ? ui.meta([h('span', null, `Last ${runs.length} runs`), h('span', null, 'avg ', ui.value(fmtMs(avgDur))), h('span', null, ui.value(String(passedN), share === 1 ? 'ok' : 'warn'), ` of ${runs.length} passed`)]) : null,
-          r.linked ? ui.path(r.path) : null,
-          env ? ui.meta([h('span', null, 'Environment ', ui.value(env.name)), ...urls.slice(0, 2).map((u) => {
-            const c = up.get(u.url);
-            return h('span', { title: u.url }, ui.dot({ tone: c && c.up ? 'ok' : 'err', label: c && c.up ? 'Answering' : 'Not answering' }), ` ${u.key} ${c && c.up ? 'up' : 'down'}`);
-          })]) : ui.hint(r.keys && r.keys.length ? `Needs ${r.keys.slice(0, 4).join(', ')}: pick an environment when you open it.` : 'Needs no environment.'),
-          pairs.get(r.id) ? ui.meta([h('span', null, ui.pill('API', 'muted')), h('span', null, (state.colList.find((c) => c.id === pairs.get(r.id).cid) || {}).name || ''),
-            h('span', null, ui.value(String(pairs.get(r.id).covered.size)), ` of ${pairs.get(r.id).total} requests in the tests`)]) : null,
-        ].filter(Boolean),
-        actions: [
+      const f = runs.length ? passedN / runs.length : 0;
+      const avg = runs.length ? Math.round(runs.reduce((a, x) => a + runDur(x), 0) / runs.length) : 0;
+      const pr = pairs.get(r.id);
+      const envUp = urls.length > 0 && urls.every((u) => (up.get(u.url) || {}).up);
+      return h('tr', null,
+        h('td', { class: 'clip', title: r.linked ? `${r.name}: ${r.path}` : r.name }, h('div', null, r.name, ' ', ui.pill(r.linked ? 'Linked' : 'Data folder', 'muted')),
+          h('div', { class: 'hint' }, r.error || `${r.tests || 0} test${(r.tests || 0) === 1 ? '' : 's'} · ${r.suites || 0} suite${(r.suites || 0) === 1 ? '' : 's'}${r.tags && r.tags.length ? ` · ${r.tags.slice(0, 3).join(', ')}` : ''}`)),
+        h('td', { class: 'tight' }, running ? ui.pill('Running', 'warn') : last ? resultPill(last) : ui.pill('Not run', 'muted'),
+          last ? h('div', { class: 'hint' }, `${ago(last.started)}${runDur(last) ? ` · ${fmtMs(runDur(last))}` : ''}`) : null),
+        h('td', { class: 'wide' }, runs.length > 1 ? ui.spark(runs.map((x) => ({ value: shareOf(x), tone: runTone(x.status), title: `${fmtWhen(x.started)}: ${x.passed || 0} passed, ${x.failed || 0} failed` })),
+          { tone: rateTone(f), label: `Pass rate of the last ${runs.length} runs` }) : ui.hint('–')),
+        h('td', { class: 'tight' }, runs.length ? ui.ring(f, { tone: rateTone(f), label: `${passedN} of ${runs.length} recent runs passed` }) : ui.hint('–')),
+        h('td', { class: 'num wide' }, runs.length ? fmtMs(avg) : '–'),
+        h('td', { class: 'tight wide' }, env ? h('div', null, ui.dot({ tone: envUp ? 'ok' : 'err', label: envUp ? 'Answering' : 'Not answering' }), ' ', env.name) : ui.hint('No environment'),
+          pr ? h('div', { class: 'hint' }, `API: ${(state.colList.find((c) => c.id === pr.cid) || {}).name || ''} · ${pr.covered.size}/${pr.total}`) : null),
+        h('td', { class: 'tight' },
           ui.button({ label: running ? 'Show run' : 'Open', size: 'small', onClick: () => openProject(r.id).then(() => running && follow(running.id)).catch((e) => toast(e.message, 'err')) }),
-          running || anyRunning || r.error ? null : ui.button({ label: 'Run tests', size: 'small', title: 'Run this project\'s Robot Framework tests', onClick: () => openProject(r.id, true).catch((e) => toast(e.message, 'err')) }),
-          running || anyRunning || r.error || !pairs.get(r.id) ? null : ui.button({ label: 'Run API', size: 'small', title: 'Run the paired collection with this project\'s test data',
-            onClick: () => openProject(r.id).then(() => loadSuiteDataNow()).then(() => runSuite()).catch((e) => toast(e.message, 'err')) }),
-          r.linked ? ui.button({ label: 'Unlink', size: 'small', onClick: async () => {
-            try { await api('DELETE', `/api/robot/links/${encodeURIComponent(r.id)}`); } catch (e) { toast(e.message, 'err'); return; }
-            toast(`Unlinked ${r.name}: its folder and runs are untouched.`, 'muted');
-            await renderDashboard();
-          } }) : null,
-        ].filter(Boolean),
-      });
+          ' ',
+          ui.iconButton('dots', `More for ${r.name}`, (e) => showMenu(e.currentTarget, [
+            running || anyRunning || r.error ? null : { label: 'Run tests', onClick: () => openProject(r.id, true).catch((err) => toast(err.message, 'err')) },
+            running || anyRunning || r.error || !pr ? null : { label: 'Run API (the paired collection with this project\'s test data)', onClick: () => openProject(r.id).then(() => loadSuiteDataNow()).then(() => runSuite()).catch((err) => toast(err.message, 'err')) },
+            r.linked ? { label: 'Unlink', onClick: async () => {
+              try { await api('DELETE', `/api/robot/links/${encodeURIComponent(r.id)}`); } catch (err) { toast(err.message, 'err'); return; }
+              toast(`Unlinked ${r.name}: its folder and runs are untouched.`, 'muted');
+              await renderDashboard();
+            } } : null,
+          ].filter(Boolean)), { size: 'small', 'aria-haspopup': 'menu' })));
     };
     const appRows = scan.filter((a) => a.up);
     dash.replaceChildren(...[
-      ui.toolbar([ui.sectionHead('Projects', rows.length ? `${rows.length} found` : null, null)], [
+      ui.toolbar([ui.sectionHead('Overview', rows.length ? `${rows.length} project${rows.length === 1 ? '' : 's'}` : null, null)], [
         ui.button({ label: 'Link a folder…', variant: 'ghost', size: 'small', onClick: () => { linkForm.hidden = false; linkIn.focus(); } }),
         ui.button({ label: 'Import a zip…', variant: 'ghost', size: 'small', onClick: () => zipIn.click() }),
         ui.button({ label: 'Refresh', variant: 'ghost', size: 'small', onClick: () => renderDashboard().catch((e) => toast(e.message, 'err')) })]),
       linkForm, zipIn,
       rows.length ? (() => {
         const rate = allRuns.length ? passedRuns / allRuns.length : 0;
-        const rateTone = !allRuns.length ? 'muted' : rate === 1 ? 'ok' : rate >= 0.7 ? 'warn' : 'err';
-        const green = lastRuns.filter((x) => x.status === 'passed').length;
-        const linked = rows.filter((r) => r.linked).length;
-        const suites = rows.reduce((a, r) => a + (r.suites || 0), 0);
+        const tone = !allRuns.length ? 'muted' : rateTone(rate);
+        const failingNow = rows.filter((r) => { const l = r.runs.find((x) => x.status !== 'running'); return l && l.status !== 'passed'; });
+        const week = allRuns.filter((x) => Date.now() / 1000 - (x.started || 0) < 7 * 86400).length;
+        const avgAll = allRuns.length ? Math.round(allRuns.reduce((a, x) => a + runDur(x), 0) / allRuns.length) : 0;
         return ui.stats(
-          ui.stat({ label: 'Projects', value: rows.length, sub: linked ? `${rows.length - linked} in the data folder, ${linked} linked` : 'in the data folder' }),
-          ui.stat({ label: 'Tests', value: tests, sub: `in ${suites} suite${suites === 1 ? '' : 's'}` }),
-          ui.stat({ label: 'Pass rate', value: allRuns.length ? `${Math.round(rate * 100)}%` : '–', tone: rateTone, sub: `${passedRuns} of ${allRuns.length} runs passed`,
-            ring: allRuns.length ? ui.ring(rate, { tone: rateTone, large: true, text: false, label: 'Runs passing' }) : null }),
-          ui.stat({ label: 'Green now', value: `${green}/${lastRuns.length}`, tone: lastRuns.length && green === lastRuns.length ? 'ok' : lastRuns.length ? 'warn' : '', sub: 'projects passing on their last run' }),
+          ui.stat({ label: 'Pass rate', value: allRuns.length ? `${Math.round(rate * 100)}%` : '–', tone, sub: `${passedRuns} of ${allRuns.length} runs passed`,
+            ring: allRuns.length ? ui.ring(rate, { tone, large: true, text: false, label: 'Runs passing' }) : null }),
+          ui.stat({ label: 'Runs', value: allRuns.length, sub: `${week} in the last 7 days` }),
+          ui.stat({ label: 'Failing now', value: failingNow.length, tone: failingNow.length ? 'err' : 'ok', sub: failingNow.length ? failingNow.map((r) => r.name).join(', ') : "every project's last run passed" }),
+          ui.stat({ label: 'Average run', value: allRuns.length ? fmtMs(avgAll) : '–', sub: `${tests} tests in ${rows.length} project${rows.length === 1 ? '' : 's'}` }),
           ui.stat({ label: 'Apps running', value: appRows.length, sub: 'answering on development ports' }));
       })() : null,
-      rows.length ? h('div', { class: 'cards' }, ...rows.map(card)) : ui.emptyPane({
+      allRuns.length ? (() => {
+        const timeline = rows.flatMap((r) => r.runs.filter((x) => x.status !== 'running').map((x) => ({ ...x, project: r.name }))).sort((a, b) => (a.started || 0) - (b.started || 0)).slice(-40);
+        const n = (st) => allRuns.filter((x) => (st === 'failed' ? x.status !== 'passed' && x.status !== 'stopped' : x.status === st)).length;
+        const rate = passedRuns / allRuns.length;
+        return ui.panels(
+          ui.panel({ title: 'Pass rate per run', sub: `the last ${timeline.length} runs across every project, oldest to newest`,
+            body: ui.area(timeline.map((x) => ({ value: shareOf(x), tone: runTone(x.status), title: `${x.project}, ${fmtWhen(x.started)}: ${x.passed || 0} passed, ${x.failed || 0} failed, ${fmtMs(runDur(x))}` })),
+              { tone: rateTone(rate), label: 'Pass rate per run', xLabels: [fmtWhen(timeline[0].started), fmtWhen(timeline[timeline.length - 1].started)] }) }),
+          ui.panel({ title: 'Results', sub: `${allRuns.length} runs`, body: ui.donut([
+            { value: n('passed'), tone: 'ok', label: 'Passed' }, { value: n('failed'), tone: 'err', label: 'Failed' }, { value: n('stopped'), tone: 'warn', label: 'Stopped' }],
+            { center: `${Math.round(rate * 100)}%`, caption: 'passed', label: 'Runs by result' }) }));
+      })() : null,
+      rows.length ? ui.sectionHead('Projects', 'trend = pass rate of the last runs; ring = share of them that passed', null) : null,
+      rows.length ? h('table', { class: 'grid boxed' }, h('thead', null, h('tr', null, h('th', null, 'Project'), h('th', null, 'Last run'), h('th', { class: 'wide' }, 'Trend'),
+        h('th', { class: 'tight' }, 'Pass'), h('th', { class: 'num wide' }, 'Avg time'), h('th', { class: 'wide' }, 'Environment'), h('th', { class: 'tight' }, ''))),
+        h('tbody', null, ...rows.map(projectRow))) : null,
+      allRuns.length ? ui.sectionHead('Recent runs', 'every project, newest first', null) : null,
+      allRuns.length ? h('table', { class: 'grid boxed' }, h('tbody', null, ...rows.flatMap((r) => r.runs.filter((x) => x.status !== 'running').map((x) => ({ ...x, pid: r.id, project: r.name })))
+        .sort((a, b) => (b.started || 0) - (a.started || 0)).slice(0, 6).map((x) => h('tr', null,
+          h('td', { class: 'clip', title: x.project }, ui.dot({ tone: runTone(x.status), label: x.status }), ' ', x.project),
+          h('td', null, resultPill(x)),
+          h('td', { class: 'tight wide' }, `${x.passed || 0} passed, ${x.failed || 0} failed${x.skipped ? `, ${x.skipped} skipped` : ''}${x.http ? ` · ${x.http} API calls` : ''}`),
+          h('td', { class: 'tight wide' }, x.env || ''),
+          h('td', { class: 'num' }, fmtMs(runDur(x))),
+          h('td', { class: 'num wide' }, ago(x.started)),
+          h('td', { class: 'tight' }, ui.button({ label: 'Show', variant: 'ghost', size: 'small', onClick: () => openProject(x.pid).then(() => follow(x.id, true)).catch((e) => toast(e.message, 'err')) })))))) : null,
+      rows.length ? null : ui.emptyPane({
         icon: 'folder', title: 'No Robot Framework project yet',
         text: 'Link a project folder from anywhere on this computer, import a zip, or put a project in your data folder. ApiMan finds its suites, tests, tags, test data and the environment keys it needs.',
         actions: [ui.button({ label: 'Link a folder…', size: 'small', onClick: () => { linkForm.hidden = false; linkIn.focus(); } }), ui.button({ label: 'Import a zip…', size: 'small', onClick: () => zipIn.click() })],

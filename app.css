@@ -396,6 +396,7 @@ table.grid.boxed { border: 1px solid var(--line); border-radius: var(--r-lg); bo
 table.grid td.clip { max-width: 0; width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* takes the room left, cut, the whole text in title */
 table.grid tr.on td { background: var(--select); } /* the selected row (API calls) */
 table.grid .tight select { max-width: calc(var(--s6) * 7); }
+@media (max-width: 900px) { table.grid .wide { display: none; } } /* detail a narrow window can do without */
 @media (max-width: 600px) { table.grid td:first-child { white-space: normal; overflow-wrap: anywhere; } }
 table.grid.boxed th { height: var(--row-h); background: var(--hover); vertical-align: middle; padding-top: 0; padding-bottom: 0; }
 table.grid.boxed th:first-child, table.grid.boxed td:first-child { padding-left: var(--s3); }
@@ -720,6 +721,38 @@ dialog.drawer.docked { position: fixed; inset: 0 0 0 auto; margin: 0; z-index: 4
 .stat-value { font-size: var(--fs-xl); font-weight: 650; line-height: 1.05; color: var(--ink); font-variant-numeric: tabular-nums; }
 .stat-value.ok { color: var(--ok); } .stat-value.warn { color: var(--warn); } .stat-value.err { color: var(--err); }
 .stat-sub { font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ===================================================================================== 27 Plot */
+/* Charts drawn as SVG in the tone's colour: an area chart over time, a sparkline, a donut. Sizes come from tokens. */
+.plot { display: block; width: 100%; height: auto; overflow: visible; color: var(--muted); }
+.plot.ok { color: var(--ok); } .plot.warn { color: var(--warn); } .plot.err { color: var(--err); }
+.plot .line { fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linejoin: round; stroke-linecap: round; }
+.plot .gridline { stroke: var(--line); stroke-width: 1; stroke-dasharray: 3 5; }
+.plot .axis { fill: var(--muted); font-family: var(--font-ui); font-weight: 500; }
+.plot .pt { fill: var(--panel); stroke: currentColor; stroke-width: 2; }
+.plot .pt.err { fill: var(--err); stroke: var(--panel); } .plot .pt.warn { fill: var(--warn); stroke: var(--panel); }
+.plot.spark { width: calc(var(--s6) * 5.5); height: calc(var(--row-h) * 1.15); }
+.plot.spark .line { stroke-width: 2; }
+.donut { position: relative; display: grid; place-items: center; flex: none; width: calc(var(--row-h) * 4.8); height: calc(var(--row-h) * 4.8); }
+.donut svg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+.donut circle { fill: none; stroke-width: 4.2; }
+.donut .seg { stroke: var(--muted); } .donut .seg.ok { stroke: var(--ok); } .donut .seg.warn { stroke: var(--warn); } .donut .seg.err { stroke: var(--err); }
+.donut b { position: relative; display: grid; text-align: center; font-size: var(--fs-xl); font-weight: 650; line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; }
+.donut b small { margin-top: var(--s1); font-size: var(--fs-xs); font-weight: 500; color: var(--muted); }
+.legend { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; flex: 1; }
+.legend-item { display: flex; align-items: center; gap: var(--s2); font-size: var(--fs-sm); color: var(--ink-2); }
+.legend-item b { margin-left: auto; color: var(--ink); font-variant-numeric: tabular-nums; }
+
+/* ===================================================================================== 28 Panel */
+/* A titled box for a chart: the dashboard's analytics row (a wide and a narrow panel). */
+.panels { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: var(--s4); margin-bottom: var(--s5); }
+@media (max-width: 900px) { .panels { grid-template-columns: minmax(0, 1fr); } }
+.panel { min-width: 0; display: flex; flex-direction: column; padding: var(--s4); border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--panel); box-shadow: var(--shadow-sm); }
+.panel-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s1) var(--s3); margin-bottom: var(--s3); }
+.panel-head strong { font-size: var(--fs-md); font-weight: 650; color: var(--ink); }
+.panel-head span { font-size: var(--fs-xs); color: var(--muted); }
+.panel-body { flex: 1; display: flex; align-items: center; gap: var(--s5); min-width: 0; }
+.panel-body > :only-child { flex: 1; min-width: 0; } /* a chart alone takes the panel's width */
 
 /* ===================================================================================== regions (layout only) */
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; padding: 0; margin: 0; }

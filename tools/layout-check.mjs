@@ -270,7 +270,7 @@ const focusFails = await page.evaluate(async () => {
 }).catch((e) => [`focus check failed: ${e.message}`]);
 for (const f of focusFails) results.set(f, { example: f, combos: ['focus'] });
 
-// Automation (its own window, #automation): the dashboard's Cards and Charts, the project's tabs and History tables, at
+// Automation (its own window, #automation): the dashboard's tiles, charts (area, donut, sparklines) and project table, the project's tabs and History tables, at
 // every width and two text sizes. The server's answers come from tools/automation-fixture.json (two projects, runs with
 // 40 tests, a linked project with a long name and path), so no Robot project or run is needed.
 {
@@ -291,7 +291,7 @@ for (const f of focusFails) results.set(f, { example: f, combos: ['focus'] });
   const spill = (view) => auto.evaluate((view) => {
     const out = [], body = document.querySelector('#dlgBody'), br = body.getBoundingClientRect();
     const seen = (el) => el.getClientRects().length && !el.closest('[hidden]');
-    for (const el of body.querySelectorAll('table, .card, .cards, .btn, select, input, .seg, .meta, .chart, .preview, .console, .section-head, .pane-tools')) {
+    for (const el of body.querySelectorAll('table, .card, .cards, .stat, .panel, .plot, .donut, .ring, .btn, select, input, .seg, .meta, .chart, .preview, .console, .section-head, .pane-tools')) {
       if (!seen(el)) continue;
       const r = el.getBoundingClientRect();
       if (r.right > br.right + 1) out.push(`automation ${view}: ${el.tagName.toLowerCase()}.${String(el.className).split(' ')[0]} reaches past the dialog`);
@@ -306,11 +306,11 @@ for (const f of focusFails) results.set(f, { example: f, combos: ['focus'] });
     await auto.setViewportSize({ width: w, height: h });
     await auto.goto('about:blank'); await auto.goto(APP + '#automation'); // a fresh window each time
     await auto.evaluate((sc) => { state.settings.textScale = sc; applyAppearance(state.settings); }, sc);
-    await auto.waitForSelector('#dlg[open] #dlgBody .card');
+    await auto.waitForSelector('#dlg[open] #dlgBody .stats');
     const tag = `${w} automation text${sc}`;
     const add = (fs) => { combos++; for (const f of fs) { if (!results.has(f)) results.set(f, { example: f, combos: [] }); results.get(f).combos.push(tag); } };
     add(await spill('dashboard'));
-    await auto.locator('#dlgBody .card', { hasText: 'order-tests' }).locator('button', { hasText: 'Open' }).click();
+    await auto.locator('#dlgBody tr', { hasText: 'order-tests' }).locator('button', { hasText: 'Open' }).first().click();
     await auto.waitForFunction(() => /tests\)/.test(document.querySelector('#dlgBody .grid-3')?.textContent || ''));
     await auto.waitForTimeout(150);
     add(await spill('project'));
