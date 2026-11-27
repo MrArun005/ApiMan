@@ -444,6 +444,16 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(json.loads(logged["reqBody"]), {"user": "a", "password": "•••", "nested": {"token": "•••"}})  # and in JSON bodies
         self.assertEqual(m3["meta"]["calls"], [["POST", "/login", "h"]])             # the calls it made, kept with the run
 
+    def test_masking_covers_userinfo_and_form_bodies(self):
+        self.assertEqual(server.mask_url("https://bob:pw@h.io/x?token=t&a=1"), "https://•••@h.io/x?token=•••&a=1")
+        self.assertEqual(server.mask_url("http://h/x"), "http://h/x")
+        self.assertEqual(server.mask_body("user=a&password=p%20w&client_secret=s"), "user=a&password=•••&client_secret=•••")
+        self.assertEqual(server.mask_body("plain text = not a form"), "plain text = not a form")
+        self.assertEqual(server.run_calls([{"t": "http", "url": "http://u:p@H:8080/a"}]), [("GET", "/a", "h:8080")])
+        import robot_listener as rl
+        self.assertEqual(rl._url("https://bob:pw@h.io/x?api_key=k"), "https://•••@h.io/x?api_key=•••")
+        self.assertEqual(rl._secrets("user=a&password=p"), "user=a&password=•••")
+
     def test_app_check_says_what_answers(self):
         res = self.call("POST", "/api/robot/apps/check", {"urls": [self.target + "/x", "http://127.0.0.1:9/", "ftp://x"]})[1]
         self.assertEqual([r["up"] for r in res], [True, False, False])
