@@ -37,6 +37,8 @@ import urllib.parse
 import urllib.request
 import webbrowser
 import zipfile
+import zlib
+import http.cookiejar
 import concurrent.futures
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -468,19 +470,160 @@ class StateStore:
 
 
 # Allowlist, not denylist: custom credential headers (X-Api-Key, X-Auth-Token, ...) can have any name.
-CROSS_ORIGIN_SAFE_HEADERS = {"accept", "accept-language", "user-agent", "content-type"}
+CROSS_ORIGIN_SAFE_HEADERS = {"accept", "accept-language", "accept-encoding", "user-agent", "content-type"}
 
 
 class RedirectRefused(Exception):
     pass
 
 
-class SafeRedirect(urllib.request.HTTPRedirectHandler):
-    """Follows redirects like Postman, but only harmless headers survive a change of origin."""
+try:
+    import brotli  # optional: Content-Encoding: br is decoded only when it's installed
+except ImportError:
+    brotli = None
+URL_SAFE = "/%:@!$&'()*+,;=-._~"  # kept as typed; everything else (spaces, non-ASCII, control chars) is percent-encoded
 
-    def __init__(self):
+
+def encode_url(url):
+    """(url ready for the wire, (user, password) or None). Spaces and non-ASCII in the path and query are
+    percent-encoded (existing %XX kept), a non-ASCII host becomes IDNA, user:password@ is taken out (it becomes
+    Basic auth) and the #fragment, never sent, is dropped."""
+    u = urllib.parse.urlsplit(url.strip())
+    userinfo, _, hostport = u.netloc.rpartition("@")
+    cred = None
+    if userinfo:
+        user, _, pw = userinfo.partition(":")
+        cred = (urllib.parse.unquote(user), urllib.parse.unquote(pw))
+    m = re.fullmatch(r"(\[[^\]]*\]|[^:\[\]]*)(:\d*)?", hostport)
+    if not m or not m.group(1):
+        raise ValueError(f"Invalid host in the URL: {hostport or '(empty)'}")
+    host, port = m.group(1), m.group(2) or ""
+    if not host.startswith("[") and not host.isascii():
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError:
+            raise ValueError(f"Invalid host in the URL: {host}") from None
+    path = urllib.parse.quote(u.path, safe=URL_SAFE)
+    query = urllib.parse.quote(u.query, safe=URL_SAFE + "?")
+    return urllib.parse.urlunsplit((u.scheme, host + port, path, query, "")), cred
+
+
+def decode_body(raw, encoding):
+    """(body, note): the response decoded by its Content-Encoding (gzip, deflate, br), at most MAX_RESPONSE bytes
+    out (a small zip bomb can't fill memory); note says why it couldn't be, and the raw bytes are kept."""
+    enc = (encoding or "").strip().lower()
+    if enc in ("", "identity") or not raw:
+        return raw, None
+    try:
+        if enc in ("gzip", "x-gzip", "deflate"):
+            for wbits in ((16 + zlib.MAX_WBITS,) if enc != "deflate" else (zlib.MAX_WBITS, -zlib.MAX_WBITS)):
+                try:  # deflate: zlib-wrapped as the spec says, or raw deflate as many servers send it
+                    d = zlib.decompressobj(wbits)
+                    return d.decompress(raw, MAX_RESPONSE + 1), None
+                except zlib.error:
+                    if wbits == -zlib.MAX_WBITS or enc != "deflate":
+                        raise
+        if enc == "br":
+            if not brotli:
+                return raw, "The response is Brotli-compressed (br); install the brotli package to read it."
+            return brotli.decompress(raw)[:MAX_RESPONSE + 1], None
+    except (zlib.error, OSError, Exception) as e:  # brotli.error isn't an OSError
+        return raw, f"Couldn't decode the {enc} response: {e}"
+    return raw, f"Unknown Content-Encoding: {enc}"
+
+
+class CookieStore:
+    """One cookie jar per data folder (<data>/.apiman/cookies.txt, owner-only), like Postman's: cookies set by a
+    response are sent with later requests to the same site and inside a redirect chain, by the domain, path, expiry
+    and Secure rules of http.cookiejar."""
+    _lock = threading.Lock()
+    _jars = {}
+
+    @classmethod
+    def jar(cls, root):
+        root = str(Path(root).resolve())
+        with cls._lock:
+            if root not in cls._jars:
+                jar = http.cookiejar.MozillaCookieJar(str(Path(root) / ".apiman" / "cookies.txt"))
+                try:
+                    jar.load(ignore_discard=True)
+                except (OSError, http.cookiejar.LoadError):
+                    pass
+                cls._jars[root] = jar
+            return cls._jars[root]
+
+    @classmethod
+    def save(cls, root):
+        jar = cls.jar(root)
+        with cls._lock:
+            private_dir(root)
+            fd, tmp = tempfile.mkstemp(dir=Path(root) / ".apiman", suffix=".tmp")
+            os.close(fd)
+            try:
+                jar.save(tmp, ignore_discard=True)  # session cookies too: like Postman, they last until you clear them
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, jar.filename)
+            except OSError:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def row(c):
+        return {"domain": c.domain, "path": c.path, "name": c.name, "value": c.value or "", "expires": c.expires,
+                "secure": bool(c.secure), "httpOnly": c.has_nonstandard_attr("HttpOnly")}
+
+    @classmethod
+    def list(cls, root, url=None):
+        jar = cls.jar(root)
+        if url:  # the cookies a request to url would send: domain, path, Secure and expiry
+            u = urllib.parse.urlsplit(url)
+            host, path = (u.hostname or "").lower(), u.path or "/"
+            ok = lambda c: ((host == c.domain.lstrip(".") or host.endswith("." + c.domain.lstrip("."))) and path.startswith(c.path or "/")
+                            and (not c.secure or u.scheme == "https") and not c.is_expired())
+            return [cls.row(c) for c in jar if ok(c)]
+        return [cls.row(c) for c in jar if not c.is_expired()]
+
+    @classmethod
+    def delete(cls, root, domain=None, path=None, name=None):
+        jar = cls.jar(root)
+        try:
+            if domain is None:
+                jar.clear()
+            else:
+                jar.clear(domain, path, name) if name else jar.clear(domain)
+        except KeyError:
+            pass
+        cls.save(root)
+
+    @classmethod
+    def set(cls, root, body):
+        if not isinstance(body, dict) or not str(body.get("domain") or "").strip() or not str(body.get("name") or "").strip():
+            raise ValueError("A cookie needs a domain and a name.")
+        domain, name = str(body["domain"]).strip().lower(), str(body["name"]).strip()
+        if any(c in name + str(body.get("value", "")) for c in ";\r\n"):
+            raise ValueError("A cookie's name and value can't contain ; or line breaks.")
+        expires = body.get("expires")
+        c = http.cookiejar.Cookie(0, name, str(body.get("value", "")), None, False, domain, True, domain.startswith("."),
+                                  str(body.get("path") or "/"), True, bool(body.get("secure")),
+                                  int(expires) if isinstance(expires, (int, float)) and expires > 0 else None,
+                                  not expires, None, None, {"HttpOnly": None} if body.get("httpOnly") else {})
+        cls.jar(root).set_cookie(c)
+        cls.save(root)
+
+
+class SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follows redirects like Postman and browsers (307/308 keep the method and body; 301/302/303 become GET, HEAD
+    stays HEAD), but only harmless headers survive a change of origin."""
+    http_error_308 = urllib.request.HTTPRedirectHandler.http_error_302  # Python < 3.11 doesn't follow 308
+
+    def __init__(self, names=None, limit=10):
         super().__init__()
-        self.stripped = []  # header names dropped on cross-origin redirects, reported to the UI
+        self.stripped = []  # header names dropped on cross-origin redirects, reported to the UI as the user typed them
+        self.names = names or {}
+        self.max_redirections = limit
+        self.hops = 0
 
     @staticmethod
     def origin(url):
@@ -492,16 +635,29 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
             raise RedirectRefused("Refused a redirect to ApiMan's own local server.")
         if urllib.parse.urlsplit(newurl).scheme.lower() not in ("http", "https"):
             raise RedirectRefused(f"Refused redirect to a non-HTTP URL: {newurl}")
-        new = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new is None:
+        if code not in (301, 302, 303, 307, 308):
             return None
+        try:
+            newurl = encode_url(newurl)[0]  # a Location with spaces or non-ASCII characters
+        except ValueError as e:
+            raise RedirectRefused(f"Refused a redirect to an invalid URL: {e}") from None
+        method = req.get_method()
+        if code in (307, 308):  # the same request again, body and all
+            data = req.data
+        else:
+            method, data = ("HEAD" if method == "HEAD" else "GET"), None
+        hdrs = {k: v for k, v in req.headers.items() if data is not None or k.lower() not in ("content-length", "content-type")}
+        new = urllib.request.Request(newurl, data=data, headers=hdrs, origin_req_host=req.origin_req_host,
+                                     unverifiable=True, method=method)
+        self.hops += 1
         old_origin, new_origin = self.origin(req.full_url), self.origin(new.full_url)
         if old_origin[0] == "https" and new_origin[0] != "https":
             raise RedirectRefused(f"Refused redirect from HTTPS to insecure {new.full_url}")
         if old_origin != new_origin:
             # urllib only copies req.headers (never unredirected_hdrs) into the new request.
             kept = {k: v for k, v in new.headers.items() if k.lower() in CROSS_ORIGIN_SAFE_HEADERS}
-            self.stripped += [k for k in new.headers if k not in kept and k not in self.stripped]
+            self.stripped += [self.names.get(k.lower(), k) for k in new.headers
+                              if k not in kept and self.names.get(k.lower(), k) not in self.stripped]
             new.headers = kept
         return new
 
@@ -525,8 +681,9 @@ def connect_error(url, reason):
     return f"Could not connect to {host}: {getattr(reason, 'strerror', None) or reason}"
 
 
-def send(spec):
-    """Execute one HTTP request exactly as described by the UI (variables, auth and scripts already applied)."""
+def send(spec, root=None):
+    """Execute one HTTP request exactly as described by the UI (variables, auth and scripts already applied).
+    root: the data folder, whose cookie jar the request uses (spec.cookies false: none)."""
     if not isinstance(spec, dict):
         return {"error": "Invalid request"}
     headers_in = spec.get("headers") or []
@@ -538,6 +695,18 @@ def send(spec):
         return {"error": f"Invalid method: {method}"}
     if not re.match(r"^https?://", url, re.I):
         return {"error": "URL must start with http:// or https://"}
+    for k, v in headers_in:  # a line break would start a new header (header injection): say which one, plainly
+        if any(c in f"{k}{v}" for c in "\r\n\0"):
+            return {"error": f"Header '{str(k).strip()[:60]}' contains a line break: remove it to send the request."}
+        if not str(k).strip() or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", str(k).strip()):
+            return {"error": f"Header name '{str(k)[:60]}' isn't valid: use letters, digits and - only."}
+    try:
+        url, cred = encode_url(url)
+    except ValueError as e:
+        return {"error": str(e)}
+    if cred and not any(str(k).strip().lower() == "authorization" for k, _ in headers_in):
+        token = base64.b64encode(f"{cred[0]}:{cred[1]}".encode("utf-8")).decode("ascii")
+        headers_in = [*headers_in, ["Authorization", f"Basic {token}"]]  # user:password@ in the URL = Basic auth, like curl
     # A custom Host naming ApiMan + a domain that re-resolves to 127.0.0.1 (DNS rebinding) would get past
     # both targets_self and the server's Host check, so such a Host header is refused outright.
     own_hosts = {f"127.0.0.1:{SERVER_PORT}", f"localhost:{SERVER_PORT}"}
@@ -552,6 +721,8 @@ def send(spec):
     else:
         body = spec.get("body")
         data = body.encode("utf-8") if isinstance(body, str) and body != "" else None
+    if method == "HEAD":
+        data = None  # a HEAD request has no body, whatever was typed
     if data is None and method in ("POST", "PUT", "PATCH"):
         data = b""  # send Content-Length: 0 instead of no length (some servers answer 411)
 
@@ -562,6 +733,8 @@ def send(spec):
         req.add_header(str(key), str(value))
     if not req.has_header("User-agent"):
         req.add_header("User-Agent", "ApiMan/1.0")
+    if not req.has_header("Accept-encoding"):  # like Postman: compressed answers are decoded below
+        req.add_header("Accept-Encoding", "gzip, deflate" + (", br" if brotli else ""))
 
     ctx = ssl.create_default_context()
     if CA_FILE:
@@ -570,21 +743,40 @@ def send(spec):
         # Last resort, opt-in in Settings: skips certificate checks (exposes you to MITM). Off by default.
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-    redirects = SafeRedirect() if spec.get("followRedirects", True) else NoRedirect()
-    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx), redirects)
+    try:
+        limit = max(1, min(int(spec.get("maxRedirects") or 10), 50))
+    except (TypeError, ValueError):
+        limit = 10
+    names = {str(k).strip().lower(): str(k).strip() for k, _ in headers_in}
+    redirects = SafeRedirect(names, limit) if spec.get("followRedirects", True) else NoRedirect()
+    handlers = [urllib.request.HTTPSHandler(context=ctx), redirects]
+    jar = CookieStore.jar(root) if root and spec.get("cookies", True) else None
+    if jar is not None:
+        handlers.append(urllib.request.HTTPCookieProcessor(jar))  # sent and stored on every hop of a redirect too
+    opener = urllib.request.build_opener(*handlers)
 
     start = time.perf_counter()
+    limit_hit = False
+    timeout = 60.0
     try:
         timeout = max(1.0, min(float(spec.get("timeout", 60) or 60), 600.0))
         resp = opener.open(req, timeout=timeout)
     except urllib.error.HTTPError as e:   # 4xx/5xx (and unfollowed 3xx) still have a useful response
         resp = e
+        limit_hit = isinstance(redirects, SafeRedirect) and str(e.msg).startswith(SafeRedirect.inf_msg)
     except RedirectRefused as e:
         return {"error": str(e)}
     except urllib.error.URLError as e:
         return {"error": connect_error(url, e.reason)}
-    except Exception as e:  # timeouts, bad TLS, etc.
-        return {"error": f"{type(e).__name__}: {e}"}
+    except (TimeoutError, socket.timeout):
+        return {"error": f"No answer within {timeout:g} s: the server is slow or unreachable (the timeout is in Settings)."}
+    except ssl.SSLError as e:
+        return {"error": f"Secure connection failed: {getattr(e, 'reason', None) or e}. For an internal certificate, start ApiMan with --ca-file."}
+    except Exception as e:  # anything else, in words rather than a traceback
+        return {"error": f"Couldn't send the request: {e}"}
+    finally:
+        if jar is not None:
+            CookieStore.save(root)
 
     try:
         with resp:
@@ -596,7 +788,10 @@ def send(spec):
     if not no_body and promised and promised.isdigit() and len(raw) < min(int(promised), MAX_RESPONSE + 1):
         return {"error": f"The response broke off while downloading: received {len(raw)} of {promised} bytes."}
     elapsed_ms = round((time.perf_counter() - start) * 1000)
-    truncated = len(raw) > MAX_RESPONSE
+    wire_size = len(raw)
+    encoding = resp.headers.get("Content-Encoding")
+    raw, decode_note = decode_body(raw, encoding) if not no_body else (raw, None)
+    truncated = len(raw) > MAX_RESPONSE or wire_size > MAX_RESPONSE
     raw = raw[:MAX_RESPONSE]
     try:
         text, b64 = raw.decode("utf-8"), None
@@ -614,6 +809,12 @@ def send(spec):
         "timeMs": elapsed_ms,
         "finalUrl": resp.geturl(),
         "redirectStripped": getattr(redirects, "stripped", []),
+        "redirects": getattr(redirects, "hops", 0),
+        "redirectLimitHit": limit_hit,
+        **({"redirectLimit": limit} if limit_hit else {}),
+        **({"encoding": encoding.strip().lower(), "wireSize": wire_size} if encoding and not decode_note and not no_body else {}),
+        **({"decodeNote": decode_note} if decode_note else {}),
+        **({"cookies": CookieStore.list(root, resp.geturl())} if jar is not None else {}),
     }
 
 
@@ -647,11 +848,8 @@ def stop_all_runs():
         procs, files = [p for p in RUNS.values() if p], list(VARFILES.values())
     for proc in procs:
         try:
-            if os.name != "nt":
-                os.killpg(proc.pid, 15)
-            else:
-                proc.terminate()
-        except OSError:
+            kill_tree(proc)
+        except (OSError, subprocess.SubprocessError):
             pass
     for f in files:
         try:
@@ -708,7 +906,9 @@ def robot_projects(root):
         except OSError:
             return
         own = any(n.endswith(".robot") for n in names)
-        if own or (names & PROJECT_MARKERS and any(p.suffix == ".robot" for p in robot_walk(d))):
+        # markers (.git, tests/, requirements.txt) make a folder a project, but never the data folder itself:
+        # that would swallow every project below it
+        if own or (depth and names & PROJECT_MARKERS and any(p.suffix == ".robot" for p in robot_walk(d))):
             rel = d.relative_to(root).as_posix()
             out.append({"id": rel if rel != "." else ".", "name": d.name if rel != "." else (d.name or "Data folder"),
                         "path": rel})
@@ -1056,12 +1256,35 @@ def robot_python(project, root, probe=True):
             continue
         if v.returncode == 0:
             return {"path": c, "version": v.stdout.strip()}
-    pip = ".venv/bin/pip" if os.name != "nt" else r".venv\Scripts\pip"
+    win = os.name == "nt"
+    pip = r".venv\Scripts\pip" if win else ".venv/bin/pip"
+    rfb = r".venv\Scripts\rfbrowser" if win else ".venv/bin/rfbrowser"
     reqs = next((r for r in ("requirements.txt", "requirements-dev.txt") if (project / r).is_file()), None)
     install = f"-r {reqs}" if reqs else "robotframework robotframework-browser robotframework-requests"
-    return {"error": f"Robot Framework isn't installed for this project. In {project}, run: python3 -m venv .venv && "
-                     f"{pip} install {install}" + (" && .venv/bin/rfbrowser init" if not reqs or "browser" in
+    return {"error": f"Robot Framework isn't installed for this project. In {project}, run: {'py' if win else 'python3'} -m venv .venv && "
+                     f"{pip} install {install}" + (f" && {rfb} init" if not reqs or "browser" in
                      (project / reqs).read_text("utf-8", "replace").lower() else "") + " (or set APIMAN_ROBOT_PYTHON)."}
+
+
+KEEP_RUNS = 200  # runs kept in <data>/.apiman/runs, screenshots included; older ones are deleted as new ones start
+
+
+def prune_runs(root):
+    try:
+        old = sorted((d for d in runs_dir(root).iterdir() if d.is_dir() and RUN_ID_RE.fullmatch(d.name)), key=lambda d: d.name)
+    except OSError:
+        return
+    with RUNS_LOCK:
+        busy = set(RUNS) | set(COLLECTION_RUNS)
+    for d in [d for d in old if d.name not in busy][:-KEEP_RUNS or None]:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def robot_at_least(version, want):
+    try:
+        return tuple(int(x) for x in str(version).split(".")[:2]) >= want
+    except ValueError:
+        return False
 
 
 def runs_dir(root, create=False):
@@ -1096,6 +1319,7 @@ def robot_start(root, stores, body):
             raise ValueError("Test data must be a JSON object: each key becomes a ${variable}.")
         variables.update(data)
     run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
+    prune_runs(root)
     out = runs_dir(root, create=True) / run_id
     out.mkdir(parents=True)
     (out / "shots").mkdir()
@@ -1115,12 +1339,21 @@ def robot_start(root, stores, body):
         cmd.append("--test=" + re.sub(r"([*?\[])", r"[\1]", str(body["test"])))
     for tag in [t.strip() for t in str(body.get("include") or "").split(",") if t.strip()]:
         cmd.append(f"--include={tag}")
+    shown = target.relative_to(project).as_posix()  # what you picked, even when the whole project is parsed for its setups
+    inits = [d for d in target.parents if d == project or project in d.parents]
+    if target != project and any((d / "__init__.robot").is_file() for d in inits) and robot_at_least(py["version"], (6, 1)):
+        cmd += ["--parse-include", str(target)]  # the whole project is the suite, so its __init__ setups run too
+        target = project
     cmd.append(str(target))
-    meta = {"id": run_id, "project": pid, "projectName": project.name, "target": target.relative_to(project).as_posix(),
+    meta = {"id": run_id, "project": pid, "projectName": project.name, "target": shown,
             "test": body.get("test") or "", "include": body.get("include") or "", "env": env_name,
             "speed": "full" if body.get("speed") == "full" else "watch",
             "started": time.time(), "status": "running", "robot": py["version"]}
     with RUNS_LOCK:
+        if run_going():
+            os.unlink(varfile)
+            shutil.rmtree(out, ignore_errors=True)
+            raise RunBusy("Another run is going: wait for it or stop it first.")
         RUNS[run_id] = None  # before meta.json says running, so a poll never takes it for an interrupted run
     write_meta(out, meta)
     log = open(out / "console.txt", "wb")
@@ -1128,7 +1361,8 @@ def robot_start(root, stores, body):
         watch = body.get("speed", "watch") == "watch"  # Watch: each browser step stays on screen a moment
         proc = subprocess.Popen(cmd, cwd=project, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 # PYTHONDONTWRITEBYTECODE: importing the secrets file must not leave a .pyc copy in __pycache__
-                                env={**os.environ, "APIMAN_STEP_DELAY": "0.6" if watch else "0", "PYTHONDONTWRITEBYTECODE": "1"},
+                                env={**os.environ, "APIMAN_STEP_DELAY": "0.6" if watch else "0", "PYTHONDONTWRITEBYTECODE": "1",
+                                     "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},  # one encoding for the console on every OS
                                 **({"start_new_session": True} if os.name != "nt" else {}))
     except OSError as e:
         log.close()
@@ -1169,6 +1403,7 @@ def robot_summary(events):
     return {"passed": count("PASS"), "failed": count("FAIL"), "skipped": count("SKIP"), "http": len(http),
             "httpErrors": sum(1 for e in http if e.get("error") or (e.get("status") or 0) >= 400),
             "tests": [{"name": t.get("name"), "suite": t.get("suite", ""), "status": t.get("status"),
+                       "key": t.get("tid") or f"{t.get('suite', '')} › {t.get('name')}",
                        "ms": t.get("ms"), "message": (t.get("message") or "")[:300],
                        **({"shot": t["shot"]} if t.get("shot") and t.get("status") == "FAIL" else {})} for t in tests]}
 
@@ -1231,20 +1466,37 @@ def read_meta(out):
     """A run's meta.json. A run still marked running that this server isn't running was cut short (ApiMan was
     stopped or crashed mid-run): it's recorded as stopped, so it never blocks a new run or shows as running forever."""
     meta = json.loads((out / "meta.json").read_text("utf-8"))
-    if meta.get("status") == "running":
-        with RUNS_LOCK:
-            if meta.get("kind") == "collection":  # runs in the page: alive while the page keeps reporting
-                alive = time.time() - COLLECTION_RUNS.get(meta.get("id"), 0) < COLLECTION_STALE
-            else:
-                alive = meta.get("id") in RUNS
-        if not alive:
+    if meta.get("status") != "running":
+        return meta
+    with RUNS_LOCK:
+        if meta.get("kind") == "collection":  # runs in the page: alive while the page keeps reporting
+            alive = time.time() - COLLECTION_RUNS.get(meta.get("id"), 0) < COLLECTION_STALE
+        else:
+            alive = meta.get("id") in RUNS
+        if alive:
+            return meta
+        meta = json.loads((out / "meta.json").read_text("utf-8"))  # it may have just finished: the final one wins
+        if meta.get("status") == "running":
             meta.update(robot_summary(robot_events(out)), status="stopped", interrupted=True,
                         ended=meta.get("ended") or (out / "meta.json").stat().st_mtime)
             write_meta(out, meta)
+            COLLECTION_RUNS.pop(meta.get("id"), None)
     return meta
 
 
 COLLECTION_RUNS = {}  # run id -> time the page last reported on it (collection runs execute in the page)
+
+
+def run_going():
+    """The run in progress, if any (call with RUNS_LOCK held). One run at a time: two would fight over the app
+    under test, the browser and the console."""
+    if RUNS:
+        return next(iter(RUNS))
+    return next((rid for rid, at in COLLECTION_RUNS.items() if time.time() - at < COLLECTION_STALE), None)
+
+
+class RunBusy(ValueError):
+    pass
 COLLECTION_STALE = 90  # seconds without news: the page was closed mid-run
 MAX_RUN_EVENTS_POST = 8 * 1024 * 1024
 SECRET_HEADER_WORDS = ("authorization", "cookie", "token", "secret", "password", "passwd", "pwd", "api-key", "apikey",
@@ -1305,6 +1557,7 @@ def collection_run_start(root, body):
     pid = str(body.get("project") or "")
     robot_project_dir(root, pid)  # the project must exist
     run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
+    prune_runs(root)
     out = runs_dir(root, create=True) / run_id
     out.mkdir(parents=True)
     (out / "shots").mkdir()
@@ -1313,6 +1566,9 @@ def collection_run_start(root, body):
             "test": "", "include": "", "env": str(body.get("env") or "")[:200], "started": time.time(), "status": "running",
             "robot": None, "cases": int(body.get("cases") or 0)}
     with RUNS_LOCK:
+        if run_going():
+            shutil.rmtree(out, ignore_errors=True)
+            raise RunBusy("Another run is going: wait for it or stop it first.")
         COLLECTION_RUNS[run_id] = time.time()
     write_meta(out, meta)
     return meta
@@ -1366,13 +1622,18 @@ def robot_stop(run_id):
             return True  # Stop clicked again: still stopping, never "start a new run"
         STOPPING.add(run_id)
     try:
-        if os.name != "nt":
-            os.killpg(proc.pid, 15)  # the whole group: Robot and the browser it started
-        else:
-            proc.terminate()
+        kill_tree(proc)
     except OSError:
         pass
     return True
+
+
+def kill_tree(proc):
+    """Robot and everything it started (the browser, node): its process group, or on Windows its process tree."""
+    if os.name != "nt":
+        os.killpg(proc.pid, 15)
+    else:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=20)
 
 
 def robot_run_dir(root, run_id):
@@ -1438,10 +1699,14 @@ def robot_events_since(root, run_id, offset):
     except OSError:
         pass
     meta = read_meta(out)
-    try:
-        console = (out / "console.txt").read_bytes()[-6000:].decode("utf-8", "replace")
-    except OSError:
-        console = ""
+    console = ""
+    if meta.get("status") != "running":  # shown only once a run has ended (why Robot stopped); never re-read while it runs
+        try:
+            with open(out / "console.txt", "rb") as f:
+                f.seek(max(0, f.seek(0, 2) - 6000))
+                console = f.read().decode("utf-8", "replace")
+        except OSError:
+            pass
     return {"events": events, "next": nxt, "meta": meta, "console": console}
 
 
@@ -1574,7 +1839,19 @@ class Handler(BaseHTTPRequestHandler):
                 RUN_EVENTS.put(ev)
                 return self.reply(200, {"ok": True})
             if method == "POST" and path == "/api/send":
-                return self.reply(200, send(self.read_json()))
+                return self.reply(200, send(self.read_json(), self.stores["collections"].root))
+            if path == "/api/cookies":
+                root = self.stores["collections"].root
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                one = lambda k: (q.get(k) or [None])[0]
+                if method == "GET":
+                    return self.reply(200, CookieStore.list(root))
+                if method == "DELETE":
+                    CookieStore.delete(root, one("domain"), one("path"), one("name"))
+                    return self.reply(200, {"ok": True})
+                if method == "PUT":
+                    CookieStore.set(root, self.read_json())
+                    return self.reply(200, {"ok": True})
             if path == "/api/state" and method in ("GET", "PUT"):
                 state = StateStore(self.stores["collections"].root)
                 if method == "GET":

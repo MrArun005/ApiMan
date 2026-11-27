@@ -155,7 +155,8 @@
       "tight",
       "v",
       "r",
-      "mono"
+      "mono",
+      "clip"
     ],
     "CodeView": [
       "code-editor",
@@ -197,7 +198,8 @@
       "dlg-foot",
       "push-left",
       "dlg-tabs",
-      "dlg-after"
+      "dlg-after",
+      "page"
     ],
     "Menu": [
       "popover",

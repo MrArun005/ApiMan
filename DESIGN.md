@@ -39,25 +39,25 @@ Each row: the root class, its variants (modifiers), its parts, and the `ui.*` fu
 
 | # | Component | Root & variants | Parts | Build with |
 |---|---|---|---|---|
-| 1 | **Button** | `.btn` · `.primary` `.ghost` `.danger` `.solid` · `.small` · `.icon` | `.lbl`, `svg` | `ui.button()`, `ui.iconButton()` |
+| 1 | **Button** | `.btn` · `.primary` `.ghost` `.danger` `.solid` · `.small` · `.icon` · a toggle: `.ghost` with `aria-pressed` (`pressed: true` shows it on, e.g. tag chips) | `.lbl`, `svg` | `ui.button()`, `ui.iconButton()` |
 | 2 | **Input** | `input`, `select`, `textarea` · `.small` · `.bare` (no box: inside bars, tables, pickers) · `.code` (mono) · `.num` (numbers) · `.title` (the request name) · textarea `.prose` `.short` | select chevron | `ui.input()`, `ui.select()`, `ui.textarea()` |
 | 3 | **Field** | `.field` · `.narrow` `.grow` · layouts `.grid-2` (`.lead`: the first column twice as wide, e.g. the live browser beside its steps) `.grid-3` `.field-row` | `label`, control, `.hint` | `ui.field()` |
 | | Field types | `.secret-field` (input + icon button) · `.slider-row` (range + number + `.unit`) · `.swatches` (colour) | `.swatch` `.custom` | `ui.secretField()` |
 | 4 | **Check** | `label.check` · `.align-end` | `input[type=checkbox]`, `span`, `small` | `ui.check()` |
 | 5 | **Segmented** | `.seg` · `.block` | options `.seg-btn` (radio) or `.tab` (tab), `.count`/`.dot` inside, More button `.seg-more` | `ui.seg()`, `fitTabs()` |
 | 6 | **Badge** | `.pill` · tone · `.count` · tone · `.status-code` · `.s2` `.s3` `.s4` `.s5` `.err` · `.small` · `.mtag` · `.GET` `.POST` `.PUT` `.PATCH` `.DELETE` `.HEAD` `.OPTIONS` | | `ui.pill()`, `ui.count()`, `ui.status()`, `ui.method()` |
-| 7 | **Dot** | `.dot` · `.ok` (live, passed) · `.warn` (unsaved) · `.err` (failed) · `.muted` · `.off` · `.dots` (a strip of results, oldest to newest) | | `ui.dot()`, `ui.dots()` |
+| 7 | **Dot** | `.dot` · `.ok` (live, answering, passed) · `.warn` (unsaved, running) · `.err` (failed, not answering) · `.muted` · `.off` · `.dots` (a strip of results, oldest to newest) | | `ui.dot()`, `ui.dots()` |
 | 8 | **Text** | `.label` · `.hint` (`.one-line`; `.path`: a long path on one line, cut at its start, the whole path in `title`) · `.note` (tone) · `code.inline` · `pre.code-block` · `kbd` · `mark` · `.pre-line` | | `ui.hint()`, `ui.note()`, `ui.kbd()` |
 | 9 | **Toolbar** | `.pane-tools` · `.boxed` (find bar) · **ActionRow** `.actions` | `.tool-group` (right-aligned actions), `.spacer` | `ui.toolbar()`, `ui.actions()` |
 | 10 | **SectionHead** | `.section-head` | `.label`, `.hint`, a trailing control | `ui.sectionHead()` |
-| 11 | **Meta** | `.meta` | items; values in `b` (tone); hide hooks `.m-reason` `.m-time` `.m-size`; `.sending`, `.elapsed` | `ui.meta()` |
+| 11 | **Meta** | `.meta` | items; values in `b` (tone `.ok` `.warn` `.err` `.muted`); hide hooks `.m-reason` `.m-time` `.m-size`; `.sending`, `.elapsed` | `ui.meta()` |
 | 12 | **TreeRow** | `.row` · `.collection` · state `.on` `.menu-open` | `.caret` (`.open`), `.folder-ico`, `.name`, `.sub`, `.time`, `.acts` | `rowActs()`, tree renderers, `categoryNodes()` (data-folder categories: caret, `.folder-ico`, name, `.sub` count) |
 | 13 | **ResultRow** | `.test-row` · `.compact` | Pill, name, `.msg` | `ui.result()` |
 | 14 | **Log** | `.console` · `.scroll` (a live log: fixed height, scrolls) | `.line` (tone), `.src` | `ui.logLine()` |
-| 15 | **Table** | `table.kv` (editable key/value) · `table.grid` (read-only) · `.boxed` | `.chk` `.type` `.act` `.file-pick` `.fname` · `.num` `.tight` `.v` `.r` `.mono` · rows `.off` `.ghost` | `kvTable()`, `ui.table()` |
+| 15 | **Table** | `table.kv` (editable key/value) · `table.grid` (read-only) · `.boxed` | `.chk` `.type` `.act` `.file-pick` `.fname` · `.num` `.tight` `.v` `.r` `.mono` · `.clip` (a long URL or path: one line, cut, the whole text in `title`; never spills past the table) · rows `.off` `.ghost` `.on` (selected) | `kvTable()`, `ui.table()` |
 | 16 | **CodeView** | `.code-editor` · `.short` `.fill` `.readonly` `.codegen` · `pre.out` · `.line-diff` · `.preview` (`.tall`: most of the window, for Robot's report and log) · `.docs-preview` | `.editor-host`, CodeMirror (`CodeMirror*`, `cm-*`), JSON marks `.j-key` `.j-str` `.j-num` `.j-lit`, diff `.n` `.sign`, rows `.del` `.ins` `.gap` | `codeEditor()`, `renderLineDiff()` |
 | 17 | **EmptyState** | `.empty-state` (compact, in lists) · `.fill` (owns a pane: centred icon, title, one line) · `.drop` (drop zone) | `svg`, `strong` title, `p`, shortcuts `dl.keys`, `pre.code-block`, ActionRow | `ui.empty()`, `ui.emptyPane()` |
-| 18 | **Dialog** | `dialog` · `.confirm` `.wide` `.full` (the whole window: Automation) `.drawer` `.docked` | `.dlg-shell` `.dlg-head` `.dlg-body` (`.tall`) `.dlg-foot` (`.push-left`) `.dlg-tabs` `.dlg-after` | `openDialog()`, `ask()` |
+| 18 | **Dialog** | `dialog` · `.confirm` `.wide` `.full` (all but a margin of the window: Automation over the API client) · `.full.page` (the whole window, no scrim or frame: Automation's own window) `.drawer` `.docked`; a footer with nothing visible is hidden | `.dlg-shell` `.dlg-head` `.dlg-body` (`.tall`) `.dlg-foot` (`.push-left`) `.dlg-tabs` `.dlg-after` | `openDialog()`, `ask()` |
 | 19 | **Menu** | `.popover` | `.mi` (`.on`, `.danger`), `.sep`, `.mi-tab` `.mi-name` `.mi-sub`, `.peek`; anchor `.ctx-anchor` | `showMenu()` |
 | 20 | **Toast** | `.toast` · tone (`ok` done, `warn` needs you, `err` failed, `muted` information) · `.show` | tone icon, text | `toast(message, tone)`: a light surface like menus, bottom-right over the work area; problems stay 6 s, the rest 2.6 s |
 | 21 | **Progress** | `.bar` · tone | fill `div` | `ui.progress()` |

@@ -1,9 +1,11 @@
 """Self-check for server.py. Run: python3 test_server.py  (stdlib only, no network beyond localhost)."""
 import base64
+import zlib
 import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -1023,6 +1025,234 @@ class RunDataAndReportsTest(unittest.TestCase):
             server.RUN_EVENTS = old
             srv.shutdown()
             srv.server_close()
+
+
+class Wire(BaseHTTPRequestHandler):
+    """A target API for the send() regressions: compression, redirects, cookies, and what arrived on the wire."""
+
+    def answer(self, status=200, body=b"", headers=()):
+        self.send_response(status)
+        for k, v in headers:
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def handle_any(self):
+        import gzip
+        n = int(self.headers.get("Content-Length") or 0)
+        got = self.rfile.read(n) if n else b""
+        p = self.path
+        echo = lambda: self.answer(200, json.dumps({"method": self.command, "path": p, "body": got.decode("utf-8", "replace"),
+                                                     "auth": self.headers.get("Authorization"), "cookie": self.headers.get("Cookie"),
+                                                     "ae": self.headers.get("Accept-Encoding")}).encode(), [("Content-Type", "application/json")])
+        if p == "/gzip":
+            return self.answer(200, gzip.compress(b'{"gz": true}'), [("Content-Encoding", "gzip")])
+        if p == "/deflate":
+            return self.answer(200, zlib.compress(b'{"deflate": true}'), [("Content-Encoding", "deflate")])
+        if p == "/rawdeflate":
+            c = zlib.compressobj(wbits=-15)
+            return self.answer(200, c.compress(b'{"raw": true}') + c.flush(), [("Content-Encoding", "deflate")])
+        if p == "/bomb":  # 25 MB of zeros in ~25 KB
+            return self.answer(200, gzip.compress(b"0" * (25 * 1024 * 1024)), [("Content-Encoding", "gzip")])
+        if p.startswith("/r307") or p.startswith("/r302"):
+            return self.answer(int(p[2:5]), b"", [("Location", "/echo?after=1")])
+        if p.startswith("/loop/"):
+            return self.answer(302, b"", [("Location", f"/loop/{int(p[6:]) + 1}")])
+        if p == "/setcookie":
+            return self.answer(302, b"", [("Set-Cookie", "sid=abc; Path=/"), ("Location", "/echo")])
+        if p.startswith("/to-other?"):
+            return self.answer(302, b"", [("Location", urllib.parse.unquote(p.split("=", 1)[1]))])
+        return echo()
+
+    do_GET = do_POST = do_PUT = do_HEAD = handle_any
+
+    def log_message(self, *a):
+        pass
+
+
+class SendRegressionTest(unittest.TestCase):
+    """What the reviewer found in send(), kept fixed: one test per finding."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = start(Wire)
+        cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
+        cls.tmp = tempfile.TemporaryDirectory()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.tmp.cleanup()
+
+    def send(self, url, method="GET", body=None, headers=(), **kw):
+        return server.send({"method": method, "url": url, "body": body, "headers": [list(h) for h in headers], **kw}, self.tmp.name)
+
+    def j(self, r):
+        self.assertNotIn("error", r, r.get("error"))
+        return json.loads(r["body"])
+
+    def test_1_spaces_and_non_ascii_in_the_url_are_encoded(self):
+        got = self.j(self.send(self.base + "/anything/ಕ path?q=hello world&lang=ಕನ್ನಡ&keep=%2F"))
+        self.assertEqual(got["path"], "/anything/%E0%B2%95%20path?q=hello%20world&lang=%E0%B2%95%E0%B2%A8%E0%B3%8D%E0%B2%A8%E0%B2%A1&keep=%2F")
+        self.assertEqual(server.encode_url("http://bücher.example/x")[0], "http://xn--bcher-kva.example/x")
+
+    def test_2_compressed_responses_are_decoded(self):
+        for path, want in (("/gzip", {"gz": True}), ("/deflate", {"deflate": True}), ("/rawdeflate", {"raw": True})):
+            r = self.send(self.base + path)
+            self.assertFalse(r["binary"], path)
+            self.assertEqual(json.loads(r["body"]), want)
+            self.assertIn(r["encoding"], ("gzip", "deflate"))
+        self.assertIn("gzip", self.j(self.send(self.base + "/echo"))["ae"])        # asked for, like Postman
+        bomb = self.send(self.base + "/bomb")                                     # capped while decoding
+        self.assertTrue(bomb["truncated"])
+        self.assertEqual(bomb["size"], server.MAX_RESPONSE)
+
+    def test_3_redirects_keep_or_change_the_method_like_browsers(self):
+        got = self.j(self.send(self.base + "/r307", "POST", '{"a":1}', [("Content-Type", "application/json")]))
+        self.assertEqual((got["method"], got["body"]), ("POST", '{"a":1}'))       # 307: same method and body
+        got = self.j(self.send(self.base + "/r302", "PUT", "x"))
+        self.assertEqual((got["method"], got["body"]), ("GET", ""))               # 302: GET, no body
+        head = self.send(self.base + "/r302", "HEAD")
+        self.assertEqual(head["status"], 200)                                     # HEAD stays HEAD (no body to read)
+
+    def test_5_user_and_password_in_the_url_become_basic_auth(self):
+        got = self.j(self.send(self.base.replace("://", "://user:p%40ss@") + "/echo"))
+        self.assertEqual(got["auth"], "Basic " + base64.b64encode(b"user:p@ss").decode())
+        got = self.j(self.send(self.base.replace("://", "://u:p@") + "/echo", headers=[("Authorization", "Bearer t")]))
+        self.assertEqual(got["auth"], "Bearer t")                                  # an explicit Authorization wins
+
+    def test_6_cookies_are_kept_across_redirects_and_requests(self):
+        server.CookieStore.delete(self.tmp.name)
+        r = self.send(self.base + "/setcookie")
+        self.assertEqual(self.j(r)["cookie"], "sid=abc")                          # inside the redirect chain
+        self.assertEqual([c["name"] for c in r["cookies"]], ["sid"])             # pm.cookies
+        self.assertEqual(self.j(self.send(self.base + "/echo"))["cookie"], "sid=abc")   # and on the next request
+        self.assertIsNone(self.j(self.send(self.base + "/echo", cookies=False))["cookie"])  # the setting off: none
+        self.assertTrue(os.path.exists(os.path.join(self.tmp.name, ".apiman", "cookies.txt")))
+        server.CookieStore.set(self.tmp.name, {"domain": "127.0.0.1", "name": "extra", "value": "1"})
+        self.assertIn("extra=1", self.j(self.send(self.base + "/echo"))["cookie"])
+        server.CookieStore.delete(self.tmp.name, "127.0.0.1", "/", "sid")
+        self.assertEqual([c["name"] for c in server.CookieStore.list(self.tmp.name)], ["extra"])
+        server.CookieStore.delete(self.tmp.name)
+        self.assertEqual(server.CookieStore.list(self.tmp.name), [])
+
+    def test_7_too_many_redirects_are_reported(self):
+        r = self.send(self.base + "/loop/0", maxRedirects=5)
+        self.assertTrue(r["redirectLimitHit"])
+        self.assertEqual((r["status"], r["redirectLimit"]), (302, 5))
+        self.assertFalse(self.send(self.base + "/r302")["redirectLimitHit"])
+
+    def test_11_a_line_break_in_a_header_is_explained(self):
+        r = self.send(self.base + "/echo", headers=[("X-Crlf", "a\r\nX-Injected: yes")])
+        self.assertEqual(r["error"], "Header 'X-Crlf' contains a line break: remove it to send the request.")
+        self.assertIn("isn't valid", self.send(self.base + "/echo", headers=[("Bad Name", "1")])["error"])
+
+    def test_13_stripped_headers_are_named_as_typed(self):
+        other = start(Wire)
+        try:
+            target = urllib.parse.quote(f"http://localhost:{other.server_address[1]}/echo", safe="")
+            r = self.send(self.base + "/to-other?u=" + target, headers=[("X-Keep", "1"), ("Authorization", "Bearer t")])
+            self.assertEqual(sorted(r["redirectStripped"]), ["Authorization", "X-Keep"])
+        finally:
+            other.shutdown()
+
+
+@unittest.skipIf(os.name == "nt", "the fake Robot is a script with a #! line")
+class RunLifecycleTest(unittest.TestCase):
+    """Start, a second run refused, Stop twice, cleanup, the finish race and shutdown, with a fake Robot."""
+
+    def setUp(self):
+        import sys
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+        os.makedirs(os.path.join(self.root, "proj"))
+        with open(os.path.join(self.root, "proj", "t.robot"), "w") as f:
+            f.write("*** Test Cases ***\nT\n    Log    hi\n")
+        fake = os.path.join(self.root, "fake-robot")
+        with open(fake, "w") as f:  # answers the version probe; a run sleeps FAKE_SLEEP seconds, then exits FAKE_EXIT
+            f.write(f"#!{sys.executable}\nimport os, sys, time\n"
+                    "if sys.argv[1:2] == ['-c']: print('7.0'); sys.exit(0)\n"
+                    "time.sleep(float(os.environ.get('FAKE_SLEEP', '0'))); sys.exit(int(os.environ.get('FAKE_EXIT', '0')))\n")
+        os.chmod(fake, 0o755)
+        self.env = {k: os.environ.get(k) for k in ("APIMAN_ROBOT_PYTHON", "FAKE_SLEEP", "FAKE_EXIT")}
+        os.environ["APIMAN_ROBOT_PYTHON"] = fake
+        self.stores = server.make_stores(self.root)
+
+    def tearDown(self):
+        server.stop_all_runs()
+        for k, v in self.env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.tmp.cleanup()
+
+    def start(self, sleep, code=0):
+        os.environ["FAKE_SLEEP"], os.environ["FAKE_EXIT"] = str(sleep), str(code)
+        return server.robot_start(self.root, self.stores, {"project": "proj", "envId": ""})
+
+    def wait(self, run_id, timeout=15):
+        out = server.robot_run_dir(self.root, run_id)
+        end = time.time() + timeout
+        while time.time() < end:
+            meta = server.read_meta(out)
+            with server.RUNS_LOCK:
+                gone = run_id not in server.RUNS
+            if meta["status"] != "running" and gone:
+                return meta
+            time.sleep(0.05)
+        self.fail("the run never finished")
+
+    def test_start_refuse_stop_twice_and_clean_up(self):
+        meta = self.start(30)
+        self.assertEqual(meta["status"], "running")
+        with server.RUNS_LOCK:
+            varfile = server.VARFILES[meta["id"]]
+        self.assertTrue(os.path.exists(varfile))
+        with self.assertRaises(server.RunBusy):                                   # one run at a time
+            self.start(0)
+        with self.assertRaises(server.RunBusy):                                   # a collection run too
+            server.collection_run_start(self.root, {"project": "proj"})
+        self.assertTrue(server.robot_stop(meta["id"]))
+        self.assertTrue(server.robot_stop(meta["id"]))                            # Stop again: still "stopped"
+        done = self.wait(meta["id"])
+        self.assertEqual(done["status"], "stopped")
+        self.assertFalse(os.path.exists(varfile))                                 # the secrets file is gone
+        self.assertFalse(server.robot_stop(meta["id"]))                           # nothing left to stop
+        self.assertEqual(len([d for d in os.listdir(os.path.join(self.root, ".apiman", "runs"))]), 1)  # the refused ones left nothing
+
+    def test_finish_race_never_records_a_passed_run_as_interrupted(self):
+        meta = self.start(0.3)
+        out = server.robot_run_dir(self.root, meta["id"])
+        seen = set()
+        while True:  # several views polling while it finishes
+            with server.RUNS_LOCK:
+                gone = meta["id"] not in server.RUNS
+            seen.add(server.read_meta(out)["status"])
+            if gone:
+                break
+        final = server.read_meta(out)
+        self.assertEqual(final["status"], "passed")
+        self.assertNotIn("interrupted", final)
+        self.assertLessEqual(seen, {"running", "passed"})
+
+    def test_shutdown_stops_runs_and_removes_secrets(self):
+        meta = self.start(30)
+        with server.RUNS_LOCK:
+            varfile, proc = server.VARFILES[meta["id"]], server.RUNS[meta["id"]]
+        server.stop_all_runs()
+        proc.wait(10)
+        self.assertFalse(os.path.exists(varfile))
+
+    def test_runs_are_pruned(self):
+        runs = server.runs_dir(self.root, create=True)
+        for i in range(server.KEEP_RUNS + 5):
+            os.makedirs(runs / f"20200101-000000-{i:06x}")
+        server.prune_runs(self.root)
+        self.assertEqual(len(os.listdir(runs)), server.KEEP_RUNS)
+        self.assertNotIn("20200101-000000-000000", os.listdir(runs))           # the oldest go first
 
 
 if __name__ == "__main__":
