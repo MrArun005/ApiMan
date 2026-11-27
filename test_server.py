@@ -395,6 +395,55 @@ class ServerTest(unittest.TestCase):
         self.assertFalse((root.parent / "evil.robot").exists())
         self.assertEqual(self.call("POST", "/api/robot/import", {"name": "x.zip", "data": base64.b64encode(b"nope").decode()})[0], 400)
 
+    def test_robot_http_calls_are_found_for_pairing(self):
+        text = ("*** Test Cases ***\nA\n    ${r}=    GET On Session    api    /employees/${id}    expected_status=200\n"
+                "    RequestsLibrary.DELETE On Session    api    url=/x\n    ${r}    =    GET    ${BASE_URL}/api/info\n"
+                "    PUT    https://api.example.com/v1/things/7\n    Log    /not/http\n    GET On Session    api    ${ENDPOINT}\n")
+        self.assertEqual(server.robot_http_calls(text), [("GET", "/employees/${id}", ""), ("DELETE", "/x", ""), ("GET", "/api/info", ""),
+                                                         ("PUT", "/v1/things/7", "api.example.com")])
+
+    def test_collection_runs_are_suite_results(self):
+        root = server.Handler.stores["collections"].root
+        (root / "shop-tests").mkdir(exist_ok=True)
+        (root / "shop-tests" / "t.robot").write_text("*** Test Cases ***\nT\n    GET On Session    s    /api/orders\n")
+        status, meta = self.call("POST", "/api/robot/runs/collection", {"project": "shop-tests", "projectName": "shop-tests", "collectionName": "Shop", "cases": 2})
+        self.assertEqual((status, meta["kind"], meta["status"]), (201, "collection", "running"))
+        rid = meta["id"]
+        ev = [{"t": "test_start", "name": "Login"}, {"t": "http", "method": "POST", "url": "http://h/api/login", "status": 200,
+               "reqHeaders": {"Authorization": "Bearer abc", "X-Api-Key": "k", "Accept": "json"}, "resHeaders": {"Set-Cookie": "s=1"}},
+              {"t": "test_end", "name": "Login", "status": "PASS"}, {"t": "evil", "x": 1}, "garbage"]
+        self.assertEqual(self.call("POST", f"/api/robot/runs/{rid}/events", {"events": ev})[0], 200)
+        res = self.call("GET", f"/api/robot/runs/{rid}")[1]
+        http = [e for e in res["events"] if e["t"] == "http"][0]
+        self.assertEqual(http["reqHeaders"], {"Authorization": "•••", "X-Api-Key": "•••", "Accept": "json"})  # masked server-side too
+        self.assertEqual(http["resHeaders"], {"Set-Cookie": "•••"})
+        self.assertNotIn("evil", [e["t"] for e in res["events"]])
+        self.assertEqual(res["meta"]["status"], "running")
+        done = [{"t": "test_start", "name": "Orders"}, {"t": "test_end", "name": "Orders", "status": "FAIL", "message": "HTTP 500"}]
+        self.assertEqual(self.call("POST", f"/api/robot/runs/{rid}/events", {"events": done, "done": "done"})[0], 200)
+        m = self.call("GET", f"/api/robot/runs?project=shop-tests")[1][0]
+        self.assertEqual((m["status"], m["passed"], m["failed"], m["kind"]), ("failed", 1, 1, "collection"))
+        self.assertEqual(self.call("POST", f"/api/robot/runs/{rid}/events", {"events": []})[0], 400)  # finished: nothing more
+        # its own calls never count as "called by the tests"
+        d = self.call("GET", "/api/robot/projects/shop-tests")[1]
+        self.assertEqual([(e["method"], e["path"]) for e in d["endpoints"]], [("GET", "/api/orders")])
+        # a page closed mid-run: reported stopped, not running forever
+        rid2 = self.call("POST", "/api/robot/runs/collection", {"project": "shop-tests", "collectionName": "Shop"})[1]["id"]
+        server.COLLECTION_RUNS[rid2] = 0  # no news for a long time
+        self.assertEqual(self.call("GET", f"/api/robot/runs/{rid2}")[1]["meta"]["status"], "stopped")
+        self.assertEqual(self.call("POST", "/api/robot/runs/collection", {"project": "../x"})[0], 400)
+        # cut short by an error: failed and interrupted, never "passed"
+        rid3 = self.call("POST", "/api/robot/runs/collection", {"project": "shop-tests", "collectionName": "Shop"})[1]["id"]
+        ok = [{"t": "test_start", "name": "A"}, {"t": "test_end", "name": "A", "status": "PASS"},
+              {"t": "http", "method": "POST", "url": "http://h/login?api_key=k1&page=2", "status": 200, "reqBody": '{"user":"a","password":"hunter2","nested":{"token":"t"}}'}]
+        self.call("POST", f"/api/robot/runs/{rid3}/events", {"events": ok, "done": "error"})
+        m3 = self.call("GET", f"/api/robot/runs/{rid3}")[1]
+        self.assertEqual((m3["meta"]["status"], m3["meta"].get("interrupted")), ("failed", True))
+        logged = [e for e in m3["events"] if e["t"] == "http"][0]
+        self.assertEqual(logged["url"], "http://h/login?api_key=•••&page=2")         # credentials hidden in URLs
+        self.assertEqual(json.loads(logged["reqBody"]), {"user": "a", "password": "•••", "nested": {"token": "•••"}})  # and in JSON bodies
+        self.assertEqual(m3["meta"]["calls"], [["POST", "/login", "h"]])             # the calls it made, kept with the run
+
     def test_app_check_says_what_answers(self):
         res = self.call("POST", "/api/robot/apps/check", {"urls": [self.target + "/x", "http://127.0.0.1:9/", "ftp://x"]})[1]
         self.assertEqual([r["up"] for r in res], [True, False, False])

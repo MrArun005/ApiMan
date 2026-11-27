@@ -36,6 +36,8 @@ python3 server.py run orders.json --folder Smoke -n 3 --delay 200 --bail
 
 Click **Run → Automation** (local mode). It opens on a **dashboard**: a card per project with its tests and tags, last result, a trend of recent runs, the environment it uses and whether that environment's app is answering, and **Open** / **Run**. Totals across projects sit on top.
 
+Automation has its own address, `http://127.0.0.1:5577/#automation`: bookmark it, or click **Open in new window** to keep the dashboard in one window and the API client in another (the same data, environments and runs; nothing is copied). The Automation window never saves the API client's tabs, so it can't overwrite the main window's; after you close Automation there, it's an ordinary ApiMan window.
+
 Bring projects in any of three ways:
 
 - **Link a folder**: any folder on this computer with `.robot` files. It's remembered and run where it is; nothing is copied.
@@ -43,6 +45,24 @@ Bring projects in any of three ways:
 - **Put it in your data folder** (copy it, or clone the repo there).
 
 Below the cards, **Apps running on this computer** lists what answers on the usual development ports (3000, 4200, 5173, 8000, 8080, 8081…), with one click to create an environment whose `BASE_URL` is that app, and **Environments** shows, for each environment, whether the apps its URLs point at are answering right now (only each app's address is asked, never a path from your values, and secret values are skipped). Each project remembers its own environment (first time: the one with most of the keys it needs).
+
+**API suites: a Postman collection and a Robot project for the same APIs are one suite.** When a collection's requests are the API calls a Robot project makes (same method and path; `{{id}}`, `${ID}`, `:id` and `42` all count as a value), ApiMan pairs them, with no setup. You can change the pairing in the project's **Collection** tab, or from **Collections not paired** on the dashboard.
+
+- **One environment:** the one that points at the collection's host is chosen for both. Robot reads `${BASE_URL}` from `baseUrl` (it ignores case and `_`), and if an environment spells a key differently from what the collection needs, ApiMan offers to rename it: one key, never a duplicate. "Create environment" reuses one that already points at the same app.
+- **Test data comes from the Robot project:** its CSV, TSV and JSON files. For each request, in order:
+  1. A file (or JSON key) named after it or its folder (`login.csv` for *Login*).
+  2. Rows of a `request` column naming it.
+  3. The data whose columns fill the request's `{{variables}}`.
+  
+  A column also fills the request's own fields of the same name: JSON body (nested: `items[0].quantity`), query, path variables, form fields. Types are kept, and nothing is invented. Each row is one case. Special columns:
+  - `expectedStatus` makes the row a status check, so negative rows pass on their 4xx and never change variables later requests use;
+  - `case` labels the row;
+  - `skip` skips it.
+  
+  Test data can never change which server a request goes to. At most 100 rows per request and 5,000 cases per run. YAML and Excel files are listed as not read.
+- **A collection run is a result of the suite:** **Run API** (on the card) or **Run collection with test data** (Collection tab) runs in ApiMan with the same live view, API calls, failures and History as the Robot runs, marked API. A page closed mid-run is recorded as stopped; a request cut off by Stop isn't counted.
+
+**History** shows what changed since the last run of the same selection (new failures, fixed, slower). It also shows every test with its last 10 results, a pass rate and badges (New failure, Fixed, Flaky, Failing), and the screen of each failure in the last run, with **Replay** to step through that test's screens. Tag chips under *Only tests tagged* filter a run in one click.
 
 ApiMan finds everything in a project on its own:
 

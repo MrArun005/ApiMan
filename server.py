@@ -921,8 +921,38 @@ def robot_varfile_names(path):
     return {robot_norm(re.sub(r"^(LIST|DICT)__", "", m)) for m in re.findall(pat, text, re.M)}
 
 
+HTTP_KEYWORDS = {f"{m}{suffix}": m.upper() for m in ("get", "post", "put", "patch", "delete", "head", "options")
+                 for suffix in ("", "onsession", "request")}  # RequestsLibrary: GET, GET On Session; others: Get Request
+HTTP_CELL = re.compile(r"^(?:https?://[^\s/]+)?(/[^\s|]*)$|^https?://[^\s/]+$")
+
+
+def robot_http_calls(text):
+    """(method, path, host) of every HTTP call written in Robot source: "GET On Session  api  /users/${id}"."""
+    out = []
+    for raw in text.splitlines():
+        cells = [c for c in CELL_SPLIT.split(raw.strip()) if c]
+        # skip "${resp}=" assignment cells, then the keyword
+        while cells and re.match(r"^[$@&]\{[^{}]+\}\s*=?$", cells[0]) or cells[:1] == ["="]:
+            cells = cells[1:]
+        if not cells:
+            continue
+        method = HTTP_KEYWORDS.get(robot_norm(cells[0].split(".")[-1]))  # RequestsLibrary.GET On Session too
+        if not method:
+            continue
+        for c in cells[1:4]:  # session alias, then the URL or path
+            c = re.sub(r"^(?:url|uri|path)\s*=\s*", "", c, flags=re.I)  # url=/x (named argument)
+            c = re.sub(r"^[$]\{[^{}]+\}(?=/)", "", c)  # ${BASE_URL}/api/info: the host is a variable
+            m = HTTP_CELL.match(c)
+            if m:
+                host = re.match(r"^https?://([^\s/]+)", c)
+                out.append((method, m.group(1) or "/", host.group(1).lower() if host else ""))
+                break
+    return out
+
+
 def robot_project(root, pid):
     project = robot_project_dir(root, pid)
+    calls = set()
     suites, data, used, defined, envs, uses, varfiles = [], [], {}, set(), set(), {}, []
     for p in robot_walk(project):
         rel = p.relative_to(project).as_posix()
@@ -933,6 +963,7 @@ def robot_project(root, pid):
             except OSError:
                 continue
             tests, u, d, e = robot_parse(text)
+            calls.update(robot_http_calls(text))
             for k, name in u.items():
                 used.setdefault(k, name)
                 uses.setdefault(k, []).append(rel)
@@ -956,10 +987,16 @@ def robot_project(root, pid):
                 varfiles.append(rel)
     keys = sorted((name for k, name in used.items() if k not in defined and k not in ROBOT_BUILTIN_VARS),
                   key=str.lower)
+    for run in [r for r in robot_runs(root, pid, limit=20) if r.get("kind") != "collection"][:5]:  # calls its Robot runs made (a collection run's own calls don't count)
+        if "calls" not in run and run.get("status") != "running":  # a run from before calls were kept: work them out once
+            run["calls"] = run_calls(robot_events(runs_dir(root) / run["id"]))
+            write_meta(runs_dir(root) / run["id"], run)
+        calls.update(tuple(c) for c in run.get("calls") or [])
     return {
         "id": pid, "name": project.name, "path": str(project), "suites": suites, "data": data,
         "keys": [{"name": k, "files": sorted(set(uses[robot_norm(k)]))[:5]} for k in keys],
         "envVars": sorted(envs, key=str.lower), "varfiles": varfiles, "python": robot_python(project, root, probe=False),
+        "endpoints": [{"method": m, "path": pth, "host": h} for m, pth, h in sorted(calls)][:2000],
     }
 
 
@@ -1097,7 +1134,8 @@ def robot_summary(events):
     return {"passed": count("PASS"), "failed": count("FAIL"), "skipped": count("SKIP"), "http": len(http),
             "httpErrors": sum(1 for e in http if e.get("error") or (e.get("status") or 0) >= 400),
             "tests": [{"name": t.get("name"), "suite": t.get("suite", ""), "status": t.get("status"),
-                       "ms": t.get("ms"), "message": (t.get("message") or "")[:300]} for t in tests]}
+                       "ms": t.get("ms"), "message": (t.get("message") or "")[:300],
+                       **({"shot": t["shot"]} if t.get("shot") and t.get("status") == "FAIL" else {})} for t in tests]}
 
 
 def robot_tee(proc, log, meta):
@@ -1113,6 +1151,16 @@ def robot_tee(proc, log, meta):
     log.close()
 
 
+def run_calls(events):
+    """The distinct API calls (method, path, host) a run made: kept in its meta.json so pairing never re-reads logs."""
+    calls = set()
+    for e in events:
+        if e.get("t") == "http" and e.get("url"):
+            u = urllib.parse.urlsplit(str(e["url"]))
+            calls.add((str(e.get("method") or "GET").upper(), u.path or "/", (u.netloc or "").lower()))
+    return sorted(calls)[:500]
+
+
 def robot_finish(out, proc, tee, varfile, meta):
     code = proc.wait()
     tee.join(10)  # console.txt complete before the run is reported done
@@ -1125,6 +1173,7 @@ def robot_finish(out, proc, tee, varfile, meta):
     s = robot_summary(robot_events(out))
     # Robot exits 0 only when every test passed: 1-250 failures, 251+ errors, negative when killed
     meta.update(s, ended=time.time(), exitCode=code, status="stopped" if stopped else "passed" if code == 0 else "failed")
+    meta["calls"] = run_calls(robot_events(out))
     write_meta(out, meta)
     with RUNS_LOCK:  # only now: until the final meta.json is written, the run is still this server's
         RUNS.pop(meta["id"], None)
@@ -1147,12 +1196,119 @@ def read_meta(out):
     meta = json.loads((out / "meta.json").read_text("utf-8"))
     if meta.get("status") == "running":
         with RUNS_LOCK:
-            alive = meta.get("id") in RUNS
+            if meta.get("kind") == "collection":  # runs in the page: alive while the page keeps reporting
+                alive = time.time() - COLLECTION_RUNS.get(meta.get("id"), 0) < COLLECTION_STALE
+            else:
+                alive = meta.get("id") in RUNS
         if not alive:
             meta.update(robot_summary(robot_events(out)), status="stopped", interrupted=True,
                         ended=meta.get("ended") or (out / "meta.json").stat().st_mtime)
             write_meta(out, meta)
     return meta
+
+
+COLLECTION_RUNS = {}  # run id -> time the page last reported on it (collection runs execute in the page)
+COLLECTION_STALE = 90  # seconds without news: the page was closed mid-run
+MAX_RUN_EVENTS_POST = 8 * 1024 * 1024
+SECRET_HEADER_WORDS = ("authorization", "cookie", "token", "secret", "password", "api-key", "apikey")
+
+
+def secret_name(name):
+    low = re.sub(r"[-_\s]", "", str(name).lower())  # api_key, api-key, API Key, apikey alike
+    return any(w.replace("-", "") in low for w in SECRET_HEADER_WORDS)
+
+
+def mask_url(url):
+    """?api_key=… and ?token=… hidden in a logged URL."""
+    u = urllib.parse.urlsplit(str(url))
+    if not u.query:
+        return str(url)
+    q = "&".join(f"{k}=•••" if secret_name(urllib.parse.unquote(k)) else f"{k}={v}" if v or "=" in pair else k
+                 for pair in u.query.split("&") for k, _, v in [pair.partition("=")])
+    return urllib.parse.urlunsplit(u._replace(query=q))
+
+
+def mask_body(text):
+    """A JSON body with its password, token, secret… fields hidden (other bodies as they are)."""
+    if not isinstance(text, str) or not text.strip().startswith(("{", "[")):
+        return text
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return re.sub(r'("(?:[^"]*(?:password|token|secret|api[-_]?key)[^"]*)"\s*:\s*)"[^"]*"', r'\1"•••"', text, flags=re.I)
+
+    def walk(v):
+        if isinstance(v, dict):
+            return {k: "•••" if secret_name(k) and not isinstance(x, (dict, list)) else walk(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        return v
+    return json.dumps(walk(data), ensure_ascii=False, indent=2)
+
+
+def mask_headers(headers):
+    if not isinstance(headers, dict):
+        return {}
+    return {str(k): "•••" if secret_name(k) else str(v)[:2000] for k, v in headers.items()}
+
+
+def collection_run_start(root, body):
+    """Open a run record for a collection run the page is about to do (with the paired project's test data)."""
+    if not isinstance(body, dict):
+        raise ValueError("Invalid request body")
+    pid = str(body.get("project") or "")
+    robot_project_dir(root, pid)  # the project must exist
+    run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
+    out = runs_dir(root, create=True) / run_id
+    out.mkdir(parents=True)
+    (out / "shots").mkdir()
+    meta = {"id": run_id, "project": pid, "projectName": str(body.get("projectName") or pid)[:200], "kind": "collection",
+            "target": str(body.get("collectionName") or "collection")[:200], "collection": str(body.get("collection") or "")[:500],
+            "test": "", "include": "", "env": str(body.get("env") or "")[:200], "started": time.time(), "status": "running",
+            "robot": None, "cases": int(body.get("cases") or 0)}
+    with RUNS_LOCK:
+        COLLECTION_RUNS[run_id] = time.time()
+    write_meta(out, meta)
+    return meta
+
+
+def collection_run_events(root, run_id, body):
+    """Events of a collection run, as the page sends them; with "done", the run's final status."""
+    out = robot_run_dir(root, run_id)
+    meta = json.loads((out / "meta.json").read_text("utf-8"))
+    if meta.get("kind") != "collection" or meta.get("status") != "running":
+        raise ValueError("This run isn't a collection run in progress.")
+    events = body.get("events") if isinstance(body, dict) else None
+    if not isinstance(events, list):
+        raise ValueError("Invalid request body")
+    allowed = {"suite_start", "suite_end", "test_start", "test_end", "kw_start", "kw_end", "http", "log"}
+    with open(out / "events.jsonl", "a", encoding="utf-8") as f:
+        for e in events:
+            if not isinstance(e, dict) or e.get("t") not in allowed:
+                continue
+            if e.get("t") == "http":  # credentials never land in the run log, whatever the page sent
+                e["reqHeaders"], e["resHeaders"] = mask_headers(e.get("reqHeaders")), mask_headers(e.get("resHeaders"))
+                e["url"], e["reqBody"], e["resBody"] = mask_url(e.get("url", "")), mask_body(e.get("reqBody", "")), mask_body(e.get("resBody", ""))
+                for k in ("reqBody", "resBody"):
+                    if isinstance(e.get(k), str) and len(e[k]) > 65536:
+                        e[k] = e[k][:65536] + f"\n… {len(e[k]) - 65536} more characters"
+            e.pop("shot", None)  # no screenshots in API runs
+            e["at"] = round(time.time(), 3)
+            f.write(json.dumps(e, ensure_ascii=False, default=str) + "\n")
+    done = body.get("done")
+    with RUNS_LOCK:
+        COLLECTION_RUNS[run_id] = time.time()
+    if done:
+        s = robot_summary(robot_events(out))
+        status = "stopped" if done == "stopped" else "failed" if done == "error" else "passed" if s["passed"] and not s["failed"] else "failed"
+        meta.update(s, ended=time.time(), status=status, exitCode=0 if status == "passed" else 1, **({"interrupted": True} if done == "error" else {}))
+        meta["calls"] = run_calls(robot_events(out))
+        write_meta(out, meta)
+        with RUNS_LOCK:
+            COLLECTION_RUNS.pop(run_id, None)
+        print(f"[automation] {meta['projectName']}: collection {meta['target']} {status}, {s['passed']} passed, "
+              f"{s['failed']} failed, {s['http']} API calls.", flush=True)
+    return {"ok": True}
 
 
 def robot_stop(run_id):
@@ -1206,7 +1362,8 @@ def robot_dashboard(root):
         try:
             d = robot_project(root, proj["id"])
             row.update(tests=sum(len(x["tests"]) for x in d["suites"]), suites=len(d["suites"]),
-                       keys=[k["name"] for k in d["keys"]], tags=sorted({t for x in d["suites"] for y in x["tests"] for t in y["tags"]}, key=str.lower))
+                       keys=[k["name"] for k in d["keys"]], tags=sorted({t for x in d["suites"] for y in x["tests"] for t in y["tags"]}, key=str.lower),
+                       endpoints=d["endpoints"])
         except (OSError, ValueError) as e:
             row["error"] = str(e)
         row["runs"] = [{k: r.get(k) for k in ("id", "status", "passed", "failed", "skipped", "started", "ended", "env", "http")}
@@ -1451,6 +1608,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, robot_runs(root, query.get("project")))
         if parts == ["runs"] and method == "POST":
             return self.reply(201, robot_start(root, self.stores, self.read_json()))
+        if parts == ["runs", "collection"] and method == "POST":
+            return self.reply(201, collection_run_start(root, self.read_json()))
+        if len(parts) == 3 and parts[0] == "runs" and parts[2] == "events" and method == "POST":
+            return self.reply(200, collection_run_events(root, parts[1], self.read_json(MAX_RUN_EVENTS_POST)))
         if len(parts) == 2 and parts[0] == "runs" and method == "GET":
             return self.reply(200, robot_events_since(root, parts[1], max(0, int(query.get("from") or 0))))
         if len(parts) == 3 and parts[0] == "runs" and parts[2] == "stop" and method == "POST":
