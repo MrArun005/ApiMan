@@ -1157,7 +1157,8 @@ def run_calls(events):
     for e in events:
         if e.get("t") == "http" and e.get("url"):
             u = urllib.parse.urlsplit(str(e["url"]))
-            calls.add((str(e.get("method") or "GET").upper(), u.path or "/", (u.netloc or "").lower()))
+            host = (u.netloc.rpartition("@")[2] or "").lower()  # never user:password@
+            calls.add((str(e.get("method") or "GET").upper(), u.path or "/", host))
     return sorted(calls)[:500]
 
 
@@ -1218,20 +1219,28 @@ def secret_name(name):
     return any(w.replace("-", "") in low for w in SECRET_HEADER_WORDS)
 
 
+def mask_pairs(query):
+    """a=1&password=x&token=y with the secret values hidden (query strings and form bodies)."""
+    return "&".join(f"{k}=•••" if secret_name(urllib.parse.unquote_plus(k)) else pair
+                    for pair in query.split("&") for k, _, _ in [pair.partition("=")])
+
+
 def mask_url(url):
-    """?api_key=… and ?token=… hidden in a logged URL."""
+    """user:password@ and ?api_key=… / ?token=… hidden in a logged URL."""
     u = urllib.parse.urlsplit(str(url))
-    if not u.query:
-        return str(url)
-    q = "&".join(f"{k}=•••" if secret_name(urllib.parse.unquote(k)) else f"{k}={v}" if v or "=" in pair else k
-                 for pair in u.query.split("&") for k, _, v in [pair.partition("=")])
-    return urllib.parse.urlunsplit(u._replace(query=q))
+    if "@" in u.netloc:
+        u = u._replace(netloc="•••@" + u.netloc.rpartition("@")[2])
+    if u.query:
+        u = u._replace(query=mask_pairs(u.query))
+    return urllib.parse.urlunsplit(u) if ("@" in u.netloc or u.query) else str(url)
 
 
 def mask_body(text):
-    """A JSON body with its password, token, secret… fields hidden (other bodies as they are)."""
-    if not isinstance(text, str) or not text.strip().startswith(("{", "[")):
+    """A JSON or form (a=1&password=x) body with its password, token, secret… fields hidden (other bodies as they are)."""
+    if not isinstance(text, str):
         return text
+    if not text.strip().startswith(("{", "[")):
+        return mask_pairs(text) if re.fullmatch(r"[^\s&=]+=[^\s&]*(&[^\s&=]+=[^\s&]*)*", text.strip()) else text
     try:
         data = json.loads(text)
     except ValueError:

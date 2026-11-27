@@ -36,7 +36,7 @@ python3 server.py run orders.json --folder Smoke -n 3 --delay 200 --bail
 
 Click **Run → Automation** (local mode). It opens on a **dashboard**: a card per project with its tests and tags, last result, a trend of recent runs, the environment it uses and whether that environment's app is answering, and **Open** / **Run**. Totals across projects sit on top.
 
-Automation has its own address, `http://127.0.0.1:5577/#automation`: bookmark it, or click **Open in new window** to keep the dashboard in one window and the API client in another (the same data, environments and runs; nothing is copied). The Automation window never saves the API client's tabs, so it can't overwrite the main window's; after you close Automation there, it's an ordinary ApiMan window.
+Automation opens in **its own window** (`http://127.0.0.1:5577/#automation`, which you can bookmark): Run → Automation opens it, or brings it to the front if it's already open, without reloading it. Keep the dashboard on one screen and the API client on another; they share the same data, environments and runs, and nothing is copied. The Automation window never saves the API client's tabs, so it can't overwrite the main window's. If the browser blocks pop-ups, Automation opens over the API client instead.
 
 Bring projects in any of three ways:
 

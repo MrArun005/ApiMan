@@ -4096,8 +4096,7 @@ async function saveAs() {
 // =====================================================================================================
 const dialogQueue = [];
 let dialogSeq = 0, closingSeq = null;
-/** Automation's own page (#automation): opened in its own window, that window never saves the API client's tabs
- *  (they're the main window's, and would be stale), until you close Automation there and use it as a normal window. */
+/** Automation's own window (#automation): it never saves the API client's tabs (they're the main window's, and would be stale). */
 const automationWin = { only: location.hash === '#automation', aside: false };
 const dialogCloses = new Map(); // dialog number -> its onClose
 /** Opens the dialog, or queues it if one is already open, so a background prompt never replaces your open dialog. */
@@ -4120,8 +4119,10 @@ function updateDock() {
   if (focused && dlg.contains(focused)) focused.focus({ preventScroll: true });
 }
 window.addEventListener('resize', () => requestAnimationFrame(updateDock));
-function renderDialog({ title, body, buttons = [], wide = false, full = false, confirm = false, tall = false, drawer = false, cancel = 'Cancel', onClose, focus, onOpen }) {
+function renderDialog({ title, body, buttons = [], wide = false, full = false, confirm = false, tall = false, drawer = false, cancel = 'Cancel', closable = true, onClose, focus, onOpen }) {
   const dlg = $('#dlg');
+  $('.dlg-head .btn.icon').hidden = !closable; // closable: false = a whole window (Automation's), no ✕ and no Esc
+  dlg.dataset.locked = closable ? '' : '1';
   dlg.classList.toggle('wide', wide);
   dlg.classList.toggle('full', full);
   dlg.classList.toggle('confirm', confirm);
@@ -5719,6 +5720,19 @@ const envUrls = (doc) => ((doc && doc.values) || []).filter((v) => v.enabled !==
 /** An app's address for comparing: scheme, host, port; localhost and 127.0.0.1 are the same. */
 const appKey = (u) => { try { const x = new URL(u); const host = ['127.0.0.1', '[::1]'].includes(x.hostname) ? 'localhost' : x.hostname; return `${x.protocol}//${host}:${x.port || (x.protocol === 'https:' ? 443 : 80)}`; } catch { return u; } };
 
+/** Automation lives in its own window (#automation): open it, or bring it forward when it's already open
+ *  (never reloaded: a collection run going there runs in that page). */
+function showAutomation() {
+  if (automationWin.only) return; // this is that window
+  const win = window.open('', 'apiman-automation');
+  if (win) {
+    try { if (win.location.href === 'about:blank') win.location.href = `${location.pathname}${location.search}#automation`; } catch { /* not ours to read */ }
+    win.focus();
+    return;
+  }
+  toast('The browser blocked the Automation window, so it opens here. Allow pop-ups for ApiMan to give it its own window.', 'warn');
+  openAutomation().catch((err) => toast(err.message, 'err'));
+}
 async function openAutomation() {
   let projects = await api('GET', '/api/robot/projects');
   const saved = ls.get('apiman:automation', {});
@@ -6560,22 +6574,18 @@ async function openAutomation() {
     h('div', { class: 'grid-3' }, h('div', null, ui.field('Only tests tagged', tagsIn), tagChips), ui.field('Speed', speedSel), h('div', { class: 'field' }, pythonNote)),
     tabBar, ...panes);
   openDialog({
-    title: 'Automation', full: true, tall: true, cancel: 'Close',
+    title: 'Automation', full: true, tall: true,
     body: [dash, projectView],
+    // Automation's own window: the whole window, nothing to close (the API client is in the other window).
+    // Opened here only when the browser blocked that window: then it closes like any dialog.
+    cancel: automationWin.only ? false : 'Close', closable: !automationWin.only,
     onClose: () => {
       if (run && run.timer) clearTimeout(run.timer); run = null; if (shotUrl) URL.revokeObjectURL(shotUrl); releaseHistory();
-      if (automationWin.aside) return;
-      automationWin.only = false; // closed here: this window is a normal ApiMan window from now on
+      if (automationWin.aside || automationWin.only) return;
       document.title = 'ApiMan';
       if (location.hash === '#automation') history.replaceState(null, '', location.pathname + location.search);
     },
-    buttons: [...(automationWin.only ? [] : [{ label: 'Open in new window', left: true, onClick: () => {
-      if (suiteCtrl) { toast('A collection run is going in this window: open the new window after it ends.', 'warn'); return false; }
-      const win = window.open(`${location.pathname}${location.search}#automation`, 'apiman-automation');
-      if (!win) { toast('The browser blocked the new window: allow pop-ups for ApiMan, or open #automation yourself.', 'warn'); return false; }
-      win.focus();
-      return true; // this window goes back to the API client
-    } }]), { label: 'Run', primary: true, onClick: () => { start().catch((e) => toast(e.message, 'err')); return false; } }],
+    buttons: [{ label: 'Run', primary: true, onClick: () => { start().catch((e) => toast(e.message, 'err')); return false; } }],
   });
   setRunButton(false);
   document.title = 'Automation · ApiMan';
@@ -6855,7 +6865,7 @@ function bindChrome() {
     if (!backend || backend.mode !== 'local') { openRunner(cur() && cur().cid, null); return; }
     showMenu(e.currentTarget, [
       { label: 'Collection runner', onClick: () => openRunner(cur() && cur().cid, null) },
-      { label: 'Automation (Robot Framework)', onClick: () => openAutomation().catch((err) => toast(err.message, 'err')) },
+      { label: 'Automation (Robot Framework)', onClick: showAutomation },
     ]);
   });
   $('#btnSettings').addEventListener('click', () => openSettings());
@@ -6876,7 +6886,7 @@ function bindChrome() {
     if (act.dataset.act === 'new-request') openTab(newTab());
     if (act.dataset.act === 'import') openImport();
     if (act.dataset.act === 'import-curl') openImport('curl');
-    if (act.dataset.act === 'automation') openAutomation().catch((err) => toast(err.message, 'err'));
+    if (act.dataset.act === 'automation') showAutomation();
   });
 
   document.addEventListener('keydown', (e) => {
@@ -7385,7 +7395,7 @@ async function start() {
   const dlgEl = $('#dlg');
   const nativeClose = dlgEl.close.bind(dlgEl);
   dlgEl.close = (...a) => { closingSeq = dialogSeq; nativeClose(...a); };
-  dlgEl.addEventListener('cancel', () => { closingSeq = dialogSeq; });
+  dlgEl.addEventListener('cancel', (e) => { if (dlgEl.dataset.locked) { e.preventDefault(); return; } closingSeq = dialogSeq; });
   dlgEl.addEventListener('submit', (e) => { if (e.submitter && e.submitter.value === 'cancel') closingSeq = dialogSeq; });
   $('#dlg').addEventListener('close', () => {
     if ($('#dlg').dataset.reshowing) { delete $('#dlg').dataset.reshowing; return; } // switching between docked and overlay, not closing (the event fires later)

@@ -7,6 +7,7 @@ which the Automation screen reads while the run goes. Standard library only; wor
 """
 import json
 import os
+import re
 import threading
 import time
 
@@ -157,21 +158,26 @@ def _secret(name):
 
 def _url(url):
     """?token=… and ?api_key=… hidden in the logged URL."""
-    from urllib.parse import urlsplit, urlunsplit, unquote
+    from urllib.parse import urlsplit, urlunsplit
     u = urlsplit(str(url))
+    if "@" in u.netloc:  # user:password@host
+        u = u._replace(netloc="•••@" + u.netloc.rpartition("@")[2])
     if not u.query:
-        return str(url)
-    parts = []
-    for pair in u.query.split("&"):
-        k, eq, v = pair.partition("=")
-        parts.append(f"{k}=•••" if _secret(unquote(k)) else pair)
-    return urlunsplit(u._replace(query="&".join(parts)))
+        return urlunsplit(u) if "@" in u.netloc else str(url)
+    return urlunsplit(u._replace(query=_pairs(u.query)))
+
+
+def _pairs(query):
+    """a=1&password=x with the secret values hidden (query strings and form bodies)."""
+    from urllib.parse import unquote_plus
+    return "&".join(f"{k}=•••" if _secret(unquote_plus(k)) else pair
+                    for pair in query.split("&") for k, _, _ in [pair.partition("=")])
 
 
 def _secrets(text):
-    """A JSON body with password, token, secret… fields hidden."""
+    """A JSON or form (a=1&password=x) body with password, token, secret… fields hidden."""
     if not text.strip().startswith(("{", "[")):
-        return text
+        return _pairs(text) if re.fullmatch(r"[^\s&=]+=[^\s&]*(&[^\s&=]+=[^\s&]*)*", text.strip()) else text
     try:
         data = json.loads(text)
     except ValueError:
