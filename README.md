@@ -24,11 +24,11 @@ You only need Python 3. There's nothing to install.
 
 ## Desktop app
 
-Download **ApiMan-macOS.zip** or **ApiMan-Windows.zip** from the latest [release](../../releases), or from the artifacts of the newest *Desktop app* run under Actions. Unzip it and open ApiMan. It needs no Python. It opens in its own Chrome or Edge app window and quits when you close that window. Your data lives in `~/ApiMan`. Automation opens as a second window.
+Download **ApiMan-macOS.zip** or **ApiMan-Windows.zip** from the latest [release](../../releases), or from the artifacts of the newest *Desktop app* run under Actions. Unzip it and open ApiMan. It needs no Python and no browser: it is a standalone app with its own native window (like Postman) and quits when you close that window. Your data lives in `~/ApiMan`. Automation opens as a second window.
 
 The builds aren't signed yet, so the first time, macOS needs right-click → **Open**, and Windows needs **More info → Run anyway**. To run Robot projects, Robot Framework must be installed on that computer: use the project's own `.venv`, a `.venv-robot` in `~/ApiMan`, or `python3`.
 
-To build it yourself: `python3 -m pip install pyinstaller && python3 tools/build_desktop.py`, which puts the app in `dist/`. A version tag (`git tag v1.0.0 && git push --tags`) publishes both builds as a release.
+To build it yourself: `python3 -m pip install pyinstaller pillow pywebview && python3 tools/build_desktop.py`, which puts the app in `dist/`. A version tag (`git tag v1.0.0 && git push --tags`) publishes both builds as a release.
 
 ## Run collections in CI
 

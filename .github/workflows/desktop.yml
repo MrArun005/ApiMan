@@ -32,7 +32,7 @@ jobs:
         run: python test_server.py
       - name: Build
         run: |
-          python -m pip install pyinstaller
+          python -m pip install pyinstaller pillow pywebview
           python tools/build_desktop.py
       - name: Zip (macOS)
         if: runner.os == 'macOS'
