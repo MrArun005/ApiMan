@@ -172,7 +172,9 @@ def build_request(col, item, parents, vars_):
 
 def hider(secrets):
     """Replaces every secret value (and its URL-encoded forms) with •••: what the assistant sees never holds them."""
-    forms = sorted({f for v in secrets if v and len(v) >= 3 for f in (v, urllib.parse.quote(v, safe=""), urllib.parse.quote_plus(v))}, key=len, reverse=True)
+    import html
+    forms = sorted({f for v in secrets if v and len(v) >= 3
+                    for f in (v, urllib.parse.quote(v, safe=""), urllib.parse.quote_plus(v), json.dumps(v)[1:-1], html.escape(v))}, key=len, reverse=True)
     def hide(text):
         text = str(text)
         for f in forms:
@@ -236,6 +238,14 @@ def t_send_request(app, a):
     env, env_meta = app.env_values(a.get("environment"))
     saved = {**app.globals(), **{v["key"]: str(v.get("value", "")) for v in col.get("variable") or [] if v.get("key") and not v.get("disabled")}, **env}
     extra = {str(k): str(v) for k, v in (a.get("variables") or {}).items()}
+    secrets = secret_values(app, env_meta, col, item, parents, saved)  # from saved data only, never the assistant's values
+    auth = effective_auth(item, parents, col)
+    auth_vars = {m for p in (auth or {}).get((auth or {}).get("type"), []) or [] for m in VAR_RE.findall(str(p.get("value", "")))}
+    for k, v in extra.items():
+        if "{{" in v:  # the assistant's values are literal text: they never pull in saved values (a token into a URL)
+            raise ValueError(f"Refused: the value of {k!r} contains {{{{…}}}}. Extra variables are plain values.")
+        if k in auth_vars or saved.get(k, "") in secrets and saved.get(k):
+            raise ValueError(f"Refused: {k!r} is used by this request's auth or holds a secret; it can't be overridden from here.")
     spec = build_request(col, item, parents, {**saved, **extra})
     if extra:  # the assistant's variables may fill in the request, never send it (and the saved auth) somewhere else
         try:
@@ -246,7 +256,7 @@ def t_send_request(app, a):
             raise ValueError("Refused: the extra variables would change where this request goes (scheme, host or port). "
                              "Change the environment in ApiMan instead, or use send_http without saved credentials.")
     res = server.send({**spec, "timeout": a.get("timeout") or 60}, app.root)
-    return response_out(res, spec, secret_values(app, env_meta, col, item, parents, {**saved, **extra}))
+    return response_out(res, spec, secrets)
 
 
 def origin(url):
@@ -273,7 +283,12 @@ def secret_values(app, env_meta, col, item, parents, vars_):
     if auth:
         for key in ("token", "password", "value", "accessToken", "clientSecret"):
             out.add(resolve(auth_param(auth, key), vars_))
-    return out
+        if auth.get("type") == "bearer":
+            out.add(f"Bearer {resolve(auth_param(auth, 'token'), vars_)}")
+        if auth.get("type") == "basic":  # the header as sent, and its base64, as an echo server would show it
+            b64 = base64.b64encode(f"{resolve(auth_param(auth, 'username'), vars_)}:{resolve(auth_param(auth, 'password'), vars_)}".encode()).decode()
+            out |= {b64, f"Basic {b64}"}
+    return {v for v in out if v and len(v) >= 3}
 
 
 def t_send_http(app, a):
