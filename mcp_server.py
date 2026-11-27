@@ -240,11 +240,19 @@ def t_send_request(app, a):
     extra = {str(k): str(v) for k, v in (a.get("variables") or {}).items()}
     secrets = secret_values(app, env_meta, col, item, parents, saved)  # from saved data only, never the assistant's values
     auth = effective_auth(item, parents, col)
-    auth_vars = {m for p in (auth or {}).get((auth or {}).get("type"), []) or [] for m in VAR_RE.findall(str(p.get("value", "")))}
+    # every variable the auth or a secret depends on, following saved values all the way down: none can be overridden
+    guarded = {m for p in (auth or {}).get((auth or {}).get("type"), []) or [] for m in VAR_RE.findall(str(p.get("value", "")))}
+    guarded |= {k for k, v in saved.items() if v and v in secrets}
+    todo = list(guarded)
+    while todo:
+        for m in VAR_RE.findall(saved.get(todo.pop(), "")):
+            if m not in guarded:
+                guarded.add(m)
+                todo.append(m)
     for k, v in extra.items():
-        if "{{" in v:  # the assistant's values are literal text: they never pull in saved values (a token into a URL)
-            raise ValueError(f"Refused: the value of {k!r} contains {{{{…}}}}. Extra variables are plain values.")
-        if k in auth_vars or saved.get(k, "") in secrets and saved.get(k):
+        if "{" in v or "}" in v:  # literal text only: no {{…}}, not even split across two values, can pull saved values in
+            raise ValueError(f"Refused: the value of {k!r} contains {{ or }}. Extra variables are plain values.")
+        if k in guarded:
             raise ValueError(f"Refused: {k!r} is used by this request's auth or holds a secret; it can't be overridden from here.")
     spec = build_request(col, item, parents, {**saved, **extra})
     if extra:  # the assistant's variables may fill in the request, never send it (and the saved auth) somewhere else
