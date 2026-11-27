@@ -154,6 +154,8 @@ const ui = {
   dot({ tone = '', off = false, label = null, ...attrs } = {}) {
     return h('span', { class: cx('dot', toneOf(tone), off && 'off'), role: label ? 'img' : null, 'aria-label': label, title: label, ...attrs });
   },
+  /** Dots: a strip of results, oldest to newest. items: [{ tone, label }]. */
+  dots(items, { label = '' } = {}) { return h('span', { class: 'dots', role: 'img', 'aria-label': label || null }, ...items.map((x) => ui.dot({ tone: x.tone, label: x.label }))); },
   hint(text, { oneLine = false, ...attrs } = {}) { return h('p', { class: cx('hint', oneLine && 'one-line'), ...attrs }, text); },
   /** A long path on one line, cut at its start (its end tells it apart); the whole path in the tooltip. */
   path(text) { return h('p', { class: 'hint path', title: text }, h('bdi', null, text)); },
@@ -1774,12 +1776,13 @@ async function guardVarChanges(cid, ed, before, after, ask, logs) {
  * Runs the whole pipeline for an editor model. Used by Send (ask = confirm dialog) and by the
  * collection runner (ask = null: anything that needs approval is blocked).
  */
-async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true, ask = null, runScopes = null, envId = state.activeEnv }) {
+async function execute({ ed, cid, itemId, iteration = 0, signal, persist = true, ask = null, runScopes = null, envId = state.activeEnv, data = null }) {
   // envId: the environment active when the request started (variable changes go there), or the one a Diff compares with
+  // data: one row of test data (Automation): in the local scope, over the environment like Postman's data scope
   const logs = [], tests = [], warnings = [];
   const before = runScopes ? JSON.parse(JSON.stringify(runScopes)) : scopesFor(cid, envId);
   let scopes = JSON.parse(JSON.stringify(before));
-  scopes.local = {};
+  scopes.local = data ? { ...data } : {};
   let req = requestSnapshot(ed);
   // The destination baseline always comes from the SAVED (user-approved) variables, never from values
   // scripts carried over in memory during a run.
@@ -2241,6 +2244,7 @@ function minimalOut(out) {
   };
 }
 function writeTabs() {
+  if (automationWin.only) return; // the main window owns the tabs
   ls.set('apiman:tabs', {
     active: state.active,
     tabs: state.tabs.map((t) => (t.cid ? { cid: t.cid, itemId: t.itemId, ed: t.dirty ? edForStorage(t.ed) : null } : { ed: edForStorage(t.ed) })),
@@ -4092,6 +4096,9 @@ async function saveAs() {
 // =====================================================================================================
 const dialogQueue = [];
 let dialogSeq = 0, closingSeq = null;
+/** Automation's own page (#automation): opened in its own window, that window never saves the API client's tabs
+ *  (they're the main window's, and would be stale), until you close Automation there and use it as a normal window. */
+const automationWin = { only: location.hash === '#automation', aside: false };
 const dialogCloses = new Map(); // dialog number -> its onClose
 /** Opens the dialog, or queues it if one is already open, so a background prompt never replaces your open dialog. */
 function openDialog(opts) {
@@ -5312,23 +5319,26 @@ async function openRunner(cid, folderId) {
  * Runs a collection or folder: the Runner dialog and `python3 server.py run` both use this.
  * Values set by scripts carry through the whole run (like Postman), saved to files only with keepVars.
  */
-async function runCollection({ cid, folderId = null, iterations = 1, delay = 0, stopOnFail = false, keepVars = false, signal, onResult = () => {} }) {
+async function runCollection({ cid, folderId = null, iterations = 1, delay = 0, stopOnFail = false, keepVars = false, signal, onResult = () => {}, envId = state.activeEnv, casesFor = null, only = null }) {
+  // casesFor(item): the cases (rows of test data) to send it with, [{ label, data, expect }]; only(item): run it at all
   const col = state.cols[cid] || await withCol(cid);
   const folder = folderId ? locate(col, folderId) : null;
   if (folderId && !folder) throw new Error('That folder no longer exists.');
   const items = [];
-  eachRequest(folder ? folder.item.item : col.item, (item, parents) => items.push({ item, parents: [...(folder ? [...folder.parents, folder.item] : []), ...parents] }));
+  eachRequest(folder ? folder.item.item : col.item, (item, parents) => { if (!only || only(item)) items.push({ item, parents: [...(folder ? [...folder.parents, folder.item] : []), ...parents] }); });
   if (!items.length) throw new Error('There are no requests to run here.');
+  const caseList = items.map(({ item }) => (casesFor ? casesFor(item) : null) || [{}]);
   iterations = Math.max(1, Math.min(1000, iterations | 0 || 1));
   delay = Math.max(0, Math.min(60000, delay | 0));
-  const totals = { n: 0, pass: 0, fail: 0, errors: 0, totalMs: 0, ok: 0, c4: 0, c5: 0, total: items.length * iterations, stopped: false };
-  let runScopes = scopesFor(cid);
+  const totals = { n: 0, pass: 0, fail: 0, errors: 0, totalMs: 0, ok: 0, c4: 0, c5: 0, total: caseList.reduce((a, c) => a + c.length, 0) * iterations, stopped: false };
+  let runScopes = scopesFor(cid, envId);
   outer: for (let it = 0; it < iterations; it++) {
-    for (const [idx, { item, parents }] of items.entries()) {
+    for (const [idx, { item, parents }] of items.entries()) for (const [ci, testCase] of caseList[idx].entries()) {
       if (signal && signal.aborted) { totals.stopped = true; break outer; }
-      const ed = fromItem(item);
-      const out = await execute({ ed, cid, itemId: item.id, iteration: it, signal, persist: keepVars, runScopes: keepVars ? null : runScopes });
-      if (!keepVars && out.scopes) {
+      const ed = applyBind(fromItem(item), testCase.bind);
+      const out = await execute({ ed, cid, itemId: item.id, iteration: it, signal, persist: keepVars, runScopes: keepVars ? null : runScopes, envId, data: testCase.data || null });
+      // a negative case (its test data expects a 4xx/5xx, e.g. a wrong password) never changes what later requests use
+      if (!keepVars && out.scopes && !(testCase.expect >= 400)) {
         // carry script values to the next request, except ones that decide where requests go (URL/Host)
         // (path and query values like /orders/{{id}} do carry: they can't change the server)
         const written = ['environment', 'collection', 'globals'].flatMap((sc) => Object.entries(out.scopes[sc]).map(([key, value]) => ({ key, value })));
@@ -5352,7 +5362,7 @@ async function runCollection({ cid, folderId = null, iterations = 1, delay = 0, 
       else if (out.res.status >= 400) totals.c4++;
       else totals.ok++;
       if (out.res && !out.error) totals.totalMs += out.res.timeMs;
-      await onResult({ it, idx, item, parents, ed, out, tp, tf, totals });
+      await onResult({ it, idx, item, parents, ed, out, tp, tf, totals, testCase, caseIndex: ci, cases: caseList[idx].length });
       if (stopOnFail && (tf || out.error)) { totals.stopped = true; break outer; }
       if (delay) await new Promise((r) => { const tm = setTimeout(r, delay); if (signal) signal.addEventListener('abort', () => { clearTimeout(tm); r(); }, { once: true }); });
     }
@@ -5391,6 +5401,306 @@ async function headlessRun(job) {
 }
 
 // =====================================================================================================
+// API suites: a Postman collection paired with a Robot Framework project (same APIs), run with its test data
+// =====================================================================================================
+const slugOf = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+const normKey = (k) => String(k ?? '').replace(/[\s_]/g, '').toLowerCase(); // how Robot matches variable names
+/** A path segment that stands for a value: {{id}}, ${ID}, :id, {id}, <id>, 42, a UUID or an object id. */
+const isWildSeg = (seg) => !seg || /\{\{|\$\{|^:|^\{.*\}$|^<.*>$/.test(seg) || /^\d+$/.test(seg) || /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(seg) || /^[0-9a-f]{24}$/i.test(seg);
+/** The path of a request URL, whatever its host looks like: {{baseUrl}}/x, ${BASE_URL}/x, https://h/x, {{host}}:{{port}}/x. */
+function urlPath(raw) {
+  let u = String(raw ?? '').trim().split('#')[0].split('?')[0];
+  u = u.replace(/^(\{\{[^{}]+\}\}|\$\{[^{}]+\})/, '');
+  if (/^:\/\//.test(u)) u = u.replace(/^:\/\/[^/]*/, '');           // {{protocol}}://{{host}}/x
+  const m = u.match(/^[a-z][a-z0-9+.-]*:\/\/[^/]*(.*)$/i);
+  if (m) u = m[1];
+  else if (!u.startsWith('/')) { const i = u.indexOf('/'); u = i < 0 ? '' : u.slice(i); } // host/x, :{{port}}/x
+  return u.replace(/\/{2,}/g, '/') || '/';
+}
+const pathSig = (method, url) => ({ method: String(method || 'GET').toUpperCase(), segs: urlPath(url).split('/').filter(Boolean).map((x) => x.toLowerCase()) });
+/** Same endpoint: same method, same number of segments, every fixed segment equal, and at least one fixed segment
+ *  in common (so /{{x}} doesn't match every one-segment path, and a bare "/" is no evidence of the same API). */
+function sigMatch(a, b) {
+  if (a.method !== b.method || a.segs.length !== b.segs.length) return false;
+  let fixed = 0;
+  for (let i = 0; i < a.segs.length; i++) {
+    if (isWildSeg(a.segs[i]) || isWildSeg(b.segs[i])) continue;
+    if (a.segs[i] !== b.segs[i]) return false;
+    fixed++;
+  }
+  return fixed > 0;
+}
+/** Which of a collection's requests the Robot project also calls: { covered: Set(item ids), total }. */
+function coverage(endpoints, col) {
+  const eps = (endpoints || []).map((e) => pathSig(e.method, e.path));
+  const covered = new Set();
+  let total = 0;
+  eachRequest(col.item || [], (item) => {
+    total++;
+    const ed = fromItem(item);
+    if (!String(ed.url).trim()) return; // a request with no URL calls nothing
+    const sig = pathSig(ed.method, ed.url);
+    if (eps.some((e) => sigMatch(sig, e))) covered.add(item.id);
+  });
+  return { covered, total };
+}
+/** The collection a project's tests call the most (null when none shares a request). A pair someone chose wins;
+ *  a collection someone paired with another project isn't picked automatically. */
+function pairFor(project, pairs = {}) {
+  if (Object.hasOwn(pairs, project.id)) {
+    const cid = pairs[project.id];
+    return cid && state.cols[cid] ? { cid, auto: false, ...coverage(project.endpoints, state.cols[cid]) } : null;
+  }
+  const taken = new Set(Object.entries(pairs).filter(([pid, cid]) => pid !== project.id && cid).map(([, cid]) => cid));
+  let best = null;
+  for (const c of state.colList) {
+    const col = state.cols[c.id];
+    if (!col || taken.has(c.id)) continue;
+    const cov = coverage(project.endpoints, col);
+    if (!cov.covered.size) continue;
+    const words = (x) => new Set(String(x).toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2));
+    const pw = words(project.name);
+    const named = [...words(c.name)].filter((w) => pw.has(w)).length; // a tie goes to the collection named like the project
+    if (!best || cov.covered.size > best.covered.size || (cov.covered.size === best.covered.size && named > best.named)) best = { cid: c.id, auto: true, named, ...cov };
+  }
+  return best;
+}
+
+/** CSV/TSV text as rows (objects by header): quotes, "" escapes, newlines in quotes, BOM, ; or tab or | separators. */
+function parseDelimited(text) {
+  text = String(text).replace(/^﻿/, '');
+  const firstLine = text.split(/\r?\n/, 1)[0];
+  const delim = [',', ';', '\t', '|'].map((d) => [d, firstLine.split(d).length]).sort((a, b) => b[1] - a[1])[0][0];
+  const rows = [];
+  let row = [], field = '', quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else quoted = false; } else field += c;
+    } else if (c === '"' && field === '') quoted = true;
+    else if (c === delim) { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(field); field = ''; rows.push(row); row = []; }
+    else field += c;
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  const lines = rows.filter((r) => r.some((x) => x.trim() !== ''));
+  if (lines.length < 2) return [];
+  const head = lines[0].map((x) => x.trim());
+  return lines.slice(1).map((r) => Object.fromEntries(head.map((h, i) => [h, String(r[i] ?? '').trim()]).filter(([h]) => h)));
+}
+const cellText = (v) => (v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
+/** The test data in one file: [{ name, source, rows }]. JSON: a list of rows, { "request name": [rows] }, or one row. */
+function datasetsFrom(path, text) {
+  const base = path.split('/').pop().replace(/\.[^.]+$/, '');
+  const rowsOf = (list) => list.filter((r) => r && typeof r === 'object' && !Array.isArray(r)).map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, cellText(v)])));
+  if (/\.(csv|tsv)$/i.test(path)) { const rows = parseDelimited(text); return rows.length ? [{ name: base, source: path, rows }] : []; }
+  if (!/\.json$/i.test(path)) return [];
+  let data;
+  try { data = JSON.parse(text); } catch { return []; }
+  if (Array.isArray(data)) { const rows = rowsOf(data); return rows.length ? [{ name: base, source: path, rows }] : []; }
+  if (!data || typeof data !== 'object') return [];
+  const lists = Object.entries(data).filter(([, v]) => Array.isArray(v) && v.some((r) => r && typeof r === 'object' && !Array.isArray(r)));
+  if (lists.length) return lists.map(([k, v]) => ({ name: k, source: `${path} › ${k}`, rows: rowsOf(v) })).filter((d) => d.rows.length);
+  if (Object.values(data).every((v) => v === null || typeof v !== 'object' || !Array.isArray(v))) return [{ name: base, source: path, rows: rowsOf([data]) }];
+  return [];
+}
+const EXPECT_COLS = new Set(['expectedstatus', 'expectstatus', 'expectedstatuscode', 'expectedcode']);
+const LABEL_COLS = new Set(['case', 'testcase', 'casename', 'scenario']);
+const SKIP_COLS = new Set(['skip']);
+const REQUEST_COLS = new Set(['request', 'requestname', 'endpoint', 'api']);
+const truthy = (v) => /^(true|yes|y|1|x)$/i.test(String(v).trim());
+const MAX_ROWS_PER_REQUEST = 100, MAX_CASES = 5000;
+
+/** A data column's name as a field path: "items[0].Quantity" -> "items.0.quantity" (case, spaces, _ ignored per part). */
+const fieldKey = (k) => String(k).replace(/\[(\d+)\]/g, '.$1').split('.').map(normKey).filter(Boolean).join('.');
+/** The fields a request already has that a data column of the same name can fill: [{ kind, key, path }]. */
+function requestFields(ed) {
+  const out = [];
+  const q = String(ed.url).split('#')[0];
+  const qi = q.indexOf('?');
+  if (qi >= 0) for (const pair of q.slice(qi + 1).split('&')) { const k = pair.split('=')[0]; if (k) { let key = k; try { key = decodeURIComponent(k); } catch { /* as written */ } out.push({ kind: 'query', key, match: fieldKey(key) }); } }
+  for (const v of ed.pathVars || []) if (v.key) out.push({ kind: 'path', key: v.key, match: fieldKey(v.key) });
+  const b = ed.body || {};
+  if (b.mode === 'raw' && /^\s*[[{]/.test(b.raw || '')) {
+    let json = null;
+    try { json = JSON.parse(b.raw); } catch { /* {{x}} outside quotes: its fields can't be filled from data */ }
+    const walk = (v, path, depth) => {
+      if (depth > 5 || v === null || typeof v !== 'object') return;
+      for (const [k, x] of Object.entries(v)) {
+        const pth = [...path, k];
+        out.push({ kind: 'body', path: pth, key: pth.join('.'), match: pth.map((y) => normKey(y)).join('.') });
+        walk(x, pth, depth + 1);
+      }
+    };
+    if (json) walk(json, [], 0);
+  }
+  if (b.mode === 'urlencoded' || b.mode === 'formdata') for (const f of (b[b.mode] || [])) if (f.key && f.type !== 'file' && !f.disabled) out.push({ kind: 'form', key: f.key, match: fieldKey(f.key) });
+  return out;
+}
+/** A cell as the type the field had: 2 stays a number, true a boolean, {"a":1} an object. */
+function typedCell(orig, cell) {
+  const c = String(cell);
+  if (typeof orig === 'number' && c.trim() !== '' && Number.isFinite(Number(c))) return Number(c);
+  if (typeof orig === 'boolean' && /^(true|false)$/i.test(c.trim())) return /^true$/i.test(c.trim());
+  if (orig !== null && typeof orig === 'object') { try { return JSON.parse(c); } catch { return c; } }
+  if (orig === null && c.trim() === 'null') return null;
+  return c;
+}
+/** Fill a request's own fields from one row of test data (in place); the host is never touched. */
+function applyBind(ed, bind) {
+  if (!bind || !bind.length) return ed;
+  let json = null;
+  for (const b of bind) {
+    if (b.kind === 'query') {
+      const [base, ...hash] = String(ed.url).split('#');
+      const qi = base.indexOf('?');
+      if (qi < 0) continue;
+      const parts = base.slice(qi + 1).split('&').map((pair) => {
+        const [k] = pair.split('=');
+        let key = k; try { key = decodeURIComponent(k); } catch { /* as written */ }
+        return key === b.key ? `${k}=${encodeURIComponent(b.value)}` : pair;
+      });
+      ed.url = `${base.slice(0, qi)}?${parts.join('&')}${hash.length ? `#${hash.join('#')}` : ''}`;
+    } else if (b.kind === 'path') {
+      ed.pathVars = (ed.pathVars || []).map((v) => (v.key === b.key ? { ...v, value: b.value } : v));
+    } else if (b.kind === 'form') {
+      for (const f of ed.body[ed.body.mode] || []) if (f.key === b.key && f.type !== 'file') f.value = b.value;
+    } else if (b.kind === 'body') {
+      try { json = json ?? JSON.parse(ed.body.raw); } catch { continue; }
+      let o = json;
+      for (const k of b.path.slice(0, -1)) { if (o == null || typeof o !== 'object') break; o = o[k]; }
+      const last = b.path[b.path.length - 1];
+      if (o && typeof o === 'object' && Object.hasOwn(o, last)) o[last] = typedCell(o[last], b.value);
+    }
+  }
+  if (json) ed.body.raw = JSON.stringify(json, null, 2);
+  return ed;
+}
+
+/** The {{variables}} a request needs that the environment and collection don't give, and the one that names its host. */
+function requestNeeds(ed, cid, envId, itemId) {
+  const auth = effectiveAuth(ed, cid, itemId).auth;
+  const text = JSON.stringify({ url: ed.url, headers: (ed.headers || []).filter((x) => !x.disabled), pathVars: ed.pathVars, body: ed.body, auth });
+  const have = merged(scopesFor(cid, envId));
+  const hostVar = (String(ed.url).trim().match(/^\{\{\s*([^{}]+?)\s*\}\}/) || [])[1] || null;
+  const need = unresolved([text]).filter((k) => !k.startsWith('$') && !Object.hasOwn(have, k) && k !== hostVar);
+  return { need, hostVar, hostMissing: !!hostVar && !Object.hasOwn(have, hostVar) };
+}
+
+/** For every request: the test data rows it's sent with. In order: a file (or JSON key) named after the request or
+ *  its folder; rows of a "request" column naming it; else the data whose columns fill most of what it needs. */
+function planSuite(cid, envId, datasets, endpoints) {
+  const col = state.cols[cid];
+  const cov = coverage(endpoints, col);
+  const plan = [];
+  let cases = 0, capped = false;
+  eachRequest(col.item || [], (item, parents) => {
+    const ed = fromItem(item);
+    const { need, hostVar, hostMissing } = requestNeeds(ed, cid, envId, item.id);
+    const names = [ed.name, ...parents.map((x) => x.name).reverse()].map(slugOf).filter(Boolean);
+    let ds = null, rows = null, why = '';
+    for (const n of names) { // nearest name first: the request, then its folders
+      ds = datasets.find((d) => slugOf(d.name) === n);
+      if (ds) { rows = ds.rows; why = 'named after it'; break; }
+    }
+    if (!ds) {
+      for (const d of datasets) {
+        const rc = Object.keys(d.rows[0] || {}).find((k) => REQUEST_COLS.has(normKey(k)));
+        const mine = rc ? d.rows.filter((r) => slugOf(r[rc]) === slugOf(ed.name)) : [];
+        if (mine.length) { ds = d; rows = mine; why = 'rows for it'; break; }
+      }
+    }
+    if (!ds && need.length) {
+      const wanted = new Set(need.map(normKey));
+      const scored = datasets.map((d) => [d, Object.keys(d.rows[0] || {}).filter((k) => wanted.has(normKey(k))).length]).filter(([, n]) => n > 0)
+        .sort((a, b) => b[1] - a[1] || slugOf(b[0].name).includes(slugOf(ed.name)) - slugOf(a[0].name).includes(slugOf(ed.name)));
+      if (scored.length) { [ds] = scored[0]; rows = ds.rows; why = 'its columns fill what it needs'; }
+    }
+    if (!String(ed.url).trim()) { plan.push({ item, ed, folder: parents.map((x) => x.name).join(' / '), need: [], hostVar: null, hostMissing: false, source: '', why: '', covered: false, fills: [], missing: [], cases: [], truncated: 0, binds: [], unused: [], bodyNote: '', skipReason: 'it has no URL' }); return; }
+    const item0 = { item, ed, folder: parents.map((x) => x.name).join(' / '), need, hostVar, hostMissing, source: ds ? ds.source : '', why, covered: cov.covered.has(item.id), fills: [], missing: [], cases: [], truncated: 0, binds: [], unused: [], bodyNote: '' };
+    if (ds) {
+      const usable = rows.filter((r) => !Object.entries(r).some(([k, v]) => SKIP_COLS.has(normKey(k)) && truthy(v)));
+      item0.truncated = Math.max(0, usable.length - MAX_ROWS_PER_REQUEST);
+      const cols = [...new Set((usable.length ? usable : rows).flatMap((r) => Object.keys(r)))]; // JSON rows may differ in keys
+      const byNorm = new Map(cols.map((k) => [normKey(k), k]));
+      item0.fills = need.filter((k) => byNorm.has(normKey(k)));
+      item0.missing = need.filter((k) => !byNorm.has(normKey(k)));
+      // the request's own fields of the same name (body, query, path, form): filled too, unless a {{variable}} took the column
+      const special = (k) => [EXPECT_COLS, LABEL_COLS, SKIP_COLS, REQUEST_COLS].some((set) => set.has(normKey(k)));
+      const varCols = new Set(item0.fills.map((k) => byNorm.get(normKey(k))));
+      const fields = requestFields(ed);
+      item0.binds = cols.filter((c) => !special(c) && !varCols.has(c)).map((c) => [c, fields.find((f) => f.match === fieldKey(c))]).filter(([, f]) => f);
+      item0.unused = cols.filter((c) => !special(c) && !varCols.has(c) && !item0.binds.some(([b]) => b === c) && !(hostVar && normKey(c) === normKey(hostVar)));
+      if (/^\s*[[{]/.test((ed.body && ed.body.raw) || '') && ed.body.mode === 'raw' && !fields.some((f) => f.kind === 'body')) item0.bodyNote = 'its body has a {{variable}} outside quotes, so body fields are not filled from data';
+      usable.slice(0, MAX_ROWS_PER_REQUEST).forEach((r, i) => {
+        const data = {};
+        let expect = null, label = '';
+        for (const [k, v] of Object.entries(r)) {
+          const nk = normKey(k);
+          if (EXPECT_COLS.has(nk)) { expect = /^\d{3}$/.test(v) ? Number(v) : null; continue; }
+          if (LABEL_COLS.has(nk)) { label = v; continue; }
+          if (SKIP_COLS.has(nk) || REQUEST_COLS.has(nk)) continue;
+          if (hostVar && nk === normKey(hostVar)) continue; // test data never decides which server a request goes to
+          data[k] = v;
+        }
+        for (const k of item0.fills) { const c = byNorm.get(normKey(k)); if (c !== k && r[c] !== undefined) data[k] = r[c]; } // employee_id fills {{employeeId}}
+        const bind = item0.binds.filter(([c]) => r[c] !== undefined).map(([c, f]) => ({ kind: f.kind, key: f.key, path: f.path, value: r[c] })); // a row without that key leaves the field as it is
+        item0.cases.push({ label: label || (usable.length > 1 ? `row ${i + 1}` : ''), data, expect, bind });
+      });
+      if (!item0.cases.length) item0.skipReason = 'every row of its test data is marked skip'; // never sent without its data
+    } else {
+      item0.missing = need;
+      item0.cases.push({ label: '', data: null, expect: null });
+    }
+    if (cases + item0.cases.length > MAX_CASES) { capped = true; item0.cases = []; }
+    cases += item0.cases.length;
+    plan.push(item0);
+  });
+  return { col, plan, cases, capped, covered: cov.covered.size, total: cov.total };
+}
+
+/** The {{variables}} a collection's requests use that it doesn't define itself (what an environment must give). */
+function collectionVars(cid) {
+  const col = state.cols[cid];
+  if (!col) return [];
+  const own = colObj(col);
+  const out = new Set();
+  eachRequest(col.item || [], (item) => {
+    const ed = fromItem(item);
+    const text = JSON.stringify({ url: ed.url, headers: ed.headers, pathVars: ed.pathVars, body: ed.body, auth: effectiveAuth(ed, cid, item.id).auth });
+    for (const k of unresolved([text])) if (!k.startsWith('$') && !Object.hasOwn(own, k)) out.add(k);
+  });
+  return [...out];
+}
+
+/** The apps (scheme, host, port) a collection's requests go to by themselves: literal URLs, or its own variables. */
+function collectionHosts(cid) {
+  const col = state.cols[cid];
+  const out = new Set();
+  if (!col) return out;
+  const own = colObj(col);
+  eachRequest(col.item || [], (item) => {
+    const url = resolve(fromItem(item).url, own).trim();
+    if (/^https?:\/\/[^/{}]+/i.test(url)) out.add(appKey(url));
+  });
+  return out;
+}
+
+/** Pass or fail for one case: an error fails; an expected status (from the data) must match; otherwise the request's
+ *  own tests decide, and with no tests a 4xx/5xx fails. */
+function caseVerdict(out, testCase) {
+  if (out.error) return { status: 'FAIL', message: out.error };
+  const failed = out.tests.filter((x) => x.passed === false);
+  if (testCase.expect != null) { // the row says what this case must answer (often a 4xx): that decides it, not the request's happy-path tests
+    return out.res.status === testCase.expect ? { status: 'PASS', message: '' } : { status: 'FAIL', message: `Expected status ${testCase.expect}, got ${out.res.status}.` };
+  }
+  if (failed.length) return { status: 'FAIL', message: `${failed[0].name}: ${failed[0].error || 'failed'}${failed.length > 1 ? ` (+${failed.length - 1} more)` : ''}` };
+  if (testCase.expect == null && !out.tests.length && out.res.status >= 400) return { status: 'FAIL', message: `HTTP ${out.res.status}${out.res.reason ? ` ${out.res.reason}` : ''}` };
+  return { status: 'PASS', message: '' };
+}
+const headerObj = (h) => Object.fromEntries((h || []).map((x) => (Array.isArray(x) ? x : [x.key, x.value])).filter(([k]) => k));
+
+// =====================================================================================================
 // Automation: Robot Framework projects (UI with the Browser library, API with RequestsLibrary), run live
 // =====================================================================================================
 /** A run file (screenshot, log.html) as a blob URL or text: /api needs the session token, so <img src> can't fetch it. */
@@ -5422,18 +5732,26 @@ async function openAutomation() {
   // ---- controls ----
   saved.envs = saved.envs || {}; // project id -> environment chosen for it
   /** Until one is chosen for a project: the environment that has most of the keys it needs (Robot ignores case, spaces, _). */
-  const bestEnv = (keys) => {
+  const bestEnv = (keys, { fallback = true, hosts = null } = {}) => {
+    // hosts: where the project's APIs live (its paired collection's own URLs): an environment pointing there wins,
+    // so the Robot tests and the collection share one environment; keys only break ties
     const norm = (k) => String(k).replace(/[\s_]/g, '').toLowerCase();
     const want = new Set(keys.map(norm));
-    const best = state.envList.map((e) => [e.id, ((state.envs[e.id] || {}).values || []).filter((v) => want.has(norm(v.key))).length]).sort((a, b) => b[1] - a[1])[0];
+    const score = (e) => {
+      const doc = state.envs[e.id] || {};
+      const sameHost = hosts && hosts.size && envUrls(doc).some((u) => hosts.has(appKey(u.url))) ? 100 : 0;
+      return sameHost + (doc.values || []).filter((v) => want.has(norm(v.key))).length;
+    };
+    const best = state.envList.map((e) => [e.id, score(e)]).sort((a, b) => b[1] - a[1])[0];
     if (best && best[1]) return best[0];
+    if (!fallback) return null;
     const known = (id) => id && state.envList.some((e) => e.id === id);
     return known(saved.env) ? saved.env : known(state.activeEnv) ? state.activeEnv : null; // what was chosen before
   };
   const projSel = ui.select(projects.map((p) => [p.id, p.name]), { value: projects.some((p) => p.id === saved.project) ? saved.project : (projects[0] || {}).id,
     onChange: () => { remember('project', projSel.value); loadProject().catch((e) => toast(e.message, 'err')); } });
   const targetSel = ui.select([['', 'Everything']], { onChange: () => remember('target', targetSel.value) });
-  const envSel = ui.select([], { onChange: () => { saved.envs[projSel.value] = envSel.value; remember('envs', saved.envs); renderKeys(); } });
+  const envSel = ui.select([], { onChange: () => { saved.envs[projSel.value] = envSel.value; remember('envs', saved.envs); renderKeys(); renderSuite(); } });
   // ApiMan environments, then the project's own variable files (env/qa.yaml, config/prod.py) as "file:<path>"
   const fillEnvs = () => {
     const keep = (project && saved.envs[project.id]) ?? envSel.value ?? '';
@@ -5445,6 +5763,7 @@ async function openAutomation() {
   };
   fillEnvs();
   const tagsIn = ui.input({ code: true, placeholder: 'e.g. smoke, api (empty: every test)', value: saved.include || '', spellcheck: 'false', onInput: () => remember('include', tagsIn.value) });
+  const tagChips = h('div', { class: 'actions' });
   const speedSel = ui.select([['watch', 'Watch: each browser step stays on screen'], ['full', 'Full speed']], { value: saved.speed || 'watch', onChange: () => remember('speed', speedSel.value) });
 
   // ---- Live tab ----
@@ -5533,6 +5852,16 @@ async function openAutomation() {
     aside(() => editEnvironment(envSel.value));
   }
   async function createEnv() {
+    const pr = suite && suite.pair;
+    const need = [...project.keys.map((k) => k.name), ...(pr ? collectionVars(pr.cid) : [])];
+    const hosts = pr ? collectionHosts(pr.cid) : new Set();
+    const existing = hosts.size ? (state.envList.find((e) => envUrls(state.envs[e.id]).some((u) => hosts.has(appKey(u.url)))) || {}).id : null;
+    if (existing && state.envs[existing]) { // never a second environment for the same app: use the one pointing at it
+      envSel.value = existing; saved.envs[project.id] = existing; remember('envs', saved.envs);
+      renderKeys(); renderSuite();
+      toast(`Using ${state.envs[existing].name}: it already points at this project's app.`, 'muted');
+      return;
+    }
     const doc = { name: project.name, values: project.keys.map((k) => ({ key: k.name, value: '', type: /pass|secret|token|key/i.test(k.name) ? 'secret' : 'default', enabled: true })), _postman_variable_scope: 'environment' };
     const id = await backend.environments.create(doc);
     await refreshEnvironments();
@@ -5548,8 +5877,10 @@ async function openAutomation() {
   async function aside(open) {
     const dlg = $('#dlg');
     const closed = new Promise((r) => dlg.addEventListener('close', r, { once: true }));
+    automationWin.aside = true; // coming back: Automation keeps its page address and window
     dlg.close();
     await closed;
+    automationWin.aside = false;
     await open();
     openAutomation().catch((e) => toast(e.message, 'err')); // queued: shown when the editor closes
   }
@@ -5582,55 +5913,132 @@ async function openAutomation() {
 
   // ---- History tab ----
   const historyPane = h('div');
+  let historyUrls = []; // screenshots shown in History: released when it's drawn again or the dialog closes
+  const releaseHistory = () => { historyUrls.forEach((u) => u && URL.revokeObjectURL(u)); historyUrls = []; };
   async function renderHistory() {
+    releaseHistory();
     const runs = await api('GET', `/api/robot/runs?project=${encodeURIComponent(project.id)}`);
     const done = runs.filter((r) => r.status !== 'running');
     if (!done.length) { historyPane.replaceChildren(ui.hint('Every run is kept here, with its report and log, so you can see trends: pass rate, slow tests and flaky ones.')); return; }
     const rate = (r) => { const n = (r.passed || 0) + (r.failed || 0); return n ? r.passed / n : 0; };
     const dur = (r) => (r.ended && r.started ? Math.round((r.ended - r.started) * 1000) : 0);
+    const same = (a, b) => a.kind === b.kind && a.target === b.target && (a.test || '') === (b.test || '') && (a.include || '') === (b.include || '');
+    // every test across runs (newest first): its results, times, and the screen of its latest failure
     const byTest = new Map();
     for (const r of done) for (const t of r.tests || []) {
       const k = `${t.suite} › ${t.name}`;
-      const e = byTest.get(k) || { name: t.name, suite: t.suite, pass: 0, fail: 0, ms: [] };
-      if (t.status === 'PASS') e.pass++; else if (t.status === 'FAIL') e.fail++;
+      const e = byTest.get(k) || { key: k, name: t.name, suite: t.suite, results: [], ms: [], lastFail: null };
+      e.results.push({ status: t.status, run: r });
       if (t.ms != null) e.ms.push(t.ms);
+      if (t.status === 'FAIL' && !e.lastFail) e.lastFail = { run: r, message: t.message, shot: t.shot };
       byTest.set(k, e);
     }
-    const flaky = [...byTest.values()].filter((e) => e.pass && e.fail).sort((a, b) => b.fail - a.fail);
-    const failing = [...byTest.values()].filter((e) => !e.pass && e.fail);
-    const slow = [...byTest.values()].map((e) => ({ ...e, avg: e.ms.length ? Math.round(e.ms.reduce((a, b) => a + b, 0) / e.ms.length) : 0 })).sort((a, b) => b.avg - a.avg).slice(0, 5);
+    // since the last comparable run (same kind and same selection): what broke, what got fixed, what got slower
+    const latest = done[0];
+    const prev = done.slice(1).find((r) => same(r, latest));
+    const now = new Map((latest.tests || []).map((t) => [`${t.suite} › ${t.name}`, t]));
+    const before = new Map(((prev && prev.tests) || []).map((t) => [`${t.suite} › ${t.name}`, t]));
+    const broke = [...now.values()].filter((t) => t.status === 'FAIL' && (before.get(`${t.suite} › ${t.name}`) || {}).status === 'PASS');
+    const fixed = [...now.values()].filter((t) => t.status === 'PASS' && (before.get(`${t.suite} › ${t.name}`) || {}).status === 'FAIL');
+    const slower = [...now.values()].filter((t) => { const b = before.get(`${t.suite} › ${t.name}`); return b && t.status === 'PASS' && t.ms != null && b.ms != null && t.ms > b.ms * 1.5 && t.ms - b.ms > 100; });
+    const badge = (e) => {
+      const st = e.results.map((x) => x.status).filter((x) => x === 'PASS' || x === 'FAIL');
+      if (broke.some((t) => `${t.suite} › ${t.name}` === e.key)) return ui.pill('New failure', 'err');
+      if (fixed.some((t) => `${t.suite} › ${t.name}` === e.key)) return ui.pill('Fixed', 'ok');
+      if (st.includes('PASS') && st.includes('FAIL')) return ui.pill('Flaky', 'warn');
+      if (st.length && st.every((x) => x === 'FAIL')) return ui.pill('Failing', 'err');
+      return null;
+    };
+    const order = (e) => (e.results[0].status === 'FAIL' ? 0 : badge(e) ? 1 : 2);
+    const tests = [...byTest.values()].sort((a, b) => order(a) - order(b) || a.suite.localeCompare(b.suite) || a.name.localeCompare(b.name));
+    const shownTests = tests.slice(0, 300);
+    const flakyN = tests.filter((e) => { const st = e.results.map((x) => x.status); return st.includes('PASS') && st.includes('FAIL'); }).length;
     const total = done.reduce((a, r) => a + (r.passed || 0) + (r.failed || 0), 0);
     const passed = done.reduce((a, r) => a + (r.passed || 0), 0);
     const chartRuns = done.slice(0, 40).reverse();
-    historyPane.replaceChildren(
+    const gallery = (latest.tests || []).filter((t) => t.status === 'FAIL').slice(0, 12);
+    const runLabel = (r) => `${r.kind === 'collection' ? 'API · ' : ''}${r.target === '.' ? 'Everything' : r.target}${r.test ? ` › ${r.test}` : ''}${r.include ? ` [${r.include}]` : ''}`;
+    historyPane.replaceChildren(...[
       ui.meta([
         h('span', null, ui.value(String(done.length)), done.length === 1 ? ' run' : ' runs'),
         h('span', null, 'Pass rate ', ui.value(total ? `${Math.round((passed / total) * 100)}%` : '–', passed === total ? 'ok' : 'warn')),
         h('span', null, 'Average run ', ui.value(fmtMs(Math.round(done.reduce((a, r) => a + dur(r), 0) / done.length)))),
-        h('span', null, ui.value(String(flaky.length), flaky.length ? 'warn' : 'muted'), flaky.length === 1 ? ' flaky test' : ' flaky tests'),
+        h('span', null, ui.value(String(tests.length)), ' tests'),
+        h('span', null, ui.value(String(flakyN), flakyN ? 'warn' : 'muted'), flakyN === 1 ? ' flaky test' : ' flaky tests'),
         h('span', null, 'API calls ', ui.value(String(done.reduce((a, r) => a + (r.http || 0), 0)))),
       ]),
+      ui.sectionHead('Since the last run', prev ? `${runLabel(latest)}, ${fmtWhen(latest.started)} vs ${fmtWhen(prev.started)}` : `${runLabel(latest)}: no earlier run of the same selection to compare with`, null),
+      prev ? (broke.length || fixed.length || slower.length ? h('div', null,
+        ...broke.map((t) => ui.result('err', 'New failure', t.name, `${t.suite}: ${t.message || 'failed'}`)),
+        ...fixed.map((t) => ui.result('ok', 'Fixed', t.name, t.suite)),
+        ...slower.map((t) => ui.result('warn', 'Slower', t.name, `${t.suite}: ${fmtMs(before.get(`${t.suite} › ${t.name}`).ms)} → ${fmtMs(t.ms)}`)))
+        : ui.note('Nothing changed: the same tests passed and failed, at about the same speed.', 'ok')) : null,
+      gallery.length ? ui.sectionHead('Failures in the last run', gallery.some((t) => t.shot) ? 'the screen when each failed; replay a test step by step' : null, null) : null,
+      gallery.length ? h('div', { class: 'cards' }, ...gallery.map((t) => {
+        const img = h('img', { class: 'preview', alt: `The screen when "${t.name}" failed`, hidden: true });
+        if (t.shot) runFile(latest.id, t.shot).then((url) => { historyUrls.push(url); img.src = url; img.hidden = false; }).catch(() => {});
+        return ui.card({ title: t.name, badge: ui.pill('Fail', 'err'), body: [ui.hint(t.suite, { oneLine: true }), img, ui.hint(t.message || 'Failed')],
+          actions: latest.kind === 'collection' ? [] : [ // API runs have no screens or Robot log
+            ui.button({ label: 'Replay', size: 'small', onClick: () => replay(latest, t).catch((e) => toast(e.message, 'err')) }),
+            ui.button({ label: 'Log', variant: 'ghost', size: 'small', onClick: () => showRobotPage(latest.id, 'log.html') })] });
+      })) : null,
+      ui.sectionHead('Tests', `${tests.length > shownTests.length ? `the first ${shownTests.length} of ${tests.length}; ` : ''}last 10 results, oldest to newest`, null),
+      h('table', { class: 'grid boxed' }, h('thead', null, h('tr', null, h('th', null, 'Test'), h('th', null, 'Last 10'), h('th', { class: 'num' }, 'Passed'), h('th', { class: 'num' }, 'Average'), h('th', { class: 'tight' }, ''))),
+        h('tbody', null, ...shownTests.map((e) => {
+          const runsOf = e.results.slice(0, 10).reverse();
+          const n = e.results.filter((x) => x.status === 'PASS' || x.status === 'FAIL');
+          const avg = e.ms.length ? Math.round(e.ms.reduce((a, b) => a + b, 0) / e.ms.length) : null;
+          return h('tr', null,
+            h('td', null, e.name, h('div', { class: 'hint' }, e.suite)),
+            h('td', null, ui.dots(runsOf.map((x) => ({ tone: x.status === 'PASS' ? 'ok' : x.status === 'FAIL' ? 'err' : 'muted', label: `${fmtWhen(x.run.started)}: ${x.status}` })), { label: `Last ${runsOf.length} results` })),
+            h('td', { class: 'num' }, n.length ? `${Math.round((n.filter((x) => x.status === 'PASS').length / n.length) * 100)}%` : '–'),
+            h('td', { class: 'num' }, avg != null ? fmtMs(avg) : '–'),
+            h('td', { class: 'tight' }, badge(e)));
+        }))),
       ui.sectionHead('Pass rate per run', `last ${chartRuns.length}, oldest first`, null),
-      ui.chart(chartRuns.map((r) => ({ value: rate(r) || 0.02, tone: runTone(r.status), title: `${fmtWhen(r.started)}: ${r.passed || 0} passed, ${r.failed || 0} failed` })), { label: 'Pass rate per run' }),
+      ui.chart(chartRuns.map((r) => ({ value: rate(r) || 0.02, tone: runTone(r.status), title: `${fmtWhen(r.started)} · ${runLabel(r)}: ${r.passed || 0} passed, ${r.failed || 0} failed` })), { label: 'Pass rate per run' }),
       ui.sectionHead('Duration per run', null, null),
       ui.chart(chartRuns.map((r) => ({ value: dur(r) / Math.max(1, ...chartRuns.map(dur)), tone: 'muted', title: `${fmtWhen(r.started)}: ${fmtMs(dur(r))}` })), { label: 'Duration per run' }),
-      h('div', { class: 'grid-2' },
-        h('div', null, ui.sectionHead('Flaky and failing', null, null),
-          ...(flaky.length || failing.length ? [...flaky.map((e) => ui.result('warn', 'Flaky', e.name, `${e.suite}: failed ${e.fail} of ${e.pass + e.fail} runs`)),
-            ...failing.map((e) => ui.result('err', 'Failing', e.name, `${e.suite}: failed all ${e.fail} runs`))] : [ui.note('Every test that ran passed every time.', 'ok')])),
-        h('div', null, ui.sectionHead('Slowest tests', 'average', null),
-          ...slow.map((e) => ui.result('muted', fmtMs(e.avg), e.name, e.suite)))),
       ui.sectionHead('Runs', null, null),
       h('table', { class: 'grid boxed' }, h('thead', null, h('tr', null, h('th', null, 'Started'), h('th', null, 'Ran'), h('th', null, 'Environment'), h('th', null, 'Result'), h('th', { class: 'num' }, 'Time'), h('th', { class: 'tight' }, ''))),
         h('tbody', null, ...done.map((r) => h('tr', null,
           h('td', null, fmtWhen(r.started)),
-          h('td', { class: 'mono' }, [r.target === '.' ? 'Everything' : r.target, r.test && ` › ${r.test}`, r.include && ` [${r.include}]`].filter(Boolean).join('')),
+          h('td', { class: 'mono' }, r.kind === 'collection' ? ui.pill('API', 'muted') : null, r.kind === 'collection' ? ' ' : null,
+            [r.target === '.' ? 'Everything' : r.target, r.test && ` › ${r.test}`, r.include && ` [${r.include}]`].filter(Boolean).join('')),
           h('td', null, r.env || '–'),
           h('td', null, ui.pill(r.status === 'stopped' ? 'Stopped' : r.status === 'passed' ? 'Passed' : r.failed ? `${r.failed} failed` : 'Error', runTone(r.status)), ' ', `${r.passed || 0} passed`),
           h('td', { class: 'num' }, fmtMs(dur(r))),
           h('td', { class: 'tight' }, ui.button({ label: 'Show', variant: 'ghost', size: 'small', onClick: () => follow(r.id, true) }),
-            ui.button({ label: 'Report', variant: 'ghost', size: 'small', onClick: () => showRobotPage(r.id, 'report.html') }),
-            ui.button({ label: 'Log', variant: 'ghost', size: 'small', onClick: () => showRobotPage(r.id, 'log.html') })))))));
+            r.kind === 'collection' ? null : ui.button({ label: 'Report', variant: 'ghost', size: 'small', onClick: () => showRobotPage(r.id, 'report.html') }),
+            r.kind === 'collection' ? null : ui.button({ label: 'Log', variant: 'ghost', size: 'small', onClick: () => showRobotPage(r.id, 'log.html') })))))),
+    ].filter(Boolean));
+  }
+  /** Replay one test of a run, frame by frame: every screen the live view showed, with the step that made it. */
+  async function replay(runMeta, t) {
+    const res = await api('GET', `/api/robot/runs/${encodeURIComponent(runMeta.id)}?from=0`);
+    const frames = res.events.filter((e) => e.shot && (e.test === t.name || (e.t === 'test_end' && e.name === t.name)))
+      .map((e) => ({ shot: e.shot, step: e.t === 'test_end' ? `${t.name} ended: ${e.status}${e.message ? `, ${e.message}` : ''}` : `${e.lib ? `${e.lib}.` : ''}${e.name}`, fail: e.status === 'FAIL' }));
+    if (!frames.length) { toast('No screens were captured for this test (it never opened a page).', 'muted'); return; }
+    const urls = new Map();
+    const img = h('img', { class: 'preview', alt: `${t.name}, replayed` });
+    const caption = ui.hint('');
+    const slider = ui.input({ type: 'range', min: '0', max: String(frames.length - 1), step: '1', value: String(frames.length - 1), 'aria-label': 'Step' });
+    const show = async (i) => {
+      const f = frames[i];
+      if (!urls.has(f.shot)) { const u = await runFile(runMeta.id, f.shot).catch(() => ''); urls.set(f.shot, u); historyUrls.push(u); }
+      img.src = urls.get(f.shot);
+      caption.textContent = `Step ${i + 1} of ${frames.length}: ${f.step}`;
+      slider.value = String(i);
+    };
+    slider.addEventListener('input', () => show(Number(slider.value)));
+    const step = (d) => show(Math.max(0, Math.min(frames.length - 1, Number(slider.value) + d)));
+    historyPane.replaceChildren(
+      ui.toolbar([ui.sectionHead(`Replay: ${t.name}`, `${fmtWhen(runMeta.started)} · ${frames.length} screens`, null)], [
+        ui.button({ label: 'Previous', variant: 'ghost', size: 'small', onClick: () => step(-1) }),
+        ui.button({ label: 'Next', variant: 'ghost', size: 'small', onClick: () => step(1) }),
+        ui.button({ label: 'Back to history', variant: 'ghost', size: 'small', onClick: () => renderHistory().catch((e) => toast(e.message, 'err')) })]),
+      ui.field(null, slider), caption, img);
+    await show(frames.length - 1); // start on the moment it failed
   }
   async function showRobotPage(runId, name) {
     try {
@@ -5696,7 +6104,13 @@ async function openAutomation() {
     const allRuns = rows.flatMap((r) => r.runs).filter((r) => r.status !== 'running');
     const passedRuns = allRuns.filter((r) => r.status === 'passed').length;
     const anyRunning = rows.some((r) => r.runs.some((x) => x.status === 'running'));
-    const envFor = (r) => { const id = saved.envs[r.id] ?? bestEnv(r.keys || []); return id && !id.startsWith('file:') ? state.envs[id] : null; };
+    await Promise.all(state.colList.map((c) => withCol(c.id).catch(() => null)));
+    const pairs = new Map(rows.filter((r) => !r.error).map((r) => [r.id, pairFor(r, saved.pairs)]));
+    const envFor = (r) => {
+      const pr = pairs.get(r.id);
+      const id = saved.envs[r.id] ?? bestEnv([...(r.keys || []), ...(pr ? collectionVars(pr.cid) : [])], { hosts: pr ? collectionHosts(pr.cid) : null });
+      return id && !id.startsWith('file:') ? state.envs[id] : null;
+    };
     const card = (r) => {
       const last = r.runs.find((x) => x.status !== 'running');
       const running = r.runs.find((x) => x.status === 'running');
@@ -5720,10 +6134,14 @@ async function openAutomation() {
             const c = up.get(u.url);
             return h('span', { title: u.url }, ui.dot({ tone: c && c.up ? 'ok' : '', label: c && c.up ? 'Answering' : 'Not answering' }), ` ${u.key} ${c && c.up ? 'up' : 'down'}`);
           })]) : ui.hint(r.keys && r.keys.length ? `Needs ${r.keys.slice(0, 4).join(', ')}: pick an environment when you open it.` : 'Needs no environment.'),
+          pairs.get(r.id) ? ui.meta([h('span', null, ui.pill('API', 'muted')), h('span', null, (state.colList.find((c) => c.id === pairs.get(r.id).cid) || {}).name || ''),
+            h('span', null, ui.value(String(pairs.get(r.id).covered.size)), ` of ${pairs.get(r.id).total} requests in the tests`)]) : null,
         ].filter(Boolean),
         actions: [
           ui.button({ label: running ? 'Show run' : 'Open', size: 'small', onClick: () => openProject(r.id).then(() => running && follow(running.id)).catch((e) => toast(e.message, 'err')) }),
           running || anyRunning || r.error ? null : ui.button({ label: 'Run', size: 'small', onClick: () => openProject(r.id, true).catch((e) => toast(e.message, 'err')) }),
+          running || anyRunning || r.error || !pairs.get(r.id) ? null : ui.button({ label: 'Run API', size: 'small', title: 'Run the paired collection with this project\'s test data',
+            onClick: () => openProject(r.id).then(() => loadSuiteDataNow()).then(() => runSuite()).catch((e) => toast(e.message, 'err')) }),
           r.linked ? ui.button({ label: 'Unlink', variant: 'ghost', size: 'small', onClick: async () => {
             try { await api('DELETE', `/api/robot/links/${encodeURIComponent(r.id)}`); } catch (e) { toast(e.message, 'err'); return; }
             toast(`Unlinked ${r.name}: its folder and runs are untouched. Link it again any time.`, 'muted');
@@ -5752,6 +6170,7 @@ async function openAutomation() {
         text: 'Link a project folder from anywhere on this computer, import a zip, or put a project in your data folder. ApiMan finds its suites, tests, tags, test data and the environment keys it needs.',
         actions: [ui.button({ label: 'Link a folder…', size: 'small', onClick: () => { linkForm.hidden = false; linkIn.focus(); } }), ui.button({ label: 'Import a zip…', size: 'small', onClick: () => zipIn.click() })],
       }),
+      ...unpairedSection(rows, pairs),
       ui.sectionHead('Apps running on this computer', 'common development ports, answering now', null),
       appRows.length ? h('table', { class: 'grid boxed' }, h('thead', null, h('tr', null, h('th', null, 'App'), h('th', { class: 'desktop-only' }, 'Page'), h('th', { class: 'num' }, 'Status'), h('th', { class: 'desktop-only' }, 'Environments'), h('th', { class: 'tight' }, ''))),
         h('tbody', null, ...appRows.map((a) => {
@@ -5769,14 +6188,207 @@ async function openAutomation() {
         : null,
     ].filter(Boolean));
   }
+  /** Collections no project is paired with: pair one in a click (its requests then run with that project's test data). */
+  function unpairedSection(rows, pairs) {
+    const paired = new Set([...pairs.values()].filter(Boolean).map((x) => x.cid));
+    const left = state.colList.filter((c) => !paired.has(c.id));
+    const projectsOk = rows.filter((r) => !r.error);
+    if (!left.length || !projectsOk.length) return [];
+    return [ui.sectionHead('Collections not paired', 'pair one with a project to run its requests with that project\'s test data', null),
+      h('table', { class: 'grid boxed' }, h('tbody', null, ...left.map((c) => {
+        const sel = ui.select([['', 'Pair with…'], ...projectsOk.map((r) => [r.id, r.name])], { size: 'small', 'aria-label': `Pair ${c.name} with a project`,
+          onChange: () => { if (!sel.value) return; saved.pairs[sel.value] = c.id; remember('pairs', saved.pairs); toast(`Paired ${c.name} with ${projectsOk.find((r) => r.id === sel.value).name}.`, 'ok'); renderDashboard().catch((e) => toast(e.message, 'err')); } });
+        return h('tr', null, h('td', null, c.name), h('td', { class: 'num' }, state.cols[c.id] ? `${countRequests(state.cols[c.id].item)} requests` : ''), h('td', { class: 'tight' }, sel));
+      })))];
+  }
+  /** The project's test data is read in the background on load; a Run from a card waits for it. */
+  async function loadSuiteDataNow() {
+    if (suite && suite.loading) await suite.loading; // the load project open started
+  }
+
   /** One click: an environment whose BASE_URL is a running app. */
   async function envForApp(base, title) {
+    const same = state.envList.find((e) => envUrls(state.envs[e.id]).some((u) => appKey(u.url) === appKey(base)));
+    if (same) { toast(`${same.name} already points at ${base}: use it (one environment per app).`, 'muted'); return; }
     const name = `${title ? `${title} ` : ''}${base.replace(/^https?:\/\//, '')}`.slice(0, 60);
     await backend.environments.create({ name, values: [{ key: 'BASE_URL', value: base, type: 'default', enabled: true }], _postman_variable_scope: 'environment' });
     await refreshEnvironments();
     renderEnvPicker();
     toast(`Created the "${name}" environment (BASE_URL = ${base}). Pick it on a project.`, 'ok');
     await renderDashboard();
+  }
+
+  // =========================== Collection: the project's APIs from a Postman collection, run with its test data ===========================
+  saved.pairs = saved.pairs || {}; // project id -> collection id ('' = none on purpose); absent: matched automatically
+  const suitePane = h('div');
+  let suite = null;     // { pair, datasets, unread, read } for the open project
+  let suiteCtrl = null; // aborts the collection run in progress
+  let starting = false; // a run is being started: a second click waits
+  /** The project's test data: every CSV/TSV/JSON file in it (not its variable files), parsed once per project load. */
+  async function loadSuiteData() {
+    const files = project.data.filter((f) => /\.(csv|tsv|json)$/i.test(f.path) && !project.varfiles.includes(f.path)).slice(0, 80);
+    const unread = project.data.filter((f) => /\.(ya?ml|xlsx?|xml|txt)$/i.test(f.path) && !project.varfiles.includes(f.path)).map((f) => f.path);
+    const parsed = await Promise.all(files.map((f) => api('GET', `/api/robot/projects/${encodeURIComponent(project.id)}/file?path=${encodeURIComponent(f.path)}`)
+      .then((r) => datasetsFrom(f.path, r.text)).catch(() => [])));
+    return { datasets: parsed.flat(), unread, read: files.length, skippedFiles: Math.max(0, project.data.filter((f) => /\.(csv|tsv|json)$/i.test(f.path)).length - files.length) };
+  }
+  const suiteEnvId = () => (envSel.value && !envSel.value.startsWith('file:') ? envSel.value : '');
+  function renderSuite() {
+    if (!project || !suite) return;
+    const pair = suite.pair;
+    const overridden = Object.hasOwn(saved.pairs, project.id);
+    const pairSel = ui.select([['__auto', 'Match automatically'], ['', 'Not paired'], ...state.colList.map((c) => [c.id, c.name])], {
+      value: overridden ? saved.pairs[project.id] || '' : '__auto',
+      onChange: () => {
+        if (pairSel.value === '__auto') delete saved.pairs[project.id]; else saved.pairs[project.id] = pairSel.value;
+        remember('pairs', saved.pairs);
+        suite.pair = pairFor(project, saved.pairs);
+        renderSuite();
+      },
+    });
+    const head = h('div', { class: 'grid-3' }, ui.field('Postman collection', pairSel, { hint: pair ? (pair.auto ? 'Matched automatically: its requests are the API calls in these tests.' : 'Chosen by you.') : null }));
+    if (!pair) {
+      suitePane.replaceChildren(head, ui.hint(overridden && state.colList.length
+        ? 'Not paired, on purpose. Pick the collection with this project\'s APIs to run its requests with this project\'s test data, as part of this suite.'
+        : state.colList.length
+        ? 'No collection shares a request with these tests. Pick the one with this project\'s APIs, and its requests run with this project\'s test data, as part of this suite.'
+        : 'No Postman collection yet. Import one (Import, in the header) and it\'s matched with this project when its requests are the API calls in these tests.'));
+      return;
+    }
+    const envId = suiteEnvId();
+    const env = envId ? state.envs[envId] : null;
+    const plan = planSuite(pair.cid, envId, suite.datasets, project.endpoints);
+    const withData = plan.plan.filter((x) => x.source).length;
+    // what only the environment can give: hosts, and values no test data fills
+    const fromEnv = [...new Set(plan.plan.flatMap((x) => [...(x.hostMissing ? [x.hostVar] : []), ...x.missing]))];
+    const keys = new Map(((env && env.values) || []).filter((v) => v.enabled !== false).map((v) => [normKey(v.key), v.key]));
+    const renames = fromEnv.filter((k) => keys.has(normKey(k)) && keys.get(normKey(k)) !== k).map((k) => [keys.get(normKey(k)), k]);
+    const absent = fromEnv.filter((k) => !keys.has(normKey(k)));
+    const hostsMissing = [...new Set(plan.plan.filter((x) => x.hostMissing).map((x) => x.hostVar))];
+    const shown = plan.plan.slice(0, 300);
+    suitePane.replaceChildren(...[
+      head,
+      ui.meta([
+        h('span', null, ui.value(String(plan.total)), ' requests'),
+        h('span', null, ui.value(String(plan.covered)), ' also called by these tests'),
+        h('span', null, ui.value(String(withData)), ' with test data'),
+        h('span', null, ui.value(String(plan.cases)), plan.cases === 1 ? ' case to run' : ' cases to run'),
+        h('span', null, ui.value(String(suite.read)), ' data files read'),
+      ]),
+      suite.unread.length ? ui.hint(`Not read (only CSV, TSV and JSON test data are): ${suite.unread.slice(0, 6).join(', ')}${suite.unread.length > 6 ? `, and ${suite.unread.length - 6} more` : ''}.`) : null,
+      plan.capped ? ui.note(`Over ${MAX_CASES.toLocaleString()} cases: the requests past that limit are skipped. Split the test data, or pair a smaller collection.`, 'warn') : null,
+      !env ? ui.note(`Pick an environment above: the collection's requests need ${fromEnv.slice(0, 4).map((k) => `{{${k}}}`).join(', ') || 'one for their host'}.`, 'warn') : null,
+      env && hostsMissing.length ? ui.note(`${env.name} has no ${hostsMissing.map((k) => `{{${k}}}`).join(', ')}: the requests that use it can't run until it does.`, 'err') : null,
+      env && renames.length ? ui.note(`One key for both: the collection needs ${renames.map(([, to]) => `{{${to}}}`).join(', ')}, and ${env.name} has ${renames.map(([from]) => from).join(', ')}. Robot reads either spelling, the collection needs the exact one.`, 'warn') : null,
+      env && (renames.length || absent.length) ? ui.actions(...[
+        renames.length ? ui.button({ label: `Rename to ${renames.map(([, to]) => to).join(', ')}`, size: 'small', onClick: () => renameKeys(env, renames).catch((e) => toast(e.message, 'err')) }) : null,
+        absent.length ? ui.button({ label: `Add ${absent.length} missing to ${env.name}`, size: 'small', onClick: () => addKeys(env, absent.map((name) => ({ name }))).catch((e) => toast(e.message, 'err')) }) : null,
+      ].filter(Boolean)) : null,
+      ui.sectionHead('Requests and their test data', plan.plan.length > shown.length ? `the first ${shown.length} of ${plan.plan.length}` : null, null),
+      h('table', { class: 'grid boxed' }, h('thead', null, h('tr', null, h('th', null, 'Request'), h('th', null, 'Test data'), h('th', { class: 'num' }, 'Cases'), h('th', null, 'Missing'), h('th', { class: 'tight' }, 'In tests'))),
+        h('tbody', null, ...shown.map((x) => h('tr', null,
+          h('td', null, ui.method(x.ed.method), ' ', x.ed.name, x.folder ? h('div', { class: 'hint' }, x.folder) : null),
+          h('td', null, x.source ? [x.source, h('div', { class: 'hint' }, [x.why,
+            x.fills.length || x.binds.length ? `fills ${[...x.fills.map((k) => `{{${k}}}`), ...x.binds.map(([, f]) => `${f.kind} ${f.key}`)].join(', ')}` : 'fills nothing in this request',
+            x.unused.length ? `unused: ${x.unused.slice(0, 5).join(', ')}` : '', x.bodyNote, x.truncated ? `first ${MAX_ROWS_PER_REQUEST} rows (${x.truncated} more not run)` : ''].filter(Boolean).join('; '))] : ui.hint(x.need.length ? 'none found' : 'needs none')),
+          h('td', { class: 'num' }, x.cases.length ? String(x.cases.length) : x.skipReason ? ui.hint(`skipped: ${x.skipReason}`) : '–'),
+          h('td', null, x.hostMissing ? ui.pill(`{{${x.hostVar}}}`, 'err') : x.missing.length ? x.missing.slice(0, 4).map((k) => ui.pill(`{{${k}}}`, 'warn')) : '–'),
+          h('td', { class: 'tight' }, x.covered ? ui.pill('Yes', 'ok') : '–'))))),
+      ui.actions(ui.button({ label: 'Run collection with test data', size: 'small', onClick: () => runSuite().catch((e) => toast(e.message, 'err')) })),
+    ].filter(Boolean));
+  }
+  /** One key that serves both: rename BASE_URL to baseUrl (Robot reads either spelling; a collection needs the exact one). */
+  async function renameKeys(env, renames) {
+    // a key another collection still uses by its old spelling is copied, not renamed, so that collection keeps working
+    const usedElsewhere = (from) => state.colList.some((c) => suite && c.id !== suite.pair.cid && collectionVars(c.id).includes(from));
+    const copied = [];
+    await mutateDoc('environments', suiteEnvId(), (doc) => {
+      for (const [from, to] of renames) {
+        if (doc.values.some((v) => v.key === to)) continue;
+        const v = doc.values.find((x) => x.key === from);
+        if (!v) continue;
+        if (usedElsewhere(from)) { doc.values.push({ ...v, key: to }); copied.push(from); } else v.key = to;
+      }
+      return true;
+    });
+    toast(copied.length ? `Added ${renames.map(([, to]) => to).join(', ')} to ${env.name} (${copied.join(', ')} kept: another collection uses it).`
+      : `Renamed in ${env.name}: one key now serves the collection and the Robot tests.`, 'ok');
+    renderKeys();
+    renderSuite();
+  }
+  /** Run the paired collection with the project's test data; it's recorded as a run of this suite. */
+  async function runSuite() {
+    if (suiteCtrl || starting) { toast('A run is starting or going: wait for it or stop it first.', 'warn'); return; } // a double click starts one run
+    starting = true;
+    try { await runSuiteNow(); } finally { starting = false; }
+  }
+  async function runSuiteNow() {
+    await loading;
+    if (run && run.meta && run.meta.status === 'running') { toast(`${run.meta.projectName} is still running: wait for it or stop it first.`, 'warn'); return; }
+    if (!suite || !suite.pair) throw new Error('Pair a Postman collection with this project first (Collection tab).');
+    const cid = suite.pair.cid;
+    const col = await withCol(cid);
+    const envId = suiteEnvId();
+    const plan = planSuite(cid, envId, suite.datasets, project.endpoints);
+    const runnable = plan.plan.filter((x) => x.cases.length && !x.hostMissing);
+    if (!runnable.length) throw new Error(plan.plan.some((x) => x.hostMissing) ? `Nothing can run: the environment has no {{${plan.plan.find((x) => x.hostMissing).hostVar}}}.` : 'This collection has no requests to run.');
+    const meta = await api('POST', '/api/robot/runs/collection', { project: project.id, projectName: project.name, collection: cid, collectionName: col.info.name,
+      env: envId ? state.envs[envId].name : '', cases: plan.cases });
+    let buf = [], posting = Promise.resolve(), failedPost = null, lastPost = Date.now();
+    const flush = (done) => {
+      const events = buf; buf = []; lastPost = Date.now();
+      posting = posting.then(() => api('POST', `/api/robot/runs/${encodeURIComponent(meta.id)}/events`, { events, ...(done ? { done } : {}) })).catch((e) => { failedPost = e; });
+      return posting;
+    };
+    const suiteName = (parents) => [col.info.name, ...parents.map((x) => x.name)].join(' › ');
+    buf.push({ t: 'suite_start', name: col.info.name, longname: col.info.name, tests: plan.cases + plan.plan.filter((y) => y.hostMissing || !y.cases.length).length });
+    // the requests that can't run are results too: the suite says why
+    for (const x of plan.plan.filter((y) => y.hostMissing || !y.cases.length)) {
+      const name = x.ed.name;
+      buf.push({ t: 'test_start', name, suite: [col.info.name, x.folder].filter(Boolean).join(' › '), tags: ['api'] },
+        { t: 'test_end', name, suite: [col.info.name, x.folder].filter(Boolean).join(' › '), tags: ['api'],
+          status: x.hostMissing ? 'FAIL' : 'SKIP', message: x.hostMissing ? `Not sent: the environment has no {{${x.hostVar}}}.` : x.skipReason ? `Skipped: ${x.skipReason}.` : `Skipped: over the ${MAX_CASES.toLocaleString()}-case limit.`, ms: 0 });
+    }
+    const byId = new Map(plan.plan.map((x) => [x.item.id, x]));
+    suiteCtrl = new AbortController();
+    // events as they come; and while one request takes long, a heartbeat so the run isn't taken for an abandoned one
+    const timer = setInterval(() => { if (buf.length || Date.now() - lastPost > 20000) flush(); }, 400);
+    $$('.seg-btn', tabBar)[0].click();
+    summary.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    follow(meta.id).catch(() => {});
+    try {
+      await runCollection({
+        cid, envId, signal: suiteCtrl.signal,
+        only: (item) => { const x = byId.get(item.id); return !!x && x.cases.length > 0 && !x.hostMissing; },
+        casesFor: (item) => byId.get(item.id).cases,
+        onResult: ({ ed, parents, out, testCase }) => {
+          if (failedPost) throw failedPost;
+          if (suiteCtrl && suiteCtrl.signal.aborted) return; // cut off by Stop: not a result
+          const name = ed.name + (testCase.label ? ` · ${testCase.label}` : '');
+          const v = caseVerdict(out, testCase);
+          const ms = out.res && !out.error ? out.res.timeMs : 0;
+          const wire = out.wire || {};
+          buf.push({ t: 'test_start', name, suite: suiteName(parents), tags: ['api'] });
+          buf.push({ t: 'http', method: wire.method || ed.method, url: wire.url || ed.url, test: name, reqHeaders: headerObj(wire.headers),
+            reqBody: wire.body && wire.body.kind === 'text' ? String(wire.body.text || '').slice(0, 65536) : '',
+            ...(out.error ? { error: out.error, ms } : { status: out.res.status, reason: out.res.reason || '', ms, resHeaders: headerObj(out.res.headers),
+              resBody: out.res.binary ? '(binary)' : String(out.res.body ?? '').slice(0, 65536), size: out.res.size }) });
+          for (const tst of out.tests) buf.push({ t: 'kw_end', name: testCase.expect != null ? `${tst.name} (not deciding: this row expects ${testCase.expect})` : tst.name, lib: 'pm.test',
+            status: testCase.expect != null ? 'NOT RUN' : tst.passed === false ? 'FAIL' : 'PASS', ms: 0, depth: 2, test: name });
+          buf.push({ t: 'test_end', name, suite: suiteName(parents), status: v.status, message: v.message, ms, tags: ['api'] });
+        },
+      });
+      buf.push({ t: 'suite_end', name: col.info.name, longname: col.info.name, status: 'PASS' });
+      await flush(suiteCtrl.signal.aborted ? 'stopped' : 'done');
+    } catch (e) {
+      buf.push({ t: 'log', level: 'ERROR', text: e.message });
+      await flush(suiteCtrl && suiteCtrl.signal.aborted ? 'stopped' : 'error'); // cut short: failed, never "passed"
+      throw e;
+    } finally {
+      clearInterval(timer);
+      suiteCtrl = null;
+    }
+    if (failedPost) throw new Error(`Couldn't record the run: ${failedPost.message}`);
   }
 
   let loading = null; // the project being loaded: Run waits for it
@@ -5786,6 +6398,7 @@ async function openAutomation() {
     { key: 'keys', label: 'Variables', content: keysPane },
     { key: 'data', label: 'Test data', content: [ui.field('Data for this run (JSON)', dataEd, { hint: 'Each key becomes a ${variable} for the run, over the environment\'s value. Saved with the run.' }), filesPane, fileView] },
     { key: 'history', label: 'History', content: historyPane },
+    { key: 'collection', label: 'Collection', content: suitePane },
   ], (k) => { if (k === 'history') renderHistory().catch((e) => toast(e.message, 'err')); }, { cls: 'dlg-tabs' });
   const pythonNote = h('div');
 
@@ -5796,14 +6409,27 @@ async function openAutomation() {
     targetSel.replaceChildren(...ui.select([['', `Everything (${tests} tests)`], ...project.suites.map((s) => ({ group: s.path, options: [
       [s.path, `All of ${s.name} (${s.tests.length})`], ...s.tests.map((t) => [`${s.path}::${t.name}`, `${t.name}${t.tags.length ? `  [${t.tags.join(', ')}]` : ''}`])] }))], { value: saved.target || '' }).childNodes);
     targetSel.value = [...targetSel.options].some((o) => o.value === saved.target) ? saved.target : '';
+    const tags = [...new Set(project.suites.flatMap((x) => x.tests.flatMap((t) => t.tags)))].sort((x, y) => x.localeCompare(y)).slice(0, 12);
+    const toggleTag = (tg) => {
+      const cur = tagsIn.value.split(',').map((x) => x.trim()).filter(Boolean);
+      tagsIn.value = (cur.includes(tg) ? cur.filter((x) => x !== tg) : [...cur, tg]).join(', ');
+      remember('include', tagsIn.value);
+    };
+    tagChips.replaceChildren(...tags.map((tg) => ui.button({ label: tg, variant: 'ghost', size: 'small', title: `Only tests tagged ${tg} (click again to remove)`, onClick: () => toggleTag(tg) })));
     pythonNote.replaceChildren(project.python.error ? ui.note(project.python.error, 'err')
-      : ui.hint(`Robot Framework ${project.python.version} · ${project.python.path}`, { oneLine: true, title: project.python.path }));
+      : ui.hint(project.python.version ? `Robot Framework ${project.python.version} · ${project.python.path}` : `Python: ${project.python.path} (checked when you run)`, { title: project.python.path }));
+    await Promise.all(state.colList.map((c) => withCol(c.id).catch(() => null)));
+    suite = { pair: pairFor(project, saved.pairs), datasets: [], unread: [], read: 0 };
     fillEnvs();
     envSel.value = saved.envs[project.id] ?? '';
-    if (saved.envs[project.id] == null) envSel.value = bestEnv(project.keys.map((k) => k.name)) || ''; // first time
+    // first time: the environment with most of what both the tests and the paired collection need (never a second one)
+    if (saved.envs[project.id] == null) envSel.value = bestEnv([...project.keys.map((k) => k.name), ...(suite.pair ? collectionVars(suite.pair.cid) : [])], { hosts: suite.pair ? collectionHosts(suite.pair.cid) : null }) || '';
     renderKeys();
     renderFiles();
     fileView.replaceChildren();
+    suitePane.replaceChildren(ui.hint('Reading the test data…'));
+    const mine = suite; // a slower load for a project you've left must not land on this one
+    mine.loading = loadSuiteData().then((d) => { if (suite === mine) { Object.assign(mine, d); renderSuite(); } }).catch((e) => { if (suite === mine) suitePane.replaceChildren(ui.note(e.message, 'err')); });
   }
 
   // ---- running and following a run ----
@@ -5894,9 +6520,19 @@ async function openAutomation() {
   /** The footer's Run (Stop while a run goes); hidden on the dashboard, where each project has its own Run. */
   const setRunButton = (running) => { const b = $('#dlgFoot .btn.primary'); if (b) { b.textContent = running ? 'Stop' : 'Run'; b.hidden = !dash.hidden; } };
   async function start() {
+    if (suiteCtrl) { suiteCtrl.abort(); return; } // Stop: a collection run going here stops, whatever else is happening
+    if (starting) return; // a double click starts one run
+    starting = true;
+    try { await startNow(); } finally { starting = false; }
+  }
+  async function startNow() {
     if (run && run.meta && run.meta.status === 'running' && run.meta.project !== project.id) {
       toast(`${run.meta.projectName} is still running: wait for it or stop it first.`, 'warn');
       return;
+    }
+    if (run && run.meta && run.meta.status === 'running' && run.meta.kind === 'collection') {
+      if (suiteCtrl) { suiteCtrl.abort(); return; } // it runs here, in this page
+      run.meta.status = 'stopped';
     }
     if (run && run.meta && run.meta.status === 'running') {
       const { stopped } = await api('POST', `/api/robot/runs/${encodeURIComponent(run.id)}/stop`);
@@ -5921,15 +6557,29 @@ async function openAutomation() {
   projectView.append(
     ui.toolbar([ui.button({ label: 'All projects', variant: 'ghost', size: 'small', onClick: showDashboard })], []),
     h('div', { class: 'grid-3' }, ui.field('Project', projSel), ui.field('Run', targetSel), ui.field('Environment', envSel)),
-    h('div', { class: 'grid-3' }, ui.field('Only tests tagged', tagsIn), ui.field('Speed', speedSel), h('div', { class: 'field' }, pythonNote)),
+    h('div', { class: 'grid-3' }, h('div', null, ui.field('Only tests tagged', tagsIn), tagChips), ui.field('Speed', speedSel), h('div', { class: 'field' }, pythonNote)),
     tabBar, ...panes);
   openDialog({
     title: 'Automation', full: true, tall: true, cancel: 'Close',
     body: [dash, projectView],
-    onClose: () => { if (run && run.timer) clearTimeout(run.timer); run = null; if (shotUrl) URL.revokeObjectURL(shotUrl); },
-    buttons: [{ label: 'Run', primary: true, onClick: () => { start().catch((e) => toast(e.message, 'err')); return false; } }],
+    onClose: () => {
+      if (run && run.timer) clearTimeout(run.timer); run = null; if (shotUrl) URL.revokeObjectURL(shotUrl); releaseHistory();
+      if (automationWin.aside) return;
+      automationWin.only = false; // closed here: this window is a normal ApiMan window from now on
+      document.title = 'ApiMan';
+      if (location.hash === '#automation') history.replaceState(null, '', location.pathname + location.search);
+    },
+    buttons: [...(automationWin.only ? [] : [{ label: 'Open in new window', left: true, onClick: () => {
+      if (suiteCtrl) { toast('A collection run is going in this window: open the new window after it ends.', 'warn'); return false; }
+      const win = window.open(`${location.pathname}${location.search}#automation`, 'apiman-automation');
+      if (!win) { toast('The browser blocked the new window: allow pop-ups for ApiMan, or open #automation yourself.', 'warn'); return false; }
+      win.focus();
+      return true; // this window goes back to the API client
+    } }]), { label: 'Run', primary: true, onClick: () => { start().catch((e) => toast(e.message, 'err')); return false; } }],
   });
   setRunButton(false);
+  document.title = 'Automation · ApiMan';
+  if (location.hash !== '#automation') history.replaceState(null, '', `${location.pathname}${location.search}#automation`); // reload or bookmark: Automation again
   // a run still going (started before this window opened): show it; otherwise the dashboard
   const going = (await api('GET', '/api/robot/runs')).find((r) => r.status === 'running');
   if (going && projects.some((x) => x.id === going.project)) {
@@ -6812,6 +7462,10 @@ async function start() {
   if (local) {
     const info = await api('GET', '/api/info').catch(() => ({}));
     if (info.run) headlessRun(info.run); // started by `python3 server.py run`
+    // Automation's own page: opened from "Open in new window", a bookmark or a reload; typing #automation opens it too
+    const openAuto = () => { if (location.hash === '#automation' && !$('#dlg').open) openAutomation().catch((e) => toast(e.message, 'err')); };
+    window.addEventListener('hashchange', openAuto);
+    openAuto();
   }
 }
 

@@ -46,7 +46,7 @@ Each row: the root class, its variants (modifiers), its parts, and the `ui.*` fu
 | 4 | **Check** | `label.check` · `.align-end` | `input[type=checkbox]`, `span`, `small` | `ui.check()` |
 | 5 | **Segmented** | `.seg` · `.block` | options `.seg-btn` (radio) or `.tab` (tab), `.count`/`.dot` inside, More button `.seg-more` | `ui.seg()`, `fitTabs()` |
 | 6 | **Badge** | `.pill` · tone · `.count` · tone · `.status-code` · `.s2` `.s3` `.s4` `.s5` `.err` · `.small` · `.mtag` · `.GET` `.POST` `.PUT` `.PATCH` `.DELETE` `.HEAD` `.OPTIONS` | | `ui.pill()`, `ui.count()`, `ui.status()`, `ui.method()` |
-| 7 | **Dot** | `.dot` · `.ok` (live) · `.warn` (unsaved) · `.off` | | `ui.dot()` |
+| 7 | **Dot** | `.dot` · `.ok` (live, passed) · `.warn` (unsaved) · `.err` (failed) · `.muted` · `.off` · `.dots` (a strip of results, oldest to newest) | | `ui.dot()`, `ui.dots()` |
 | 8 | **Text** | `.label` · `.hint` (`.one-line`; `.path`: a long path on one line, cut at its start, the whole path in `title`) · `.note` (tone) · `code.inline` · `pre.code-block` · `kbd` · `mark` · `.pre-line` | | `ui.hint()`, `ui.note()`, `ui.kbd()` |
 | 9 | **Toolbar** | `.pane-tools` · `.boxed` (find bar) · **ActionRow** `.actions` | `.tool-group` (right-aligned actions), `.spacer` | `ui.toolbar()`, `ui.actions()` |
 | 10 | **SectionHead** | `.section-head` | `.label`, `.hint`, a trailing control | `ui.sectionHead()` |

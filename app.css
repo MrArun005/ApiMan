@@ -272,6 +272,9 @@ textarea.prose { width: 100%; flex: 1; min-height: 200px; resize: vertical; line
 .dot.ok { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
 .dot.warn { background: var(--warn); }
 .dot.muted { background: var(--muted); }
+.dot.err { background: var(--err); }
+.dots { display: inline-flex; align-items: center; gap: 3px; vertical-align: middle; }
+.dots .dot.ok { box-shadow: none; } /* in a strip a pass is a result, not a live signal */
 .dot.off { visibility: hidden; } /* keeps its place, so nothing shifts when it appears */
 
 /* ===================================================================================== 8 Text */

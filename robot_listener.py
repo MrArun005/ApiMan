@@ -126,15 +126,15 @@ class robot_listener:
 
         def send(session, request, **kwargs):
             started = time.time()
-            event = {"t": "http", "method": request.method, "url": request.url, "test": listener.test,
-                     "reqHeaders": _headers(request.headers), "reqBody": _body(request.body)}
+            event = {"t": "http", "method": request.method, "url": _url(request.url), "test": listener.test,
+                     "reqHeaders": _headers(request.headers), "reqBody": _secrets(_body(request.body))}
             try:
                 resp = original(session, request, **kwargs)
             except Exception as e:
                 listener.emit(**event, error=f"{type(e).__name__}: {e}", ms=round((time.time() - started) * 1000))
                 raise
             listener.emit(**event, status=resp.status_code, reason=resp.reason, ms=round((time.time() - started) * 1000),
-                          resHeaders=_headers(resp.headers), resBody=_body(resp.content), size=len(resp.content or b""))
+                          resHeaders=_headers(resp.headers), resBody=_secrets(_body(resp.content)), size=len(resp.content or b""))
             return resp
 
         send._apiman = True
@@ -145,8 +145,45 @@ def _headers(headers):
     out = {}
     for k, v in (headers or {}).items():
         low = k.lower()
-        out[k] = "•••" if low in SECRET_HEADERS or any(w in low for w in SECRET_WORDS) else str(v)
+        out[k] = "•••" if _secret(k) else str(v)
     return out
+
+
+def _secret(name):
+    low = str(name).lower()
+    flat = low.replace("_", "").replace("-", "").replace(" ", "")  # api_key, api-key, API Key alike
+    return low in SECRET_HEADERS or any(w.replace("-", "") in flat for w in SECRET_WORDS)
+
+
+def _url(url):
+    """?token=… and ?api_key=… hidden in the logged URL."""
+    from urllib.parse import urlsplit, urlunsplit, unquote
+    u = urlsplit(str(url))
+    if not u.query:
+        return str(url)
+    parts = []
+    for pair in u.query.split("&"):
+        k, eq, v = pair.partition("=")
+        parts.append(f"{k}=•••" if _secret(unquote(k)) else pair)
+    return urlunsplit(u._replace(query="&".join(parts)))
+
+
+def _secrets(text):
+    """A JSON body with password, token, secret… fields hidden."""
+    if not text.strip().startswith(("{", "[")):
+        return text
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text
+
+    def walk(v):
+        if isinstance(v, dict):
+            return {k: "•••" if _secret(k) and not isinstance(x, (dict, list)) else walk(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        return v
+    return json.dumps(walk(data), ensure_ascii=False, indent=2)
 
 
 def _body(body):
