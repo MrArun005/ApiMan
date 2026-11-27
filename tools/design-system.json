@@ -233,12 +233,24 @@
       "resolved"
     ],
     "Chart": [
-      "chart"
+      "chart",
+      "ring",
+      "large",
+      "track",
+      "arc"
     ],
     "Card": [
       "cards",
       "card",
       "card-head"
+    ],
+    "Stat": [
+      "stats",
+      "stat",
+      "stat-body",
+      "stat-label",
+      "stat-value",
+      "stat-sub"
     ]
   },
   "regions": [

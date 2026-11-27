@@ -63,8 +63,9 @@ Each row: the root class, its variants (modifiers), its parts, and the `ui.*` fu
 | 21 | **Progress** | `.bar` · tone | fill `div` | `ui.progress()` |
 | 22 | **DocumentTabs** | `.tabstrip` | `.rtab` (`.on`, `.clipped`), `.tname`, Dot, close = Button `.btn.icon.small.x`, `.newtab`, `.alltabs` | `renderTabs()` |
 | 23 | **RequestBar** | `.reqbar` (`data-method`) | method Select, `.url-wrap` (`#url`, `.url-hl`, `.v`), `.send` (`.busy`), `.resolved` | static markup |
-| 24 | **Chart** | `.chart` (bars, oldest to newest) · `.small` (a trend line inside a Card) | one `div` per bar, height = value, tone (`ok` `warn` `err` `muted`), the value in `title` | `ui.chart()` |
-| 25 | **Card** | `.card` in a `.cards` grid (as many columns as fit) | `.card-head` (title, Badge, a trailing Dot), then Text, Meta, Chart `.small`, an ActionRow | `ui.card()` |
+| 24 | **Chart** | `.chart` (bars, oldest to newest, on faint gridlines) · `.small` (a run trend inside a Card) · **Ring** `.ring` (a share as a circle: pass rate) · `.large` | one `div` per bar, height = value, tone (`ok` `warn` `err` `muted`) as a soft gradient, `.on` marks the latest, the value in `title`; Ring: `svg` with `.track` and `.arc` (tone), the share in `b` | `ui.chart()`, `ui.ring()` |
+| 25 | **Card** | `.card` in a `.cards` grid (as many columns as fit) · tone (`ok` `warn` `err`: a stripe on top, the last result) | `.card-head` (title, Badge, a trailing Ring or Dot), then Text, Meta, Chart `.small` with a Meta caption, an ActionRow; raised a little, more on hover | `ui.card()` |
+| 26 | **Stat** | `.stats` (a row of tiles, as many as fit) of `.stat` | `.stat-body` with `.stat-label` (small caps), `.stat-value` (a big number, tone) and `.stat-sub` (one line of context); an optional Ring before it | `ui.stat()`, `ui.stats()` |
 
 ### Buttons: which one
 
