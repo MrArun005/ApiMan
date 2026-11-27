@@ -670,21 +670,56 @@ dialog.drawer.docked { position: fixed; inset: 0 0 0 auto; margin: 0; z-index: 4
 
 /* ===================================================================================== 24 Chart */
 /* Bars from oldest to newest, height = value (set inline, like Progress), coloured by tone. */
-.chart { display: flex; align-items: flex-end; gap: calc(var(--s1) / 2); height: calc(var(--row-h) * 4); padding-bottom: var(--s1); border-bottom: 1px solid var(--line); margin-bottom: var(--s3); }
-.chart > div { flex: 1 1 0; max-width: calc(var(--s6) + var(--s1)); min-height: calc(var(--s1) / 2); border-radius: var(--r) var(--r) 0 0; background: var(--muted); }
-.chart > .ok { background: var(--ok); } .chart > .warn { background: var(--warn); } .chart > .err { background: var(--err); }
-.chart.small { height: calc(var(--row-h) + var(--s1)); margin-bottom: var(--s2); }
-.chart.small > div { border-radius: calc(var(--r) / 2) calc(var(--r) / 2) 0 0; }
+.chart {
+  --grid: calc(var(--row-h) / 1.5);
+  display: flex; align-items: flex-end; gap: calc(var(--s1) / 2); height: calc(var(--row-h) * 4); margin-bottom: var(--s3);
+  border-bottom: 1px solid var(--line-strong);
+  background: repeating-linear-gradient(to top, transparent 0 calc(var(--grid) - 1px), color-mix(in srgb, var(--line) 55%, transparent) calc(var(--grid) - 1px) var(--grid));
+}
+.chart > div { flex: 1 1 0; max-width: calc(var(--s6) + var(--s1)); min-height: calc(var(--s1) / 2); border-radius: var(--r) var(--r) 0 0;
+  background: linear-gradient(to top, var(--muted), color-mix(in srgb, var(--muted) 45%, var(--panel))); }
+.chart > .ok { background: linear-gradient(to top, var(--ok), color-mix(in srgb, var(--ok) 72%, var(--panel))); }
+.chart > .warn { background: linear-gradient(to top, var(--warn), color-mix(in srgb, var(--warn) 72%, var(--panel))); }
+.chart > .err { background: linear-gradient(to top, var(--err), color-mix(in srgb, var(--err) 72%, var(--panel))); }
+.chart > .on { outline: 2px solid color-mix(in srgb, var(--ink) 30%, transparent); outline-offset: 1px; } /* the latest */
+.chart.small { --grid: calc(var(--row-h) / 2); height: calc(var(--row-h) * 1.4); gap: calc(var(--s1) * .75); margin-bottom: var(--s1); }
+.chart.small > div { max-width: var(--s4); border-radius: calc(var(--r) / 1.5) calc(var(--r) / 1.5) 0 0; }
+/* Ring: a share as a circle (pass rate), the number in the middle */
+.ring { position: relative; display: inline-grid; place-items: center; flex: none; width: calc(var(--row-h) * 1.8); height: calc(var(--row-h) * 1.8); }
+.ring.large { width: calc(var(--row-h) * 2.3); height: calc(var(--row-h) * 2.3); }
+@media (max-width: 600px) { .stat .ring.large { width: calc(var(--row-h) * 1.6); height: calc(var(--row-h) * 1.6); } .stat { padding: var(--s3); } }
+.ring svg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+.ring circle { fill: none; stroke-width: 3.4; }
+.ring .track { stroke: color-mix(in srgb, var(--line) 80%, transparent); }
+.ring .arc { stroke: var(--muted); stroke-linecap: round; }
+.ring.ok .arc { stroke: var(--ok); } .ring.warn .arc { stroke: var(--warn); } .ring.err .arc { stroke: var(--err); }
+.ring b { position: relative; font-size: calc(var(--fs-xs) * .92); font-weight: 650; letter-spacing: -.02em; color: var(--ink); font-variant-numeric: tabular-nums; }
+.ring.large b { font-size: var(--fs-sm); }
 
 /* ===================================================================================== 25 Card */
 /* One thing at a glance (an Automation project): a head, a few facts, a trend, its actions. */
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: var(--s4); margin-bottom: var(--s6); }
-.card { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; padding: var(--s4); border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--panel); }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: var(--s4); margin-bottom: var(--s6); }
+.card { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; padding: var(--s4); border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--panel);
+  box-shadow: var(--shadow-sm); transition: box-shadow .15s ease; }
+.card:hover { box-shadow: var(--shadow); }
+.card.ok { border-top: 3px solid var(--ok); } .card.warn { border-top: 3px solid var(--warn); } .card.err { border-top: 3px solid var(--err); } /* the last result */
 .card-head { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
 .card-head strong { font-size: var(--fs-lg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card-head .dot { margin-left: auto; }
+.card-head .dot, .card-head .ring { margin-left: auto; }
+.card .chart.small + .meta { margin-top: calc(var(--s1) * -1); font-size: var(--fs-xs); }
 .card .actions { margin-top: auto; padding-top: var(--s1); }
 .meta + .cards { margin-top: var(--s3); }
+
+/* ===================================================================================== 26 Stat */
+/* The few numbers that matter, big, in a row of tiles (the Automation dashboard). */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(var(--s6) * 6)), 1fr)); gap: var(--s3); margin: var(--s2) 0 var(--s5); }
+.stat { display: flex; align-items: center; gap: var(--s3); min-width: 0; padding: var(--s3) var(--s4); border: 1px solid var(--line); border-radius: var(--r-lg);
+  background: linear-gradient(180deg, var(--panel), color-mix(in srgb, var(--hover) 60%, var(--panel))); box-shadow: var(--shadow-sm); }
+.stat-body { min-width: 0; display: flex; flex-direction: column; gap: calc(var(--s1) / 2); }
+.stat-label { font-size: var(--fs-xs); font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.stat-value { font-size: var(--fs-xl); font-weight: 650; line-height: 1.05; color: var(--ink); font-variant-numeric: tabular-nums; }
+.stat-value.ok { color: var(--ok); } .stat-value.warn { color: var(--warn); } .stat-value.err { color: var(--err); }
+.stat-sub { font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ===================================================================================== regions (layout only) */
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; padding: 0; margin: 0; }

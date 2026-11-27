@@ -192,15 +192,30 @@ const ui = {
   },
   progress(tone = '') { return h('div', { class: cx('bar', toneOf(tone)) }, h('div', { style: 'width:0%' })); },
   /** Card: one thing at a glance. head: [title, badge?, dot?]; then the body nodes; actions (buttons) last. */
-  card({ title, badge = null, dot = null, body = [], actions = [], ...attrs }) {
-    return h('section', { class: 'card', ...attrs }, h('div', { class: 'card-head' }, h('strong', { title }, title), badge, dot), ...body,
+  /** Card: tone = the last result (a stripe on top); ring or dot trails the head. */
+  card({ title, badge = null, dot = null, ring = null, tone = '', body = [], actions = [], ...attrs }) {
+    return h('section', { class: cx('card', toneOf(tone)), ...attrs }, h('div', { class: 'card-head' }, h('strong', { title }, title), badge, dot || ring), ...body,
       actions.length ? ui.actions(...actions) : null);
   },
-  /** Chart: bars oldest to newest. bars: [{ value 0..1, tone, title }]. small: a trend line inside a Card. */
+  /** Chart: bars oldest to newest. bars: [{ value 0..1, tone, title, on }] (on: the latest). small: a run trend inside a Card. */
   chart(bars, { label = '', small = false } = {}) {
     return h('div', { class: cx('chart', small && 'small'), role: 'img', 'aria-label': label || null },
-      ...bars.map((b) => h('div', { class: toneOf(b.tone) || null, style: `height:${Math.max(0, Math.min(1, b.value)) * 100}%`, title: b.title || null })));
+      ...bars.map((b) => h('div', { class: cx(toneOf(b.tone), b.on && 'on') || null, style: `height:${Math.max(0, Math.min(1, b.value)) * 100}%`, title: b.title || null })));
   },
+  /** Ring: a share (0..1) as a circle, e.g. a pass rate; the percentage in the middle (text: false leaves it out). */
+  ring(share, { tone = '', label = '', large = false, text = true } = {}) {
+    const f = Math.max(0, Math.min(1, Number(share) || 0)), c = 2 * Math.PI * 15.5;
+    const el = h('span', { class: cx('ring', toneOf(tone), large && 'large'), role: 'img', 'aria-label': label || `${Math.round(f * 100)}%`, title: label || null });
+    el.innerHTML = `<svg viewBox="0 0 36 36" aria-hidden="true"><circle class="track" cx="18" cy="18" r="15.5"/><circle class="arc" cx="18" cy="18" r="15.5" stroke-dasharray="${(f * c).toFixed(2)} ${c.toFixed(2)}"/></svg>`;
+    if (text) el.append(h('b', null, `${Math.round(f * 100)}%`));
+    return el;
+  },
+  /** Stat: a tile with a small-caps label, a big value (tone) and one line of context; ring before it. */
+  stat({ label, value, sub = '', tone = '', ring = null }) {
+    return h('div', { class: 'stat' }, ring, h('div', { class: 'stat-body' }, h('span', { class: 'stat-label' }, label),
+      h('span', { class: cx('stat-value', toneOf(tone)) }, String(value)), sub ? h('span', { class: 'stat-sub', title: sub }, sub) : null));
+  },
+  stats(...tiles) { return h('div', { class: 'stats' }, ...tiles.flat().filter(Boolean)); },
 };
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID()
@@ -6947,25 +6962,35 @@ async function openAutomation() {
       const id = saved.envs[r.id] ?? bestEnv([...(r.keys || []), ...(pr ? collectionVars(pr.cid) : [])], { hosts: pr ? collectionHosts(pr.cid) : null });
       return id && !id.startsWith('file:') ? state.envs[id] : null;
     };
+    const runDur = (x) => (x.ended && x.started ? Math.max(0, Math.round((x.ended - x.started) * 1000)) : 0);
     const card = (r) => {
       const last = r.runs.find((x) => x.status !== 'running');
       const running = r.runs.find((x) => x.status === 'running');
       const env = envFor(r);
       const urls = envUrls(env);
       const runs = r.runs.filter((x) => x.status !== 'running').slice(0, 20).reverse();
+      const passedN = runs.filter((x) => x.status === 'passed').length;
+      const share = runs.length ? passedN / runs.length : 0;
+      const maxDur = Math.max(1, ...runs.map(runDur));
+      const avgDur = runs.length ? Math.round(runs.reduce((a, x) => a + runDur(x), 0) / runs.length) : 0;
       return ui.card({
         title: r.name,
+        tone: running ? 'warn' : last ? runTone(last.status) : '',
         badge: ui.pill(r.linked ? 'Linked' : 'Data folder', 'muted'),
-        dot: running ? ui.dot({ tone: 'warn', label: 'Running now' }) : last ? ui.dot({ tone: last.status === 'passed' ? 'ok' : last.status === 'stopped' ? 'muted' : 'err', label: `Last run ${last.status}` }) : null,
+        dot: running ? ui.dot({ tone: 'warn', label: 'Running now' }) : null,
+        ring: !running && runs.length ? ui.ring(share, { tone: share === 1 ? 'ok' : share >= 0.7 ? 'warn' : 'err', label: `${passedN} of ${runs.length} recent runs passed` }) : null,
         body: [
-          r.linked ? ui.path(r.path) : null,
           r.error ? ui.note(r.error, 'err') : ui.meta([
-            h('span', null, ui.value(String(r.tests || 0)), ` tests in ${r.suites || 0} suites`),
+            h('span', null, ui.value(String(r.tests || 0)), ` test${(r.tests || 0) === 1 ? '' : 's'} in ${r.suites || 0} suite${(r.suites || 0) === 1 ? '' : 's'}`),
             r.tags && r.tags.length ? h('span', null, r.tags.slice(0, 4).join(', ')) : null,
           ].filter(Boolean)),
           last ? ui.meta([h('span', null, ui.pill(last.status === 'passed' ? 'Passed' : last.status === 'stopped' ? 'Stopped' : last.failed ? `${last.failed} failed` : 'Error', runTone(last.status))),
-            h('span', null, fmtWhen(last.started)), h('span', null, `${last.passed || 0} passed`), last.env ? h('span', null, last.env) : null].filter(Boolean)) : ui.hint('Not run yet.'),
-          runs.length > 1 ? ui.chart(runs.map((x) => { const n = (x.passed || 0) + (x.failed || 0); return { value: n ? (x.passed || 0) / n : 0.05, tone: runTone(x.status), title: `${fmtWhen(x.started)}: ${x.passed || 0} passed, ${x.failed || 0} failed` }; }), { small: true, label: 'Recent runs' }) : null,
+            h('span', null, fmtWhen(last.started)), h('span', null, ui.value(String(last.passed || 0)), ' passed'), runDur(last) ? h('span', null, 'in ', ui.value(fmtMs(runDur(last)))) : null].filter(Boolean)) : ui.hint('Not run yet.'),
+          // each bar a run: its height how long it took, its colour how it ended (so a flat green run of passes still tells you something)
+          runs.length > 1 ? ui.chart(runs.map((x, i) => ({ value: Math.max(0.16, Math.sqrt(runDur(x) / maxDur)), /* square root: one slow run doesn't flatten the rest */ tone: runTone(x.status), on: i === runs.length - 1,
+            title: `${fmtWhen(x.started)}: ${x.status}, ${x.passed || 0} passed, ${x.failed || 0} failed, ${fmtMs(runDur(x))}` })), { small: true, label: `Last ${runs.length} runs: duration and result` }) : null,
+          runs.length > 1 ? ui.meta([h('span', null, `Last ${runs.length} runs`), h('span', null, 'avg ', ui.value(fmtMs(avgDur))), h('span', null, ui.value(String(passedN), share === 1 ? 'ok' : 'warn'), ` of ${runs.length} passed`)]) : null,
+          r.linked ? ui.path(r.path) : null,
           env ? ui.meta([h('span', null, 'Environment ', ui.value(env.name)), ...urls.slice(0, 2).map((u) => {
             const c = up.get(u.url);
             return h('span', { title: u.url }, ui.dot({ tone: c && c.up ? 'ok' : 'err', label: c && c.up ? 'Answering' : 'Not answering' }), ` ${u.key} ${c && c.up ? 'up' : 'down'}`);
@@ -6993,14 +7018,20 @@ async function openAutomation() {
         ui.button({ label: 'Import a zip…', variant: 'ghost', size: 'small', onClick: () => zipIn.click() }),
         ui.button({ label: 'Refresh', variant: 'ghost', size: 'small', onClick: () => renderDashboard().catch((e) => toast(e.message, 'err')) })]),
       linkForm, zipIn,
-      rows.length ? ui.meta([
-        h('span', null, ui.value(String(rows.length)), rows.length === 1 ? ' project' : ' projects'),
-        h('span', null, ui.value(String(tests)), ' tests'),
-        h('span', null, ui.value(String(allRuns.length)), ' runs'),
-        h('span', null, 'Runs passing ', ui.value(allRuns.length ? `${Math.round((passedRuns / allRuns.length) * 100)}%` : '–', !allRuns.length ? 'muted' : passedRuns === allRuns.length ? 'ok' : 'warn')),
-        h('span', null, ui.value(String(lastRuns.filter((x) => x.status === 'passed').length)), ` of ${lastRuns.length} projects green on their last run`),
-        h('span', null, ui.value(String(appRows.length)), ' apps running'),
-      ]) : null,
+      rows.length ? (() => {
+        const rate = allRuns.length ? passedRuns / allRuns.length : 0;
+        const rateTone = !allRuns.length ? 'muted' : rate === 1 ? 'ok' : rate >= 0.7 ? 'warn' : 'err';
+        const green = lastRuns.filter((x) => x.status === 'passed').length;
+        const linked = rows.filter((r) => r.linked).length;
+        const suites = rows.reduce((a, r) => a + (r.suites || 0), 0);
+        return ui.stats(
+          ui.stat({ label: 'Projects', value: rows.length, sub: linked ? `${rows.length - linked} in the data folder, ${linked} linked` : 'in the data folder' }),
+          ui.stat({ label: 'Tests', value: tests, sub: `in ${suites} suite${suites === 1 ? '' : 's'}` }),
+          ui.stat({ label: 'Pass rate', value: allRuns.length ? `${Math.round(rate * 100)}%` : '–', tone: rateTone, sub: `${passedRuns} of ${allRuns.length} runs passed`,
+            ring: allRuns.length ? ui.ring(rate, { tone: rateTone, large: true, text: false, label: 'Runs passing' }) : null }),
+          ui.stat({ label: 'Green now', value: `${green}/${lastRuns.length}`, tone: lastRuns.length && green === lastRuns.length ? 'ok' : lastRuns.length ? 'warn' : '', sub: 'projects passing on their last run' }),
+          ui.stat({ label: 'Apps running', value: appRows.length, sub: 'answering on development ports' }));
+      })() : null,
       rows.length ? h('div', { class: 'cards' }, ...rows.map(card)) : ui.emptyPane({
         icon: 'folder', title: 'No Robot Framework project yet',
         text: 'Link a project folder from anywhere on this computer, import a zip, or put a project in your data folder. ApiMan finds its suites, tests, tags, test data and the environment keys it needs.',
