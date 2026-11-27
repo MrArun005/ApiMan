@@ -2062,6 +2062,15 @@ def open_window(url, server, data):
     return True
 
 
+def instance_port(data):
+    """The port the ApiMan using this data folder said it runs on (its instance file), or None."""
+    try:
+        port = int((Path(data) / ".apiman" / "instance").read_text("utf-8").split("\n")[1])
+        return port if 0 < port < 65536 else None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def instance_proof(token, nonce):
     return hmac.new(token.encode(), b"apiman-instance:" + nonce.encode(), "sha256").hexdigest()
 
@@ -2071,7 +2080,7 @@ def is_our_server(url, data):
     <data>/.apiman/instance (owner-only) by signing a fresh random challenge; the secret itself is never sent, so
     anything squatting on the port learns nothing and gets no window."""
     try:
-        token = (Path(data) / ".apiman" / "instance").read_text("utf-8").strip()
+        token = (Path(data) / ".apiman" / "instance").read_text("utf-8").split("\n")[0].strip()
         nonce = secrets.token_hex(16)
         got = json.loads(urllib.request.urlopen(f"{url}/api/instance?nonce={nonce}", timeout=3).read(4096)).get("proof", "")
         return bool(token) and hmac.compare_digest(str(got), instance_proof(token, nonce))
@@ -2481,21 +2490,28 @@ def main():
     global SERVER_PORT
     SERVER_PORT = args.port
     Handler.stores = make_stores(args.data)
-    try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)  # localhost only, never the LAN
-    except OSError:
-        url = f"http://127.0.0.1:{SERVER_PORT}"
-        running = args.window and is_our_server(url, Handler.stores["collections"].root)  # desktop app opened twice
-        if not running:
-            raise
-        if not open_window(url, None, Handler.stores["collections"].root):
-            webbrowser.open(url)
-        return
+    root = Handler.stores["collections"].root
+    if args.window:  # desktop app opened twice: show the running copy (on whatever port it found) instead of a second one
+        running = instance_port(root)
+        if running and is_our_server(f"http://127.0.0.1:{running}", root):
+            if not open_window(f"http://127.0.0.1:{running}", None, root):
+                webbrowser.open(f"http://127.0.0.1:{running}")
+            return
+    server = None
+    # the desktop app takes the next free port when another program (an ApiMan started from a terminal) has this one
+    for port in range(args.port, args.port + (20 if args.window else 1)):
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", port), Handler)  # localhost only, never the LAN
+            break
+        except OSError:
+            if not args.window or port == args.port + 19:
+                raise
+    SERVER_PORT = server.server_address[1]
     url = f"http://127.0.0.1:{SERVER_PORT}"
     instance = private_dir(Handler.stores["collections"].root) / "instance"  # proves to a second launch that this is us
     fd, tmp = tempfile.mkstemp(dir=instance.parent)  # a new owner-only file, renamed over the old: never follows a link
     with os.fdopen(fd, "w") as f:
-        f.write(INSTANCE_SECRET)
+        f.write(f"{INSTANCE_SECRET}\n{SERVER_PORT}")
     os.replace(tmp, instance)
     print(f"ApiMan running at {url}\nData folder: {Handler.stores['collections'].root}\nCtrl+C to stop.")
     if not args.no_browser and not (args.window and open_window(url, server, Handler.stores["collections"].root)):

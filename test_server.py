@@ -485,6 +485,11 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(len(seen), 1)                                             # it was asked once...
         self.assertFalse(any(server.INSTANCE_SECRET in x or server.SESSION_TOKEN in x for x in seen))  # it learned nothing
         self.assertEqual(self.call("GET", "/api/instance?nonce=nothex")[0], 400)
+        inst.write_text(f"{server.INSTANCE_SECRET}\n{self.app.server_address[1]}", "utf-8")  # the port it found is recorded too
+        self.assertEqual(server.instance_port(data), self.app.server_address[1])
+        self.assertTrue(server.is_our_server(f"http://127.0.0.1:{server.instance_port(data)}", data))
+        inst.write_text(server.INSTANCE_SECRET, "utf-8")
+        self.assertIsNone(server.instance_port(data))                             # an older file: no port, no guess
         inst.unlink()
 
     def test_review_fixes_stop_twice_shutdown_and_leaks(self):
