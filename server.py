@@ -64,6 +64,7 @@ CA_FILE = None  # extra trusted CA bundle (PEM), set by --ca-file
 # so other websites in your browser and requests ApiMan itself proxies can't use the API. (Local programs
 # running as you can read the page, but they can already read your collection files directly.)
 SESSION_TOKEN = secrets.token_urlsafe(32)
+INSTANCE_SECRET = secrets.token_urlsafe(32)  # in <data>/.apiman/instance: lets a second launch recognise this copy
 SERVER_PORT = None  # set in main(); the proxy refuses to call ApiMan itself
 RUN_JOB = None      # `server.py run`: what the headless page should run
 RUN_EVENTS = None   # ...and the queue its results come back on
@@ -411,7 +412,7 @@ def private_dir(root):
     d = Path(root) / ".apiman"
     if not d.is_dir():
         d.mkdir(mode=0o700, exist_ok=True)
-        os.chmod(d, 0o700)  # mkdir's mode is masked by the umask
+    os.chmod(d, 0o700)  # every time: mkdir's mode is masked by the umask, and a loosened folder is tightened again
     ignore = d / ".gitignore"
     if not ignore.exists():
         ignore.write_text("# ApiMan's private, local-only state\n*\n", "utf-8")
@@ -1521,6 +1522,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return self.reply(403, {"error": "Forbidden"})
         path = urllib.parse.urlparse(self.path).path
+        if method == "GET" and path == "/api/instance":  # a second launch asking "is this ApiMan?": answers a challenge, reveals nothing
+            nonce = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("nonce", [""])[0]
+            if not re.fullmatch(r"[0-9a-f]{32}", nonce):
+                return self.reply(400, {"error": "Bad nonce"})
+            return self.reply(200, {"proof": instance_proof(INSTANCE_SECRET, nonce)})
         if path.startswith("/api/") and not hmac.compare_digest(self.headers.get(TOKEN_HEADER, ""), SESSION_TOKEN):
             return self.reply(403, {"error": "Forbidden"})
         try:
@@ -1727,14 +1733,19 @@ def open_window(url, server, data):
     return True
 
 
+def instance_proof(token, nonce):
+    return hmac.new(token.encode(), b"apiman-instance:" + nonce.encode(), "sha256").hexdigest()
+
+
 def is_our_server(url, data):
-    """Whether ApiMan with this data folder is what answers at url: it must accept the session token it wrote to
-    <data>/.apiman/instance (owner-only). Anything else squatting on the port gets no window and no data."""
+    """Whether ApiMan with this data folder is what answers at url. It must prove it knows the secret in
+    <data>/.apiman/instance (owner-only) by signing a fresh random challenge; the secret itself is never sent, so
+    anything squatting on the port learns nothing and gets no window."""
     try:
         token = (Path(data) / ".apiman" / "instance").read_text("utf-8").strip()
-        req = urllib.request.Request(f"{url}/api/info", headers={TOKEN_HEADER: token})
-        info = json.loads(urllib.request.urlopen(req, timeout=3).read(65536))
-        return Path(info.get("dataDir", "")).resolve() == Path(data).resolve()
+        nonce = secrets.token_hex(16)
+        got = json.loads(urllib.request.urlopen(f"{url}/api/instance?nonce={nonce}", timeout=3).read(4096)).get("proof", "")
+        return bool(token) and hmac.compare_digest(str(got), instance_proof(token, nonce))
     except (OSError, ValueError, AttributeError):
         return False
 
@@ -1962,9 +1973,10 @@ def main():
         return
     url = f"http://127.0.0.1:{SERVER_PORT}"
     instance = private_dir(Handler.stores["collections"].root) / "instance"  # proves to a second launch that this is us
-    fd = os.open(instance, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd, tmp = tempfile.mkstemp(dir=instance.parent)  # a new owner-only file, renamed over the old: never follows a link
     with os.fdopen(fd, "w") as f:
-        f.write(SESSION_TOKEN)
+        f.write(INSTANCE_SECRET)
+    os.replace(tmp, instance)
     print(f"ApiMan running at {url}\nData folder: {Handler.stores['collections'].root}\nCtrl+C to stop.")
     if not args.no_browser and not (args.window and open_window(url, server, Handler.stores["collections"].root)):
         webbrowser.open(url)
@@ -1972,6 +1984,8 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        instance.unlink(missing_ok=True)  # stopped: nothing left to recognise
 
 
 if __name__ == "__main__":

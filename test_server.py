@@ -451,15 +451,24 @@ class ServerTest(unittest.TestCase):
     def test_second_launch_trusts_only_our_own_server(self):
         data = self.tmp.name
         inst = server.private_dir(data) / "instance"
-        inst.write_text(server.SESSION_TOKEN, "utf-8")
-        self.assertTrue(server.is_our_server(self.base, data))                     # ours: knows the token we wrote
-        self.assertFalse(server.is_our_server(self.base, tempfile.mkdtemp()))      # another data folder: no token file
+        inst.write_text(server.INSTANCE_SECRET, "utf-8")
+        self.assertTrue(server.is_our_server(self.base, data))                     # ours: signs the challenge with our secret
+        self.assertFalse(server.is_our_server(self.base, tempfile.mkdtemp()))      # another data folder: no secret file
         inst.write_text("someone-else", "utf-8")
-        self.assertFalse(server.is_our_server(self.base, data))                    # a squatter can't answer with our token
+        self.assertFalse(server.is_our_server(self.base, data))                    # a different ApiMan: wrong proof
+        inst.write_text(server.INSTANCE_SECRET, "utf-8")
         squat = start(Echo)                                                        # anything else on the port
-        inst.write_text(server.SESSION_TOKEN, "utf-8")
-        self.assertFalse(server.is_our_server(f"http://127.0.0.1:{squat.server_address[1]}", data))
-        squat.shutdown()
+        seen = []
+        orig = Echo.do_GET
+        Echo.do_GET = lambda h: (seen.append(h.path + str(dict(h.headers))), orig(h))[1]
+        try:
+            self.assertFalse(server.is_our_server(f"http://127.0.0.1:{squat.server_address[1]}", data))
+        finally:
+            Echo.do_GET = orig
+            squat.shutdown()
+        self.assertEqual(len(seen), 1)                                             # it was asked once...
+        self.assertFalse(any(server.INSTANCE_SECRET in x or server.SESSION_TOKEN in x for x in seen))  # it learned nothing
+        self.assertEqual(self.call("GET", "/api/instance?nonce=nothex")[0], 400)
         inst.unlink()
 
     def test_masking_covers_userinfo_and_form_bodies(self):
@@ -702,7 +711,7 @@ class NestedFoldersTest(unittest.TestCase):
         self.assertEqual(json.loads(p.read_text())["info"]["name"], "Orders (renamed)")
         if os.name != "nt":  # Windows has no Unix file modes
             self.assertEqual(p.stat().st_mode & 0o777, 0o640)
-        self.assertEqual(sorted(str(x.relative_to(self.root)) for x in self.root.rglob("*") if x.is_file()),
+        self.assertEqual(sorted(x.relative_to(self.root).as_posix() for x in self.root.rglob("*") if x.is_file()),
                          ["payments/v2/Orders.postman_collection.json"])
         self.assertEqual(self.call("PUT", f"/api/collections/{cid}", self.coll("stale"), headers={"If-Match": version})[0], 409)
         self.assertEqual(self.call("DELETE", f"/api/collections/{cid}", headers={"If-Match": version})[0], 409)
