@@ -1857,6 +1857,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, {"ok": True})
             if method == "POST" and path == "/api/send":
                 return self.reply(200, send(self.read_json(), self.stores["collections"].root))
+            if method == "GET" and path == "/api/changes":
+                return self.reply(200, {"sig": data_signature(self.stores["collections"].root)})
+            if method == "POST" and path == "/api/data-folder":
+                return self.reply(200, switch_data_folder(self.read_json()))
             if path == "/api/cookies":
                 root = self.stores["collections"].root
                 q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -2060,6 +2064,89 @@ def open_window(url, server, data):
     if server:  # same profile as a running copy: Chrome hands the window to it and this process ends at once
         threading.Thread(target=lambda: (proc.wait(), server.shutdown()), daemon=True).start()
     return True
+
+
+DESKTOP_CONFIG = Path.home() / ".apiman-desktop.json"  # the desktop app's chosen data folder
+WATCH_EXTS = (".json", ".robot", ".resource", ".csv", ".tsv", ".yaml", ".yml", ".py", ".txt", ".xlsx")
+INSTANCE_FILE = None  # this server's instance file, removed when it stops
+
+
+def data_signature(root):
+    """A fingerprint of the files ApiMan reads from the data folder (collections, environments, Robot projects, test
+    data) and the project folders linked to it: it changes when any of them is added, edited or deleted, so open
+    pages reload what changed. Hidden folders, virtualenvs and outputs are skipped; at most 20,000 files are read."""
+    h, n = hashlib.sha1(), 0
+    tops = [Path(root)] + [Path(p) for p in robot_links(root).values() if Path(p).is_dir()]
+    for top in tops:
+        for dirpath, dirs, files in os.walk(top):
+            dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d.lower() not in ROBOT_SKIP_DIRS)
+            for f in sorted(files):
+                if f.startswith(".") or not f.lower().endswith(WATCH_EXTS):
+                    continue
+                try:
+                    st = os.stat(os.path.join(dirpath, f))
+                except OSError:
+                    continue
+                h.update(f"{dirpath}/{f}:{st.st_mtime_ns}:{st.st_size}\n".encode("utf-8", "replace"))
+                n += 1
+                if n >= 20000:
+                    return h.hexdigest()
+    return h.hexdigest()
+
+
+def write_instance(root):
+    """<data>/.apiman/instance: this copy's secret and port, so a second launch finds and trusts it."""
+    global INSTANCE_FILE
+    instance = private_dir(root) / "instance"
+    fd, tmp = tempfile.mkstemp(dir=instance.parent)  # a new owner-only file, renamed over the old: never follows a link
+    with os.fdopen(fd, "w") as f:
+        f.write(f"{INSTANCE_SECRET}\n{SERVER_PORT}")
+    os.replace(tmp, instance)
+    INSTANCE_FILE = instance
+
+
+def drop_instance():
+    """Stopping or leaving a folder: remove our instance file (only if it's still ours)."""
+    try:
+        if INSTANCE_FILE and INSTANCE_FILE.read_text("utf-8").split("\n")[0].strip() == INSTANCE_SECRET:
+            INSTANCE_FILE.unlink()
+    except OSError:
+        pass
+
+
+def switch_data_folder(body):
+    """Use another folder as the data folder (any folder you pick: its collections, environments and Robot projects,
+    in subfolders too). The desktop app remembers it for the next launch."""
+    path = str((body or {}).get("path") or "").strip() if isinstance(body, dict) else ""
+    if not path:
+        raise ValueError("Choose a folder.")
+    p = Path(path).expanduser()
+    if not p.is_dir():
+        raise ValueError(f"That folder doesn't exist: {p}")
+    p = p.resolve()
+    with RUNS_LOCK:
+        if run_going():
+            raise RunBusy("A run is going: wait for it or stop it before switching folders.")
+    drop_instance()
+    Handler.stores = make_stores(p)
+    write_instance(p)
+    if FROZEN:
+        fd, tmp = tempfile.mkstemp(dir=DESKTOP_CONFIG.parent, prefix=".apiman-desktop-")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"dataDir": str(p)}, f)
+        os.replace(tmp, DESKTOP_CONFIG)
+    return {"dataDir": str(p)}
+
+
+def desktop_data_dir():
+    """The desktop app's data folder: the one you chose (Settings → Data folder), else ~/ApiMan."""
+    try:
+        chosen = Path(json.loads(DESKTOP_CONFIG.read_text("utf-8"))["dataDir"])
+        if chosen.is_dir():
+            return chosen
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return DEFAULT_DATA
 
 
 def instance_port(data):
@@ -2472,8 +2559,9 @@ def main():
         sys.exit(run_main(sys.argv[2:]))
     ap = argparse.ArgumentParser(description="ApiMan local server (or: server.py run COLLECTION.json --help)")
     ap.add_argument("--port", type=int, default=5577)
-    ap.add_argument("--data", default=str(DEFAULT_DATA),
-                    help="folder holding collection .json files (environments go in its environments/ subfolder)")
+    ap.add_argument("--data", default=None,
+                    help=f"data folder: collections, environments and Robot projects, in subfolders too (default: {DEFAULT_DATA}; "
+                         "the desktop app uses the one chosen in Settings)")
     ap.add_argument("--ca-file", help="PEM file with your company's root CA, for internal HTTPS APIs")
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--window", action=argparse.BooleanOptionalAction, default=FROZEN,
@@ -2489,7 +2577,7 @@ def main():
 
     global SERVER_PORT
     SERVER_PORT = args.port
-    Handler.stores = make_stores(args.data)
+    Handler.stores = make_stores(args.data or (desktop_data_dir() if FROZEN else DEFAULT_DATA))
     root = Handler.stores["collections"].root
     if args.window:  # desktop app opened twice: show the running copy (on whatever port it found) instead of a second one
         running = instance_port(root)
@@ -2512,11 +2600,7 @@ def main():
                 raise
     SERVER_PORT = server.server_address[1]
     url = f"http://127.0.0.1:{SERVER_PORT}"
-    instance = private_dir(Handler.stores["collections"].root) / "instance"  # proves to a second launch that this is us
-    fd, tmp = tempfile.mkstemp(dir=instance.parent)  # a new owner-only file, renamed over the old: never follows a link
-    with os.fdopen(fd, "w") as f:
-        f.write(f"{INSTANCE_SECRET}\n{SERVER_PORT}")
-    os.replace(tmp, instance)
+    write_instance(Handler.stores["collections"].root)  # proves to a second launch that this is us
     print(f"ApiMan running at {url}\nData folder: {Handler.stores['collections'].root}\nCtrl+C to stop.")
     native = None
     if args.window and not args.no_browser:
@@ -2534,7 +2618,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        instance.unlink(missing_ok=True)  # stopped: nothing left to recognise
+        drop_instance()  # stopped: nothing left to recognise
         stop_all_runs()
 
 

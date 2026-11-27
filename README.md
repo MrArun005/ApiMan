@@ -24,7 +24,9 @@ You only need Python 3. There's nothing to install.
 
 ## Desktop app
 
-Download **ApiMan-macOS.zip** or **ApiMan-Windows.zip** from the latest [release](../../releases), or from the artifacts of the newest *Desktop app* run under Actions. Unzip it and open ApiMan. It needs no Python and no browser: it is a standalone app with its own native window (like Postman) and quits when you close that window. Your data lives in `~/ApiMan`. Automation opens as a second window.
+Download **ApiMan-macOS.zip** or **ApiMan-Windows.zip** from the latest [release](../../releases), or from the artifacts of the newest *Desktop app* run under Actions. Unzip it and open ApiMan. It needs no Python and no browser: it is a standalone app with its own native window (like Postman) and quits when you close that window. Your data lives in `~/ApiMan` until you pick your own folder: **Settings → Requests → Data folder → Change…** takes any folder (one parent folder with your collections, environments and Robot projects, in subfolders too), and the app remembers it. Automation opens as a second window.
+
+**The data folder updates ApiMan by itself.** Add, edit or delete files in it (a `git pull`, an editor, a synced team folder, a new Robot project) and within a few seconds ApiMan shows the change: collections, environments, request tabs you haven't edited, and the Automation dashboard. Tabs with unsaved edits are kept as they are.
 
 The builds aren't signed yet, so the first time, macOS needs right-click → **Open**, and Windows needs **More info → Run anyway**. To run Robot projects, Robot Framework must be installed on that computer: use the project's own `.venv`, a `.venv-robot` in `~/ApiMan`, or `python3`.
 

@@ -516,6 +516,29 @@ class ServerTest(unittest.TestCase):
         self.assertNotIn("abc", rl._mask_text("ConnectionError: url: /a?token=abc&page=2"))
         self.assertEqual(server.robot_http_calls("*** Test Cases ***\nT\n    GET    https://u:pw@h.io/a\n"), [("GET", "/a", "h.io")])
 
+    def test_data_folder_fingerprint_and_switch(self):
+        a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
+        sig = server.data_signature(a)
+        self.assertEqual(server.data_signature(a), sig)                            # nothing changed: same
+        Path(a, "team", "orders.json").parent.mkdir()
+        Path(a, "team", "orders.json").write_text('{"info": {"name": "Orders"}, "item": []}')
+        sig2 = server.data_signature(a)
+        self.assertNotEqual(sig2, sig)                                            # a collection in a subfolder
+        Path(a, ".apiman").mkdir(exist_ok=True); Path(a, ".apiman", "state.json").write_text("{}")
+        Path(a, "results").mkdir(); Path(a, "results", "output.json").write_text("{}")
+        self.assertEqual(server.data_signature(a), sig2)                          # ApiMan's own files and outputs: not news
+        Path(a, "suite.robot").write_text("*** Test Cases ***\nT\n    Log    x\n")
+        self.assertNotEqual(server.data_signature(a), sig2)                       # a Robot test edited
+        before = server.Handler.stores
+        try:
+            with self.assertRaises(ValueError):
+                server.switch_data_folder({"path": os.path.join(b, "missing")})
+            self.assertEqual(server.switch_data_folder({"path": b})["dataDir"], str(Path(b).resolve()))
+            self.assertEqual(server.Handler.stores["collections"].root, Path(b).resolve())
+            self.assertEqual(server.instance_port(b), server.SERVER_PORT)        # a second launch finds us there
+        finally:
+            server.Handler.stores = before
+
     def test_masking_covers_userinfo_and_form_bodies(self):
         self.assertEqual(server.mask_url("https://bob:pw@h.io/x?token=t&a=1"), "https://•••@h.io/x?token=•••&a=1")
         self.assertEqual(server.mask_url("http://h/x"), "http://h/x")
