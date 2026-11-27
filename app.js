@@ -2137,7 +2137,9 @@ async function oauthAuthorize(c) {
   for (const [k, v] of Object.entries(pending)) if (Date.now() - v > 15 * 60_000) delete pending[k];
   pending[st] = Date.now();
   ls.set('apiman:oauthPending', pending);
-  const popup = window.open(url.toString(), 'apiman-oauth', 'popup,width=520,height=700');
+  const shell = window.pywebview && window.pywebview.api; // the desktop app opens a native sign-in window
+  localStorage.removeItem('apiman:oauthResult');
+  const popup = shell && shell.open_auth ? await shell.open_auth(url.toString()) : window.open(url.toString(), 'apiman-oauth', 'popup,width=520,height=700');
   if (!popup) throw new Error('The sign-in window was blocked. Allow pop-ups for ApiMan and try again.');
   try {
     const msg = await new Promise((resolveMsg, reject) => {
@@ -2145,11 +2147,13 @@ async function oauthAuthorize(c) {
       const done = (m) => { if (!m || m.state !== st) return; cleanup(); resolveMsg(m); };
       const onWin = (e) => { if (e.origin === location.origin && e.data && e.data.apimanOAuth) done(e.data.apimanOAuth); };
       const cleanup = () => {
-        window.removeEventListener('message', onWin); if (bc) bc.close(); clearTimeout(timer);
+        window.removeEventListener('message', onWin); if (bc) bc.close(); clearTimeout(timer); clearInterval(poll);
         if ($('#dlg').dataset.oauth === st) { delete $('#dlg').dataset.oauth; if ($('#dlg').open) closeDialog(); }
       };
       try { bc = new BroadcastChannel('apiman-oauth'); bc.onmessage = (e) => done(e.data); } catch { /* opener message only */ }
       window.addEventListener('message', onWin);
+      // native windows have no opener, and may not share BroadcastChannel: the callback page also leaves it in storage
+      const poll = setInterval(() => { const m = ls.get('apiman:oauthResult', null); if (m && m.state === st) { localStorage.removeItem('apiman:oauthResult'); done(m); } }, 400);
       const timer = setTimeout(() => { cleanup(); reject(new Error('Sign-in timed out after 10 minutes.')); }, 10 * 60_000);
       if ($('#dlg').open) { toast(`Finish signing in to ${url.host} in the window that opened.`, 'muted'); return; } // never replace a dialog with unsaved edits
       openDialog({
@@ -6468,6 +6472,8 @@ const appKey = (u) => { try { const x = new URL(u); const host = ['127.0.0.1', '
  *  (never reloaded: a collection run going there runs in that page). */
 function showAutomation() {
   if (automationWin.only) return; // this is that window
+  const shell = window.pywebview && window.pywebview.api; // the desktop app: a native window, not a pop-up
+  if (shell && shell.open_window) { shell.open_window(`${location.pathname}${location.search}#automation`, 'Automation · ApiMan'); return; }
   const win = window.open('', 'apiman-automation');
   if (win) {
     try { if (win.location.href === 'about:blank') win.location.href = `${location.pathname}${location.search}#automation`; } catch { /* not ours to read */ }

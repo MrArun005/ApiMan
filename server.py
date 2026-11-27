@@ -2494,8 +2494,12 @@ def main():
     if args.window:  # desktop app opened twice: show the running copy (on whatever port it found) instead of a second one
         running = instance_port(root)
         if running and is_our_server(f"http://127.0.0.1:{running}", root):
-            if not open_window(f"http://127.0.0.1:{running}", None, root):
-                webbrowser.open(f"http://127.0.0.1:{running}")
+            try:  # the desktop build: a native window on the running copy
+                import desktop
+                desktop.run(f"http://127.0.0.1:{running}", None, root)
+            except ImportError:
+                if not open_window(f"http://127.0.0.1:{running}", None, root):
+                    webbrowser.open(f"http://127.0.0.1:{running}")
             return
     server = None
     # the desktop app takes the next free port when another program (an ApiMan started from a terminal) has this one
@@ -2514,10 +2518,19 @@ def main():
         f.write(f"{INSTANCE_SECRET}\n{SERVER_PORT}")
     os.replace(tmp, instance)
     print(f"ApiMan running at {url}\nData folder: {Handler.stores['collections'].root}\nCtrl+C to stop.")
-    if not args.no_browser and not (args.window and open_window(url, server, Handler.stores["collections"].root)):
+    native = None
+    if args.window and not args.no_browser:
+        try:
+            import desktop as native  # the desktop build: a native window (pywebview); absent from a plain checkout
+        except ImportError:
+            native = None
+    if not native and not args.no_browser and not (args.window and open_window(url, server, Handler.stores["collections"].root)):
         webbrowser.open(url)
     try:
-        server.serve_forever()
+        if native:
+            native.run(url, server, Handler.stores["collections"].root)  # returns when the window is closed
+        else:
+            server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:

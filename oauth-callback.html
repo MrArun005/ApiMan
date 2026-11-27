@@ -29,9 +29,13 @@
   const msg = { state, code: p.get('code'), error: p.get('error'), errorDescription: p.get('error_description') };
   try { new BroadcastChannel('apiman-oauth').postMessage(msg); } catch (e) { /* old browser: opener only */ }
   try { if (window.opener) window.opener.postMessage({ apimanOAuth: msg }, location.origin); } catch (e) { /* severed by the provider */ }
+  try { localStorage.setItem('apiman:oauthResult', JSON.stringify(msg)); } catch (e) { /* storage blocked */ } // the desktop app's windows read it here
   t.textContent = msg.error ? 'Sign-in failed' : 'Signed in';
   m.textContent = msg.error ? (msg.errorDescription || msg.error) : 'You can close this window and go back to ApiMan.';
-  setTimeout(() => window.close(), 400);
+  setTimeout(() => { // the desktop app's sign-in window closes through its shell; a browser pop-up closes itself
+    try { if (window.pywebview && window.pywebview.api && window.pywebview.api.close) { window.pywebview.api.close(); return; } } catch (e) { /* not the desktop app */ }
+    window.close();
+  }, 400);
 })();
 </script>
 </body>
