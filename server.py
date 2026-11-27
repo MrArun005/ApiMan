@@ -526,7 +526,18 @@ def decode_body(raw, encoding):
         if enc == "br":
             if not brotli:
                 return raw, "The response is Brotli-compressed (br); install the brotli package to read it."
-            return brotli.decompress(raw)[:MAX_RESPONSE + 1], None
+            d, out, size = brotli.Decompressor(), [], 0
+            for i in range(0, len(raw), 4096):  # a little at a time: stop as soon as the cap is passed (a bomb never fills memory)
+                chunk = raw[i:i + 4096]
+                try:
+                    part = d.process(chunk, output_buffer_limit=MAX_RESPONSE + 1 - size)
+                except TypeError:  # older brotli without output_buffer_limit: 4 KB in still bounds each step
+                    part = d.process(chunk)
+                out.append(part)
+                size += len(part)
+                if size > MAX_RESPONSE:
+                    break
+            return b"".join(out)[:MAX_RESPONSE + 1], None
     except (zlib.error, OSError, Exception) as e:  # brotli.error isn't an OSError
         return raw, f"Couldn't decode the {enc} response: {e}"
     return raw, f"Unknown Content-Encoding: {enc}"
@@ -624,6 +635,7 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
         self.names = names or {}
         self.max_redirections = limit
         self.hops = 0
+        self.body_refused = None  # a 307/308 to another site that would have re-sent the body
 
     @staticmethod
     def origin(url):
@@ -642,6 +654,10 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
         except ValueError as e:
             raise RedirectRefused(f"Refused a redirect to an invalid URL: {e}") from None
         method = req.get_method()
+        if code in (307, 308) and req.data and self.origin(req.full_url) != self.origin(newurl):
+            # the body (a login form, a token) would go to another site: not followed, the 3xx is the answer
+            self.body_refused = newurl
+            return None
         if code in (307, 308):  # the same request again, body and all
             data = req.data
         else:
@@ -811,6 +827,7 @@ def send(spec, root=None):
         "redirectStripped": getattr(redirects, "stripped", []),
         "redirects": getattr(redirects, "hops", 0),
         "redirectLimitHit": limit_hit,
+        **({"redirectBodyRefused": redirects.body_refused} if getattr(redirects, "body_refused", None) else {}),
         **({"redirectLimit": limit} if limit_hit else {}),
         **({"encoding": encoding.strip().lower(), "wireSize": wire_size} if encoding and not decode_note and not no_body else {}),
         **({"decodeNote": decode_note} if decode_note else {}),

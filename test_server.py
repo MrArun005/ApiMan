@@ -1062,6 +1062,8 @@ class Wire(BaseHTTPRequestHandler):
             return self.answer(302, b"", [("Location", f"/loop/{int(p[6:]) + 1}")])
         if p == "/setcookie":
             return self.answer(302, b"", [("Set-Cookie", "sid=abc; Path=/"), ("Location", "/echo")])
+        if p.startswith("/to307?"):
+            return self.answer(307, b"", [("Location", urllib.parse.unquote(p.split("=", 1)[1]))])
         if p.startswith("/to-other?"):
             return self.answer(302, b"", [("Location", urllib.parse.unquote(p.split("=", 1)[1]))])
         return echo()
@@ -1116,6 +1118,16 @@ class SendRegressionTest(unittest.TestCase):
         self.assertEqual((got["method"], got["body"]), ("GET", ""))               # 302: GET, no body
         head = self.send(self.base + "/r302", "HEAD")
         self.assertEqual(head["status"], 200)                                     # HEAD stays HEAD (no body to read)
+
+    def test_3b_a_body_never_follows_a_307_to_another_site(self):
+        other = start(Wire)
+        try:
+            target = urllib.parse.quote(f"http://localhost:{other.server_address[1]}/echo", safe="")
+            r = self.send(self.base + "/to307?u=" + target, "POST", "password=hunter2")
+            self.assertEqual(r["status"], 307)                                    # the redirect itself is the answer
+            self.assertTrue(r["redirectBodyRefused"].endswith("/echo"))
+        finally:
+            other.shutdown()
 
     def test_5_user_and_password_in_the_url_become_basic_auth(self):
         got = self.j(self.send(self.base.replace("://", "://user:p%40ss@") + "/echo"))

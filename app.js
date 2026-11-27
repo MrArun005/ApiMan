@@ -2030,6 +2030,7 @@ async function execute({ ed, cid, itemId, iteration = 0, iterationCount = 1, ite
   for (const n of res.notes || []) warnings.push(n);
   if (res.redirectLimitHit) warnings.push(`Stopped after ${res.redirectLimit} redirects: the server kept redirecting. This is its last answer; raise the limit in Settings → Requests if the chain is expected.`);
   if (res.decodeNote) warnings.push(res.decodeNote);
+  if (res.redirectBodyRefused) warnings.push(`Not followed: the server redirected (${res.status}) to another site, ${res.redirectBodyRefused}, which would have received this request's body. Send it there yourself if you trust it.`);
 
   if (!res.error) {
     info.eventName = 'test';
