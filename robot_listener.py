@@ -13,12 +13,20 @@ import time
 
 ROBOT_LISTENER_API_VERSION = 2
 STEP_DELAY = float(os.environ.get("APIMAN_STEP_DELAY") or 0)  # Watch speed: seconds each page-changing step stays on screen
+MASK_LIMIT = 8 * 1024 * 1024  # bodies are masked up to this size before being cut to MAX_BODY
 MAX_BODY = 64 * 1024          # bytes of each request/response body kept in the log
 # Browser steps that only read or wait don't change the screen: no screenshot after them (each costs ~30-80 ms)
 READ_ONLY = ("get ", "wait ", "set ", "evaluate", "new browser", "new context", "close ", "take screenshot", "should",
              "register", "promise", "add ", "observe", "highlight", "connect", "switch ", "save storage", "log ")
 SECRET_HEADERS = ("authorization", "cookie", "set-cookie", "proxy-authorization")
-SECRET_WORDS = ("token", "secret", "password", "api-key", "apikey")
+SECRET_WORDS = ("token", "secret", "password", "passwd", "pwd", "api-key", "apikey", "access-key", "private-key", "jwt",
+                "session", "credential", "x-auth")
+# key=value / "key": "value" pairs in free text (error messages, bodies too big or broken to parse)
+SECRET_TEXT = re.compile(r"""(?i)(["']?[\w.-]*(?:token|secret|password|passwd|pwd|api[-_]?key|access[-_]?key|jwt|session|credential)[\w.-]*["']?\s*[:=]\s*["']?)[^"'&\s,}]+""")
+
+
+def _mask_text(text):
+    return SECRET_TEXT.sub(r"\1•••", str(text))
 
 
 class robot_listener:
@@ -128,14 +136,14 @@ class robot_listener:
         def send(session, request, **kwargs):
             started = time.time()
             event = {"t": "http", "method": request.method, "url": _url(request.url), "test": listener.test,
-                     "reqHeaders": _headers(request.headers), "reqBody": _secrets(_body(request.body))}
+                     "reqHeaders": _headers(request.headers), "reqBody": _cut(_secrets(_body(request.body)))}
             try:
                 resp = original(session, request, **kwargs)
             except Exception as e:
-                listener.emit(**event, error=f"{type(e).__name__}: {e}", ms=round((time.time() - started) * 1000))
+                listener.emit(**event, error=_mask_text(f"{type(e).__name__}: {e}"), ms=round((time.time() - started) * 1000))
                 raise
             listener.emit(**event, status=resp.status_code, reason=resp.reason, ms=round((time.time() - started) * 1000),
-                          resHeaders=_headers(resp.headers), resBody=_secrets(_body(resp.content)), size=len(resp.content or b""))
+                          resHeaders=_headers(resp.headers), resBody=_cut(_secrets(_body(resp.content))), size=len(resp.content or b""))
             return resp
 
         send._apiman = True
@@ -181,7 +189,7 @@ def _secrets(text):
     try:
         data = json.loads(text)
     except ValueError:
-        return text
+        return _mask_text(text)  # broken or over MASK_LIMIT: hide key=value / "key": "value" pairs anyway
 
     def walk(v):
         if isinstance(v, dict):
@@ -199,5 +207,8 @@ def _body(body):
         body = body.encode("utf-8", "replace")
     if not isinstance(body, (bytes, bytearray)):
         return f"<{type(body).__name__}>"  # a streamed upload
-    text = bytes(body[:MAX_BODY]).decode("utf-8", "replace")
-    return text + (f"\n… {len(body) - MAX_BODY} more bytes" if len(body) > MAX_BODY else "")
+    return bytes(body[:MASK_LIMIT]).decode("utf-8", "replace")  # masked whole, then cut to MAX_BODY (_cut)
+
+
+def _cut(text):
+    return text[:MAX_BODY] + (f"\n… {len(text) - MAX_BODY} more characters" if len(text) > MAX_BODY else "")

@@ -834,6 +834,8 @@ body.resizing iframe { pointer-events: none; }
 #respMetaAlt { flex-wrap: nowrap; white-space: nowrap; align-items: center; margin-right: var(--s1); }
 #findCount { min-width: 8ch; text-align: right; }
 #runResults > .meta { margin: var(--s2) 0 var(--s3); gap: var(--s4); }
+#runResults > .pane-tools > .check { margin: 0; align-items: center; } /* export: format, bodies, button on one row */
+#runResults > .pane-tools > .check input { margin-top: 0; }
 #pane-docs textarea.prose[hidden] { display: none; }
 
 /* WebSocket: toolbar, a log that scrolls, the composer */
