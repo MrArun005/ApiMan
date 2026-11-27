@@ -56,6 +56,19 @@ class Echo(BaseHTTPRequestHandler):
         pass
 
 
+def quiet_runs():
+    """No run left over from an earlier test: ApiMan runs one at a time, and a stopped run finishes in the background."""
+    server.stop_all_runs()
+    end = time.time() + 15
+    while time.time() < end:
+        with server.RUNS_LOCK:
+            if not server.RUNS:
+                break
+        time.sleep(0.05)
+    with server.RUNS_LOCK:
+        server.COLLECTION_RUNS.clear()
+
+
 def start(handler):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -409,6 +422,7 @@ class ServerTest(unittest.TestCase):
                                                          ("PUT", "/v1/things/7", "api.example.com")])
 
     def test_collection_runs_are_suite_results(self):
+        quiet_runs()
         root = server.Handler.stores["collections"].root
         (root / "shop-tests").mkdir(exist_ok=True)
         (root / "shop-tests" / "t.robot").write_text("*** Test Cases ***\nT\n    GET On Session    s    /api/orders\n")
@@ -1191,9 +1205,10 @@ class RunLifecycleTest(unittest.TestCase):
         self.env = {k: os.environ.get(k) for k in ("APIMAN_ROBOT_PYTHON", "FAKE_SLEEP", "FAKE_EXIT")}
         os.environ["APIMAN_ROBOT_PYTHON"] = fake
         self.stores = server.make_stores(self.root)
+        quiet_runs()
 
     def tearDown(self):
-        server.stop_all_runs()
+        quiet_runs()  # its run has written its last meta.json before the folder goes
         for k, v in self.env.items():
             if v is None:
                 os.environ.pop(k, None)
