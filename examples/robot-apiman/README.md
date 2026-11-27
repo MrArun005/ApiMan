@@ -14,3 +14,13 @@ which the suites start themselves. Set two environment keys:
 | `HEADLESS` | optional, `true` by default: the browser runs out of sight and ApiMan shows it live |
 
 Needs, in the project's (or ApiMan's) virtualenv: `pip install robotframework robotframework-browser robotframework-requests && rfbrowser init chromium`.
+
+## What it tests
+
+| Suite | Tests |
+|---|---|
+| `tests/api/collections.robot` (API) | ApiMan's own API: collections are created, listed, read, updated and deleted; the session token is required. |
+| `tests/ui/app.robot` (UI) | The welcome screen, opening a request, the method colour, the theme switch, Settings. |
+| `tests/ui/workflows.robot` (UI) | ApiMan used the way a person uses it: sending GET requests and reading the JSON, headers and a 404; the Ctrl/Cmd+Enter shortcut; query parameters kept in sync with the URL; environment variables resolving in the URL; unknown and self-referencing variables explained; duplicate environment keys pointed out; passing and failing `pm.test` scripts; `console.log` in the Console; a cURL command becoming a request; generated code matching the request; saving into a collection; History; and a file dropped into the data folder showing up by itself. Its requests go to a small local web server (Python's `http.server` on `testdata/`) that the suite starts, never to the internet. |
+
+Run one part with tags: `ui`, `api`, `smoke`, `workflows`.
