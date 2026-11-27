@@ -170,16 +170,28 @@ def build_request(col, item, parents, vars_):
     return {"method": str(req.get("method") or "GET").upper(), "url": url, "headers": headers, "body": body}
 
 
-def response_out(res, spec):
+def hider(secrets):
+    """Replaces every secret value (and its URL-encoded forms) with •••: what the assistant sees never holds them."""
+    forms = sorted({f for v in secrets if v and len(v) >= 3 for f in (v, urllib.parse.quote(v, safe=""), urllib.parse.quote_plus(v))}, key=len, reverse=True)
+    def hide(text):
+        text = str(text)
+        for f in forms:
+            text = text.replace(f, "•••")
+        return text
+    return hide
+
+
+def response_out(res, spec, secrets=()):
     if res.get("error"):
-        return {"error": res["error"]}
+        return {"error": hider(secrets)(res["error"])}
+    hide = hider(secrets)
     body = res.get("body")
-    shown = body if body is not None else f"<binary body, {res.get('size', 0)} bytes>"
-    return {"request": {"method": spec["method"], "url": server.mask_url(spec["url"])},
+    shown = hide(server.mask_body(body)) if body is not None else f"<binary body, {res.get('size', 0)} bytes>"  # token/password fields too
+    return {"request": {"method": spec["method"], "url": hide(server.mask_url(spec["url"]))},
             "status": res.get("status"), "reason": res.get("reason"), "timeMs": res.get("timeMs"), "size": res.get("size"),
-            "headers": server.mask_headers(dict(res.get("headers") or [])),  # Set-Cookie, tokens: never handed to the assistant
+            "headers": {k: hide(v) for k, v in server.mask_headers(dict(res.get("headers") or [])).items()},  # Set-Cookie, tokens: never handed over
             "body": shown[:MAX_BODY_OUT] + (f"\n… {len(shown) - MAX_BODY_OUT} more characters" if len(shown) > MAX_BODY_OUT else ""),
-            **({"finalUrl": server.mask_url(res["finalUrl"])} if res.get("finalUrl") and res.get("finalUrl") != spec["url"] else {}),
+            **({"finalUrl": hide(server.mask_url(res["finalUrl"]))} if res.get("finalUrl") and res.get("finalUrl") != spec["url"] else {}),
             **({"warning": f"Stopped after {res.get('redirectLimit')} redirects."} if res.get("redirectLimitHit") else {})}
 
 
@@ -221,12 +233,47 @@ def t_send_request(app, a):
     if len(found) > 1:
         raise ValueError(f"{len(found)} requests are called {name!r}: name it with its folder, e.g. 'Folder / {name}'.")
     item, parents = found[0]
-    env, _ = app.env_values(a.get("environment"))
-    vars_ = {**app.globals(), **{v["key"]: str(v.get("value", "")) for v in col.get("variable") or [] if v.get("key") and not v.get("disabled")}, **env,
-             **{str(k): str(v) for k, v in (a.get("variables") or {}).items()}}
-    spec = build_request(col, item, parents, vars_)
+    env, env_meta = app.env_values(a.get("environment"))
+    saved = {**app.globals(), **{v["key"]: str(v.get("value", "")) for v in col.get("variable") or [] if v.get("key") and not v.get("disabled")}, **env}
+    extra = {str(k): str(v) for k, v in (a.get("variables") or {}).items()}
+    spec = build_request(col, item, parents, {**saved, **extra})
+    if extra:  # the assistant's variables may fill in the request, never send it (and the saved auth) somewhere else
+        try:
+            planned = build_request(col, item, parents, saved)["url"]
+        except ValueError:
+            planned = ""
+        if not planned or origin(planned) != origin(spec["url"]):
+            raise ValueError("Refused: the extra variables would change where this request goes (scheme, host or port). "
+                             "Change the environment in ApiMan instead, or use send_http without saved credentials.")
     res = server.send({**spec, "timeout": a.get("timeout") or 60}, app.root)
-    return response_out(res, spec)
+    return response_out(res, spec, secret_values(app, env_meta, col, item, parents, {**saved, **extra}))
+
+
+def origin(url):
+    u = urllib.parse.urlsplit(url)
+    return (u.scheme.lower(), (u.hostname or "").lower(), u.port or (443 if u.scheme.lower() == "https" else 80))
+
+
+def secret_values(app, env_meta, col, item, parents, vars_):
+    """Values never handed back: Secret-type and secret-named variables, and the request's auth credentials."""
+    out = set()
+    docs = [app.stores["environments"].get(env_meta["id"])] if env_meta else []
+    try:
+        docs.append(app.stores["environments"].get("globals.json"))
+    except (FileNotFoundError, ValueError):
+        pass
+    for d in docs:
+        for v in d.get("values", []):
+            if v.get("key") and (v.get("type") == "secret" or server.secret_name(v["key"])):
+                out.add(str(v.get("value", "")))
+    for v in col.get("variable") or []:
+        if v.get("key") and (v.get("type") == "secret" or server.secret_name(v["key"])):
+            out.add(resolve(v.get("value", ""), vars_))
+    auth = effective_auth(item, parents, col)
+    if auth:
+        for key in ("token", "password", "value", "accessToken", "clientSecret"):
+            out.add(resolve(auth_param(auth, key), vars_))
+    return out
 
 
 def t_send_http(app, a):
