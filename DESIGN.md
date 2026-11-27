@@ -51,7 +51,7 @@ Each row: the root class, its variants (modifiers), its parts, and the `ui.*` fu
 | 9 | **Toolbar** | `.pane-tools` · `.boxed` (find bar) · **ActionRow** `.actions` | `.tool-group` (right-aligned actions), `.spacer` | `ui.toolbar()`, `ui.actions()` |
 | 10 | **SectionHead** | `.section-head` | `.label`, `.hint`, a trailing control | `ui.sectionHead()` |
 | 11 | **Meta** | `.meta` | items; values in `b` (tone); hide hooks `.m-reason` `.m-time` `.m-size`; `.sending`, `.elapsed` | `ui.meta()` |
-| 12 | **TreeRow** | `.row` · `.collection` · state `.on` `.menu-open` | `.caret` (`.open`), `.folder-ico`, `.name`, `.sub`, `.time`, `.acts` | `rowActs()`, tree renderers |
+| 12 | **TreeRow** | `.row` · `.collection` · state `.on` `.menu-open` | `.caret` (`.open`), `.folder-ico`, `.name`, `.sub`, `.time`, `.acts` | `rowActs()`, tree renderers, `categoryNodes()` (data-folder categories: caret, `.folder-ico`, name, `.sub` count) |
 | 13 | **ResultRow** | `.test-row` · `.compact` | Pill, name, `.msg` | `ui.result()` |
 | 14 | **Log** | `.console` · `.scroll` (a live log: fixed height, scrolls) | `.line` (tone), `.src` | `ui.logLine()` |
 | 15 | **Table** | `table.kv` (editable key/value) · `table.grid` (read-only) · `.boxed` | `.chk` `.type` `.act` `.file-pick` `.fname` · `.num` `.tight` `.v` `.r` `.mono` · rows `.off` `.ghost` | `kvTable()`, `ui.table()` |

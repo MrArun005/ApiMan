@@ -7,6 +7,8 @@ A private, local API client in the spirit of Postman. You don't need an account,
 
 **Where your data lives.** In the data folder, collections are `*.json`, environments are `environments/*.json`, and your workspace (settings, open tabs, history, layout) is `.apiman/state.json`. The browser only keeps a cache of it, so clearing browser storage loses nothing. OAuth tokens and kept responses are never written to the folder: they last only as long as the browser tab.
 
+**Folders become categories.** Organise the data folder in any tree of folders (`payments/v2/Refunds.json`, `team/staging.postman_environment.json`, …): ApiMan finds every collection and environment in it, up to 8 levels deep, by what the file contains rather than its name or place, so Postman exports work as they are. Other JSON files are left alone, and so are hidden folders (`.git`, `.apiman`) and `node_modules`. The sidebar shows each folder as a category you can open and close, collections and environments save back to their own file, and a category's menu creates or imports straight into that folder. The environment picker shows a folder in front of the name (`payments / Staging`). The same works in website mode with a folder; data kept only in the browser has no folders.
+
 ```bash
 git clone https://github.com/MrArun005/ApiMan.git && cd ApiMan
 python3 server.py                     # opens http://127.0.0.1:5577
@@ -36,9 +38,15 @@ To build it yourself: `python3 -m pip install pyinstaller && python3 tools/build
 python3 server.py run orders.json -e staging.json            # live results; exit code 1 if a test fails or a request can't be sent
 python3 server.py run orders.json -e staging.json --var token=$API_TOKEN --junit report.xml --json report.json
 python3 server.py run orders.json --folder Smoke -n 3 --delay 200 --bail
+python3 server.py run orders.json -e staging.json -d customers.csv --html report.html   # once per data row, with an HTML report
 ```
 
-`--junit` writes a JUnit XML report that GitHub Actions, GitLab and Jenkins show as test results. `--var KEY=VALUE` sets environment variables, handy for secrets from the CI's environment. `--browser` (or `APIMAN_BROWSER`) points at a browser if it isn't found automatically. Requests that need an OAuth sign-in window can't run headless; use client credentials there.
+- `--junit FILE` writes a JUnit XML report that GitHub Actions, GitLab and Jenkins show as test results; `--json FILE` writes the same results as JSON.
+- `--html FILE` writes one self-contained HTML report (summary, then each request with its tests). It leaves out request and response headers and bodies unless you add `--report-bodies`, and even then masks Authorization, Cookie and token, secret, password and API-key headers.
+- `-d`/`--iteration-data FILE` runs the collection once per row: a CSV with a header row (UTF-8, quoted values may hold commas and line breaks), or a JSON array of flat objects. Each column is a `{{column}}` variable for that iteration, and scripts read it with `pm.iterationData.get('column')`. `-n` caps the number of rows run. Up to 100 000 rows and 20 MB. The console and every report say which iteration and data row each result came from.
+- `--var KEY=VALUE` sets environment variables, handy for secrets from the CI's environment. `--browser` (or `APIMAN_BROWSER`) points at a browser if it isn't found automatically.
+
+Requests that need an OAuth sign-in window can't run headless; use client credentials there. For GitHub Actions, copy [`docs/ci/github-actions.yml`](docs/ci/github-actions.yml): it runs a collection with a secret token and a data file and keeps the JUnit and HTML reports as artifacts, even when tests fail.
 
 ## Automation: run Robot Framework projects, UI and API, live
 
@@ -103,7 +111,7 @@ To get Robot Framework for the sample: `python3 -m venv .venv-robot && .venv-rob
 | **WebSocket** | Type a `ws://` or `wss://` URL and Send becomes Connect: a live, filterable message log (JSON pretty-printed, millisecond timestamps) with a composer that resolves `{{variables}}`. Uses the browser's own WebSocket, in both modes. Browsers can't send custom headers on a WebSocket, so ApiMan says which ones it couldn't send; `Sec-WebSocket-Protocol` is sent as the subprotocol |
 | **Scripts** | Pre-request and test scripts with Postman's `pm.*` commands (`pm.test`, `pm.expect`, `pm.response`, `pm.environment`, `pm.sendRequest` with a callback or `await`, …), plus snippets. Test scripts see the request as it was sent, with variables resolved |
 | **Click-to-test** | Right-click any value in a JSON response (or put the cursor on it and press the menu key or <kbd>Shift+F10</kbd>) to add a test without writing code: *equals this value*, *exists*, *is a string/number/list…*, *is not empty*, or *save it to a variable* for the next request (e.g. a login token). ApiMan writes the `pm.test` into the request's Tests script, where you can edit it |
-| **Runner** | Run a collection or folder, with iterations, delay, stop on failure, and live pass/fail results. Values scripts set carry to the next request (`/orders/{{orderId}}` chaining works), except ones that could change which server a request goes to. Also from the command line (see above) |
+| **Runner** | Run a collection or folder, with iterations, delay, stop on failure, and live pass/fail results. Values scripts set carry to the next request (`/orders/{{orderId}}` chaining works), except ones that could change which server a request goes to. **Data files**: choose a CSV (header row, one row per iteration) or a JSON list of flat objects, and each row's columns become `{{variables}}` (above the environment, below `pm.variables`) and `pm.iterationData`. Scripts can steer the run with `pm.execution.setNextRequest(name)` (`null` ends the iteration; at most 10 000 extra requests per run) and `pm.execution.skipRequest()`. After a run, **Export report** saves an HTML report (one file, no scripts), JSON or JUnit; headers and bodies only if you tick them, with Authorization, cookies, tokens, secrets, passwords and API keys masked. Also from the command line (see above) |
 | **Responses** | Pretty (highlighted JSON) / raw / preview views, headers, cookies, test results, script console, copy, save to file |
 | **Diff** | Compare a response with the previous one, one you pinned, or **the same request sent with another environment** (staging vs prod) in one click, without switching environments. JSON is compared field by field (key order and formatting don't count; list items with an `id` are matched by it), with a line view too. Ignore noisy fields by name or path (`updatedAt, data.items[*].etag`); headers that change on every response (Date, request ids…) are skipped |
 | **Import / export** | Postman collections v2.1, environments and globals, cURL commands (paste into the URL bar or use Import), export as JSON |

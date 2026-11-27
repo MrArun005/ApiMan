@@ -7,12 +7,14 @@ ApiMan local server: a private, local Postman-style API client. Python standard 
     python3 server.py --port 6000 --no-browser
     python3 server.py --ca-file ~/company-root-ca.pem   # internal HTTPS APIs signed by your company CA
     python3 server.py run api.json -e staging.json --junit report.xml   # run a collection headlessly (CI)
+    python3 server.py run api.json -d rows.csv --html report.html       # ...once per data row, with an HTML report
 
 Requests are sent from THIS machine, so they go through whatever VPN you are connected to.
 Collections are Postman v2.1 JSON files; environments are Postman environment JSON files.
 """
 import argparse
 import base64
+import csv
 import hashlib
 import hmac
 import io
@@ -68,6 +70,10 @@ INSTANCE_SECRET = secrets.token_urlsafe(32)  # in <data>/.apiman/instance: lets 
 SERVER_PORT = None  # set in main(); the proxy refuses to call ApiMan itself
 RUN_JOB = None      # `server.py run`: what the headless page should run
 RUN_EVENTS = None   # ...and the queue its results come back on
+MAX_ITERATION_FILE = 20 * 1024 * 1024  # `run -d`: iteration data file
+MAX_DATA_ROWS = 100_000
+MAX_REPORT = 50 * 1024 * 1024     # `run --html`: the report the headless page sends back
+RUN_EVENT_LIMIT = 2 * MAX_REPORT  # one run event on the wire (JSON escaping can grow the report)
 TOKEN_HEADER = "X-ApiMan-Token"
 
 
@@ -509,7 +515,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def connect_error(url, reason):
     """A plain-language connection error instead of '[Errno 61] Connection refused'."""
-    host = urllib.parse.urlsplit(url).netloc
+    host = urllib.parse.urlsplit(url).netloc.rpartition("@")[2]  # never user:password@
     if isinstance(reason, ConnectionRefusedError):
         return f"Connection refused by {host}: nothing is listening there. Is the server running, or the VPN connected?"
     if isinstance(reason, socket.gaierror):
@@ -632,6 +638,26 @@ ROBOT_BUILTIN_VARS = {"curdir", "tempdir", "execdir", "outputdir", "outputfile",
 RUNS = {}  # run id -> Popen (None while starting) of runs this server is running, until their final meta.json
 STOPPING = set()  # run ids the user stopped
 RUNS_LOCK = threading.Lock()
+VARFILES = {}  # run id -> its secrets file, removed when ApiMan stops even if the run hasn't finished
+
+
+def stop_all_runs():
+    """ApiMan is stopping: stop its Robot runs (and the browsers they started) and remove their secrets files."""
+    with RUNS_LOCK:
+        procs, files = [p for p in RUNS.values() if p], list(VARFILES.values())
+    for proc in procs:
+        try:
+            if os.name != "nt":
+                os.killpg(proc.pid, 15)
+            else:
+                proc.terminate()
+        except OSError:
+            pass
+    for f in files:
+        try:
+            os.unlink(f)
+        except OSError:
+            pass
 
 
 def robot_norm(name):
@@ -951,7 +977,7 @@ def robot_http_calls(text):
             m = HTTP_CELL.match(c)
             if m:
                 host = re.match(r"^https?://([^\s/]+)", c)
-                out.append((method, m.group(1) or "/", host.group(1).lower() if host else ""))
+                out.append((method, m.group(1) or "/", host.group(1).rpartition("@")[2].lower() if host else ""))  # never user:password@
                 break
     return out
 
@@ -1101,7 +1127,8 @@ def robot_start(root, stores, body):
     try:
         watch = body.get("speed", "watch") == "watch"  # Watch: each browser step stays on screen a moment
         proc = subprocess.Popen(cmd, cwd=project, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                env={**os.environ, "APIMAN_STEP_DELAY": "0.6" if watch else "0"},
+                                # PYTHONDONTWRITEBYTECODE: importing the secrets file must not leave a .pyc copy in __pycache__
+                                env={**os.environ, "APIMAN_STEP_DELAY": "0.6" if watch else "0", "PYTHONDONTWRITEBYTECODE": "1"},
                                 **({"start_new_session": True} if os.name != "nt" else {}))
     except OSError as e:
         log.close()
@@ -1116,6 +1143,7 @@ def robot_start(root, stores, body):
     tee.start()
     with RUNS_LOCK:
         RUNS[run_id] = proc
+        VARFILES[run_id] = varfile
     threading.Thread(target=robot_finish, args=(out, proc, tee, varfile, meta), daemon=True).start()
     return meta
 
@@ -1185,6 +1213,7 @@ def robot_finish(out, proc, tee, varfile, meta):
     write_meta(out, meta)
     with RUNS_LOCK:  # only now: until the final meta.json is written, the run is still this server's
         RUNS.pop(meta["id"], None)
+        VARFILES.pop(meta["id"], None)
         STOPPING.discard(meta["id"])
     print(f"[automation] {meta['projectName']}: {meta['status']}, {s['passed']} passed, {s['failed']} failed, "
           f"{s['http']} API calls. Report: {out / 'report.html'}", flush=True)
@@ -1218,7 +1247,8 @@ def read_meta(out):
 COLLECTION_RUNS = {}  # run id -> time the page last reported on it (collection runs execute in the page)
 COLLECTION_STALE = 90  # seconds without news: the page was closed mid-run
 MAX_RUN_EVENTS_POST = 8 * 1024 * 1024
-SECRET_HEADER_WORDS = ("authorization", "cookie", "token", "secret", "password", "api-key", "apikey")
+SECRET_HEADER_WORDS = ("authorization", "cookie", "token", "secret", "password", "passwd", "pwd", "api-key", "apikey",
+                       "access-key", "private-key", "jwt", "session", "credential", "x-auth")
 
 
 def secret_name(name):
@@ -1330,8 +1360,10 @@ def collection_run_events(root, run_id, body):
 def robot_stop(run_id):
     with RUNS_LOCK:
         proc = RUNS.get(run_id)
-        if not proc or run_id in STOPPING:
+        if not proc:
             return False
+        if run_id in STOPPING:
+            return True  # Stop clicked again: still stopping, never "start a new run"
         STOPPING.add(run_id)
     try:
         if os.name != "nt":
@@ -1535,8 +1567,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply_file(HERE / name, ctype)
             if method == "GET" and path == "/api/info":
                 return self.reply(200, {"dataDir": str(self.stores["collections"].root), **({"run": RUN_JOB} if RUN_JOB else {})})
-            if method == "POST" and path == "/api/run-event" and RUN_EVENTS is not None:
-                RUN_EVENTS.put(self.read_json())
+            if method == "POST" and path == "/api/run-event" and RUN_EVENTS is not None:  # only while `server.py run` runs
+                ev = self.read_json(RUN_EVENT_LIMIT)  # room for a MAX_REPORT report after JSON escaping
+                if not isinstance(ev, dict):
+                    raise ValueError("Invalid run event")
+                RUN_EVENTS.put(ev)
                 return self.reply(200, {"ok": True})
             if method == "POST" and path == "/api/send":
                 return self.reply(200, send(self.read_json()))
@@ -1659,7 +1694,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_json(self, limit=None):
         length = max(0, int(self.headers.get("Content-Length") or 0))
-        if length > MAX_REQUEST:
+        if length > max(MAX_REQUEST, limit or 0):  # a larger explicit limit (a run's HTML report) may exceed MAX_REQUEST
             raise ValueError("Request too large")
         if limit is not None and length > limit:
             remaining = length  # drain it (bounded by MAX_REQUEST), so the client gets our answer, not a reset
@@ -1759,31 +1794,198 @@ def load_json_file(path, what):
         raise SystemExit(f"error: {what} file isn't valid JSON ({path}): {e}")
 
 
-def junit_report(results, suite_name, path):
+class DataFileError(ValueError):
+    """An iteration data file `server.py run -d` can't use; the message says why, for the person running it."""
+
+
+def _data_value(v):
+    """Iteration data values become strings, as in Postman: 3 -> "3", true -> "true", null -> ""."""
+    if isinstance(v, str):
+        return v
+    if v is None:
+        return ""
+    return json.dumps(v, ensure_ascii=False)  # numbers and booleans as JSON writes them
+
+
+def parse_iteration_data(text, fmt):
+    """Rows for a data-driven run: a list of {column: string}, one per iteration.
+    fmt "csv": a header row, then one row per iteration (RFC 4180 quoting); fmt "json": an array of flat objects."""
+    if not text.strip():
+        raise DataFileError("the file is empty")
+    rows = []
+    if fmt == "json":
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise DataFileError(f"it isn't valid JSON: {e}")
+        if not isinstance(data, list):
+            raise DataFileError('a JSON data file must be an array of objects, e.g. [{"id": 1}, {"id": 2}]')
+        if len(data) > MAX_DATA_ROWS:
+            raise DataFileError(f"it has {len(data)} rows; the limit is {MAX_DATA_ROWS}")
+        for n, obj in enumerate(data, 1):
+            if not isinstance(obj, dict):
+                raise DataFileError(f"row {n} isn't an object (each array item must be a flat object of column: value)")
+            for k, v in obj.items():
+                if isinstance(v, (dict, list)):
+                    raise DataFileError(f'row {n}, "{k}": nested objects and arrays aren\'t supported, only flat objects of text, numbers and true/false')
+            rows.append({k: _data_value(v) for k, v in obj.items()})
+    else:
+        old = csv.field_size_limit()
+        csv.field_size_limit(MAX_ITERATION_FILE)  # one big quoted cell is fine as long as the file is within the limit
+        reader = csv.reader(io.StringIO(text, newline=""), strict=True)
+        header = None
+        try:
+            for rec in reader:
+                if not rec:
+                    continue  # blank lines (e.g. a trailing newline) aren't rows
+                if header is None:
+                    header = [c.strip() for c in rec]
+                    for i, c in enumerate(header, 1):
+                        if not c:
+                            raise DataFileError(f"column {i} of the header row has no name")
+                    dup = next((c for i, c in enumerate(header) if c in header[:i]), None)
+                    if dup is not None:
+                        raise DataFileError(f'the header row names the column "{dup}" twice')
+                    continue
+                if len(rec) != len(header):
+                    raise DataFileError(f"row {len(rows) + 1} (line {reader.line_num}) has {len(rec)} value{'s' * (len(rec) != 1)}, "
+                                        f"but the header row has {len(header)} column{'s' * (len(header) != 1)}")
+                if len(rows) >= MAX_DATA_ROWS:
+                    raise DataFileError(f"it has more than {MAX_DATA_ROWS} rows; the limit is {MAX_DATA_ROWS}")
+                rows.append(dict(zip(header, rec)))
+        except csv.Error as e:
+            raise DataFileError(f"line {reader.line_num} isn't valid CSV: {e}")
+        finally:
+            csv.field_size_limit(old)
+    if not rows:
+        raise DataFileError("it has no data rows" + (" (only a header row)" if fmt != "json" else ""))
+    return rows
+
+
+def load_iteration_data(path):
+    """Read and parse `-d FILE`: .json is JSON, .csv is CSV, anything else is JSON if it starts with "[", else CSV.
+    Exits with a clear message when the file can't be used."""
+    p = Path(path).expanduser()
+    try:
+        if not p.is_file():
+            raise FileNotFoundError
+        size = p.stat().st_size
+        if size > MAX_ITERATION_FILE:
+            raise SystemExit(f"error: iteration data file is too large ({size / 1048576:.1f} MB; the limit is {MAX_ITERATION_FILE // 1048576} MB): {path}")
+        text = p.read_bytes().decode("utf-8-sig")  # a byte-order mark (Excel's "CSV UTF-8") is dropped
+    except FileNotFoundError:
+        raise SystemExit(f"error: iteration data file not found: {path}")
+    except UnicodeDecodeError:
+        raise SystemExit(f'error: iteration data file isn\'t UTF-8 text ({path}). Save it as "CSV UTF-8" or as JSON.')
+    except OSError as e:
+        raise SystemExit(f"error: can't read iteration data file {path}: {e.strerror or e}")
+    ext = p.suffix.lower()
+    fmt = "json" if ext == ".json" else "csv" if ext == ".csv" else "json" if text.lstrip().startswith("[") else "csv"
+    try:
+        return parse_iteration_data(text, fmt)
+    except DataFileError as e:
+        raise SystemExit(f"error: can't use iteration data file {path}: {e}")
+
+
+def run_iterations(requested, rows):
+    """How many iterations to run: one per data row when there is data (an explicit -n caps it), else -n (default 1)."""
+    if rows:
+        return len(rows) if requested is None else max(1, min(requested, len(rows)))
+    return max(1, requested or 1)
+
+
+def build_run_job(args, has_env, rows):
+    """What the headless page runs (served as `run` in /api/info): the seam between server.py and app.js."""
+    iterations = run_iterations(args.iterations, rows)
+    return {"cid": "collection.json", "envId": "env.json" if has_env else "", "folder": args.folder,
+            "iterations": iterations, "delay": max(0, args.delay), "bail": args.bail,
+            "iterationData": rows[:iterations] if rows else None,
+            "dataFile": Path(args.iteration_data).name if rows else None,  # shown in the HTML report
+            "report": {"html": bool(args.html), "bodies": bool(args.html and args.report_bodies)}}
+
+
+def iteration_label(r, iterations, with_data):
+    """ "iteration 2 · data row 2" for console lines and reports; "" for a single iteration without data."""
+    parts = []
+    if iterations > 1 or with_data:
+        parts.append(f"iteration {r.get('iteration', 1)}")
+    if r.get("dataRow") is not None:
+        parts.append(f"data row {r['dataRow']}")
+    return ", ".join(parts)
+
+
+def consume_run_events(events, check, show=lambda r: None):
+    """Collect what the headless page posts until it's done: (results, outcome, report_html).
+    check() returns an error message when the run should be given up (browser gone, timeout), else None.
+    report_html is None when no report came, "" when it was over MAX_REPORT (never written)."""
+    results, outcome, report = [], None, None
+    while outcome is None:
+        try:
+            ev = events.get(timeout=0.5)
+        except queue.Empty:
+            err = check()
+            if err:
+                outcome = {"type": "fatal", "error": err}
+            continue
+        kind = ev.get("type")
+        if kind == "result" and isinstance(ev.get("result"), dict):
+            r = ev["result"]
+            r.setdefault("iteration", 1)
+            r.setdefault("dataRow", None)
+            results.append(r)
+            show(r)
+        elif kind == "report" and isinstance(ev.get("html"), str):
+            report = ev["html"] if len(ev["html"].encode("utf-8")) <= MAX_REPORT else ""
+        elif kind in ("done", "fatal"):
+            outcome = {"type": kind, **({"error": str(ev.get("error") or "unknown error")} if kind == "fatal" else {})}
+    return results, outcome, report
+
+
+def write_html_report(report, path):
+    """Write the page's HTML report to --html. Returns a warning to print, or None when it was written."""
+    if report is None:
+        return f"no HTML report was produced, so {path} wasn't written."
+    if report == "":
+        return f"the HTML report was larger than {MAX_REPORT // 1048576} MB, so {path} wasn't written."
+    Path(path).expanduser().write_text(report, encoding="utf-8")
+    return None
+
+
+def junit_report(results, suite_name, path, iterations=1, with_data=False):
     import xml.etree.ElementTree as ET
     root = ET.Element("testsuites", name=suite_name)
     tot = {"tests": 0, "failures": 0, "errors": 0, "time": 0.0}
     for r in results:
-        label = " / ".join([*r["path"], r["name"]]) + (f" (iteration {r['iteration']})" if r.get("iterations", 1) > 1 else "")
+        which = iteration_label(r, iterations, with_data)  # "iteration 2, data row 2": test names stay unique per row
+        tag = f" [{which}]" if which else ""
         secs = (r.get("timeMs") or 0) / 1000
-        suite = ET.SubElement(root, "testsuite", name=label, time=f"{secs:.3f}")
+        suite = ET.SubElement(root, "testsuite", name=" / ".join([*r["path"], r["name"]]) + (f" ({which})" if which else ""), time=f"{secs:.3f}")
+        if which:
+            props = ET.SubElement(suite, "properties")
+            ET.SubElement(props, "property", name="iteration", value=str(r.get("iteration", 1)))
+            if r.get("dataRow") is not None:
+                ET.SubElement(props, "property", name="dataRow", value=str(r["dataRow"]))
         cases = failures = errors = 0
         classname = ".".join(re.sub(r"[^\w-]+", "_", x) for x in [*r["path"], r["name"]]) or "request"
         if r["error"]:
             cases += 1; errors += 1
-            tc = ET.SubElement(suite, "testcase", classname=classname, name=f"{r['method']} request", time=f"{secs:.3f}")
+            tc = ET.SubElement(suite, "testcase", classname=classname, name=f"{r['method']} request{tag}", time=f"{secs:.3f}")
             ET.SubElement(tc, "error", message=r["error"][:500]).text = r["error"]
         for t in r["tests"]:
             cases += 1
-            tc = ET.SubElement(suite, "testcase", classname=classname, name=t["name"], time="0")
+            tc = ET.SubElement(suite, "testcase", classname=classname, name=f"{t['name']}{tag}", time="0")
             if t["passed"] is False:
                 failures += 1
                 ET.SubElement(tc, "failure", message=(t["error"] or "failed")[:500]).text = t["error"] or "failed"
             elif t["passed"] is None:
                 ET.SubElement(tc, "skipped")
+        if not cases and r.get("skipped"):  # skipped by a script: reported as skipped, not as a pass
+            cases = 1
+            tc = ET.SubElement(suite, "testcase", classname=classname, name=f"{r['method']} skipped{tag}", time="0")
+            ET.SubElement(tc, "skipped", message="pm.execution.skipRequest()")
         if not cases:  # a request without tests still shows up, passing if it got a response
             cases = 1
-            ET.SubElement(suite, "testcase", classname=classname, name=f"{r['method']} responded {r['status']}", time=f"{secs:.3f}")
+            ET.SubElement(suite, "testcase", classname=classname, name=f"{r['method']} responded {r['status']}{tag}", time=f"{secs:.3f}")
         suite.set("tests", str(cases)); suite.set("failures", str(failures)); suite.set("errors", str(errors))
         tot["tests"] += cases; tot["failures"] += failures; tot["errors"] += errors; tot["time"] += secs
     for k, v in tot.items():
@@ -1804,7 +2006,7 @@ def resolve_run_file(ref, kind, data_dir):
     return str(store.path(doc_id)) if doc_id else ref  # not found: load_json_file reports the missing file
 
 
-def run_main(argv):
+def run_parser():
     ap = argparse.ArgumentParser(prog="server.py run", description="Run a collection headlessly, e.g. in CI. Exits 1 when a test fails or a request can't be sent.")
     ap.add_argument("collection", help="Postman v2.1 collection JSON file, or the id or name of one in the data folder")
     ap.add_argument("-e", "--env", help="environment JSON file, or the id or name of one in the data folder")
@@ -1812,20 +2014,33 @@ def run_main(argv):
     ap.add_argument("--data", default=str(DEFAULT_DATA), help=f"data folder searched for ids and names (default: {DEFAULT_DATA})")
     ap.add_argument("--var", action="append", default=[], metavar="KEY=VALUE", help="set an environment variable (repeatable), e.g. --var token=$API_TOKEN")
     ap.add_argument("--folder", help="run only the folder with this name")
-    ap.add_argument("-n", "--iterations", type=int, default=1)
+    ap.add_argument("-n", "--iterations", type=int, help="how many times to run (default 1, or one per data row with -d; caps the rows)")
+    ap.add_argument("-d", "--iteration-data", metavar="FILE", help="CSV (header row + one row per iteration) or JSON (array of flat objects); "
+                    "each row's values are {{column}} variables for its iteration")
     ap.add_argument("--delay", type=int, default=0, metavar="MS", help="pause between requests")
     ap.add_argument("--bail", action="store_true", help="stop at the first failure")
     ap.add_argument("--junit", metavar="FILE", help="write a JUnit XML report (for CI test tabs)")
     ap.add_argument("--json", metavar="FILE", help="write a JSON report")
+    ap.add_argument("--html", metavar="FILE", help="write a self-contained HTML report (no headers or bodies unless --report-bodies)")
+    ap.add_argument("--report-bodies", action="store_true", help="include request/response headers and bodies in the HTML report (credentials masked)")
     ap.add_argument("--browser", help="path to Chrome, Chromium or Edge (default: found automatically, or $APIMAN_BROWSER)")
     ap.add_argument("--ca-file", help="PEM file with your company's root CA, for internal HTTPS APIs")
     ap.add_argument("--timeout", type=float, default=1800, metavar="SECONDS", help="give up after this long (default 1800)")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def run_main(argv):
+    args = run_parser().parse_args(argv)
 
     global CA_FILE, SERVER_PORT, RUN_JOB, RUN_EVENTS
     if args.ca_file:
         CA_FILE = str(Path(args.ca_file).expanduser().resolve())
         ssl.create_default_context().load_verify_locations(cafile=CA_FILE)
+    if args.iterations is not None and args.iterations < 1:
+        raise SystemExit("error: -n/--iterations must be 1 or more")
+    if args.report_bodies and not args.html:
+        print("warning: --report-bodies only applies to the HTML report (--html FILE); ignoring it.", file=sys.stderr)
+    rows = load_iteration_data(args.iteration_data) if args.iteration_data else None  # before the browser: bad data fails fast
     browser = find_browser(args.browser)
     if not browser:
         raise SystemExit("error: no Chrome, Chromium or Edge found. Install one, or pass --browser /path/to/chrome (or set APIMAN_BROWSER).")
@@ -1857,8 +2072,8 @@ def run_main(argv):
         (data / "environments" / "globals.json").write_text(json.dumps(g), encoding="utf-8")
 
     Handler.stores = make_stores(str(data))
-    RUN_JOB = {"cid": "collection.json", "envId": "env.json" if env is not None else "", "folder": args.folder,
-               "iterations": max(1, args.iterations), "delay": max(0, args.delay), "bail": args.bail}
+    RUN_JOB = build_run_job(args, env is not None, rows)
+    iterations, with_data = RUN_JOB["iterations"], rows is not None
     RUN_EVENTS = queue.Queue()
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     SERVER_PORT = srv.server_address[1]
@@ -1878,36 +2093,40 @@ def run_main(argv):
         OK, BAD = "PASS", "FAIL"
     name = col["info"].get("name", "Collection")
     print(f'ApiMan: running "{name}"' + (f' with "{env.get("name")}"' if env is not None else "") + (f' (folder "{args.folder}")' if args.folder else "")
-          + (f", {args.iterations} iterations" if args.iterations > 1 else ""))
-    results, started, deadline, outcome = [], time.time(), time.time() + args.timeout, None
+          + (f", {iterations} iterations" if iterations > 1 else "")
+          + (f", data from {Path(args.iteration_data).name} ({len(rows)} row{'s' * (len(rows) != 1)})" if with_data else ""))
+    started, deadline = time.time(), time.time() + args.timeout
+
+    def show(r):
+        where = " / ".join([*r["path"], r["name"]])
+        if r.get("skipped"):  # pm.execution.skipRequest(): never sent, so no status
+            status = paint("2", "SKIPPED (not sent)")
+        elif r["error"] or not isinstance(r.get("status"), int):
+            status = paint("31", f"ERROR {r['error'] or 'no response'}")
+        else:
+            status = paint("32" if r["status"] < 400 else "33" if r["status"] < 500 else "31", f"{r['status']} {r['reason']}".strip())
+        timing = f"  {r['timeMs']} ms" if r["timeMs"] is not None else ""
+        which = iteration_label(r, iterations, with_data)
+        print(f"\n{paint('1', where)}" + (f"  ({which})" if which else ""))
+        print(f"  {r['method']} {r['url']}  {status}{timing}")
+        for t in r["tests"]:
+            if t["passed"] is False:
+                print(f"  {paint('31', BAD)} {t['name']}" + (f"\n      {t['error']}" if t["error"] else ""))
+            else:
+                print(f"  {paint('32', OK) if t['passed'] else '-'} {t['name']}")
+        for w in r["warnings"] + r["logs"]:
+            print(f"  {paint('33', '!')} {w}")
+
+    def check():
+        if proc.poll() is not None:
+            return f"the browser exited unexpectedly (code {proc.returncode})."
+        if time.time() > deadline:
+            return f"timed out after {args.timeout:g} s."
+        return None
+
+    results, outcome, report = [], None, None
     try:
-        while outcome is None:
-            try:
-                ev = RUN_EVENTS.get(timeout=0.5)
-            except queue.Empty:
-                if proc.poll() is not None:
-                    outcome = {"type": "fatal", "error": f"the browser exited unexpectedly (code {proc.returncode})."}
-                elif time.time() > deadline:
-                    outcome = {"type": "fatal", "error": f"timed out after {args.timeout:g} s."}
-                continue
-            if ev.get("type") == "result":
-                r = ev["result"]
-                r["iterations"] = args.iterations
-                results.append(r)
-                where = " / ".join([*r["path"], r["name"]])
-                status = paint("31", f"ERROR {r['error']}") if r["error"] else paint("32" if r["status"] < 400 else "33" if r["status"] < 500 else "31", f"{r['status']} {r['reason']}".strip())
-                timing = f"  {r['timeMs']} ms" if r["timeMs"] is not None else ""
-                print(f"\n{paint('1', where)}" + (f"  (iteration {r['iteration']})" if args.iterations > 1 else ""))
-                print(f"  {r['method']} {r['url']}  {status}{timing}")
-                for t in r["tests"]:
-                    if t["passed"] is False:
-                        print(f"  {paint('31', BAD)} {t['name']}" + (f"\n      {t['error']}" if t["error"] else ""))
-                    else:
-                        print(f"  {paint('32', OK) if t['passed'] else '-'} {t['name']}")
-                for w in r["warnings"] + r["logs"]:
-                    print(f"  {paint('33', '!')} {w}")
-            elif ev.get("type") in ("done", "fatal"):
-                outcome = ev
+        results, outcome, report = consume_run_events(RUN_EVENTS, check, show)
     except KeyboardInterrupt:
         outcome = {"type": "fatal", "error": "interrupted."}
     finally:
@@ -1925,14 +2144,21 @@ def run_main(argv):
     elapsed = time.time() - started
     if args.json:
         Path(args.json).write_text(json.dumps({"collection": name, "environment": env.get("name") if env is not None else None,
+                                               "iterations": iterations,
+                                               "iterationData": {"file": Path(args.iteration_data).name, "rows": len(rows)} if with_data else None,
                                                "passed": passed, "failed": failed, "requestErrors": errors, "seconds": round(elapsed, 3),
                                                "results": results, **({"error": outcome["error"]} if outcome["type"] == "fatal" else {})}, indent=2), encoding="utf-8")
     if args.junit:
-        junit_report(results, name, args.junit)
+        junit_report(results, name, args.junit, iterations, with_data)
+    report_warning = write_html_report(report, args.html) if args.html else None
     print()
+    if report_warning:
+        print(paint("33", f"warning: {report_warning}"))
     if outcome["type"] == "fatal":
         print(paint("31", f"Run failed: {outcome['error']}"))
-    summary = f"{len(results)} request{'s' * (len(results) != 1)}, {errors} not sent · tests: {passed} passed, {failed} failed · {elapsed:.1f} s"
+    skipped = sum(1 for r in results if r.get("skipped"))
+    summary = (f"{len(results)} request{'s' * (len(results) != 1)}, {errors} failed to send"
+               + (f", {skipped} skipped by scripts" if skipped else "") + f" · tests: {passed} passed, {failed} failed · {elapsed:.1f} s")
     print(paint("31" if failed or errors else "32", summary))
     tmp.cleanup()
     return 2 if outcome["type"] == "fatal" else 1 if failed or errors else 0
@@ -1986,6 +2212,7 @@ def main():
         pass
     finally:
         instance.unlink(missing_ok=True)  # stopped: nothing left to recognise
+        stop_all_runs()
 
 
 if __name__ == "__main__":
