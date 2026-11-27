@@ -1310,5 +1310,46 @@ class RunLifecycleTest(unittest.TestCase):
         self.assertNotIn("20200101-000000-000000", os.listdir(runs))           # the oldest go first
 
 
+class McpServerTest(unittest.TestCase):
+    """mcp_server.py over stdio, as an MCP client talks to it: tools, a saved request with an environment and auth."""
+
+    def test_tools_and_a_saved_request(self):
+        import subprocess, sys
+        echo = start(Echo)
+        data = tempfile.mkdtemp()
+        os.makedirs(os.path.join(data, "environments"))
+        with open(os.path.join(data, "demo.json"), "w") as f:
+            json.dump({"info": {"name": "Demo", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+                       "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{token}}"}]},
+                       "item": [{"name": "Users", "item": [{"name": "Get user", "request": {"method": "GET", "url": {"raw": "{{base}}/users/:id", "variable": [{"key": "id", "value": "7"}]}}}]}]}, f)
+        with open(os.path.join(data, "environments", "Dev.json"), "w") as f:
+            json.dump({"name": "Dev", "values": [{"key": "base", "value": f"http://127.0.0.1:{echo.server_address[1]}"}, {"key": "token", "value": "s3cret"}]}, f)
+        p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_server.py"), "--data", data],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        try:
+            def rpc(i, method, params=None):
+                p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": params or {}}) + "\n"); p.stdin.flush()
+                return json.loads(p.stdout.readline())
+            def tool(i, name, **args):
+                r = rpc(i, "tools/call", {"name": name, "arguments": args})["result"]
+                return r.get("isError", False), r["content"][0]["text"]
+            self.assertEqual(rpc(1, "initialize", {"protocolVersion": "2025-06-18"})["result"]["serverInfo"]["name"], "apiman")
+            p.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"); p.stdin.flush()  # no answer
+            names = [t["name"] for t in rpc(2, "tools/list")["result"]["tools"]]
+            self.assertIn("send_request", names); self.assertIn("run_robot", names)
+            err, text = tool(3, "list_environments")
+            self.assertNotIn("s3cret", text)                                       # variable names, never values
+            err, text = tool(4, "send_request", collection="Demo", request="Get user", environment="Dev")
+            self.assertFalse(err, text)
+            sent = json.loads(json.loads(text)["body"])                           # what the echo server received
+            self.assertEqual(sent["auth"], "Bearer s3cret")                        # collection auth, environment variable
+            self.assertTrue(json.loads(text)["request"]["url"].endswith("/users/7"))  # path variable
+            err, text = tool(5, "send_request", collection="Demo", request="Get user")
+            self.assertTrue(err); self.assertIn("Unknown variables {{base}}, {{token}}", text)
+            self.assertEqual(rpc(6, "nope")["error"]["code"], -32601)
+        finally:
+            p.stdin.close(); p.wait(10); echo.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

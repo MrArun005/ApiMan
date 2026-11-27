@@ -117,6 +117,31 @@ The builds aren't signed yet, so the first time, macOS needs right-click → **O
 
 To build it yourself: `python3 -m pip install pyinstaller pillow pywebview && python3 tools/build_desktop.py`, which puts the app in `dist/`. A version tag (`git tag v1.0.0 && git push --tags`) publishes both builds as a release.
 
+## Use ApiMan from Claude and other AI tools (MCP)
+
+`mcp_server.py` makes ApiMan an MCP server, so an AI assistant such as Claude Code or Claude Desktop can use your
+collections, environments and Robot Framework projects. It reads your data folder directly, so ApiMan doesn't need
+to be running.
+
+```bash
+claude mcp add apiman -- python3 /path/to/ApiMan/mcp_server.py --data ~/ApiMan-data
+```
+
+For Claude Desktop, add it under `mcpServers` in its settings file:
+`{"apiman": {"command": "python3", "args": ["/path/to/ApiMan/mcp_server.py", "--data", "/Users/you/ApiMan-data"]}}`.
+
+| Tool | What it does |
+|---|---|
+| `list_collections`, `list_requests` | your collections and their saved requests (method, URL, folder) |
+| `list_environments` | environments and their variable **names** (values are never shown to the assistant) |
+| `send_request` | send a saved request with an environment: variables, path variables and auth (bearer, basic, API key) applied, sent from your computer |
+| `send_http` | send a one-off request |
+| `list_robot_projects`, `run_robot` | list Robot projects, then run one, a suite, a test or tags, and get the result with each failure's message |
+| `list_runs`, `get_run` | recent runs and their results (runs started from MCP also show in Automation History) |
+
+Responses come back with cookies and credential headers masked. Pre-request and test scripts don't run from MCP,
+because they run in the app's sandbox, and requests that use OAuth 2.0 need a sign-in in the app.
+
 ## Run collections in CI
 
 `python3 server.py run` runs a collection from the command line, the job Postman needs Newman (npm) for. It uses the Chrome, Chromium or Edge already on the machine in headless mode, so scripts run in the same sandbox as in the app, and there's still nothing to install.
