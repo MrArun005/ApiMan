@@ -39,6 +39,7 @@ class robot_listener:
         self.depth = 0
         self.suite = ""
         self.test = ""
+        self.tid = ""
         self.shots = 0
         self.browser_used = False
         self.t0 = {}
@@ -63,20 +64,28 @@ class robot_listener:
 
     def start_test(self, name, attrs):
         self.test = name
+        # file + name: the same test whatever was launched (the suite path changes with the folder run)
+        src = attrs.get("source") or ""
+        try:
+            src = os.path.relpath(src).replace(os.sep, "/") if src else ""
+        except ValueError:  # another drive (Windows)
+            pass
+        self.tid = f"{src} › {name}" if src else ""
         self.depth = 0
-        self.emit(t="test_start", name=name, suite=self.suite, tags=attrs.get("tags", []))
+        self.emit(t="test_start", name=name, suite=self.suite, tags=attrs.get("tags", []), tid=self.tid)
 
     def end_test(self, name, attrs):
         shot = self._screenshot() if self.browser_used else None  # the screen as the test ended: shows failures
         self.emit(t="test_end", **({"shot": shot} if shot else {}), name=name, suite=self.suite, status=attrs.get("status"), message=attrs.get("message", ""),
-                  ms=attrs.get("elapsedtime"), tags=attrs.get("tags", []))
+                  ms=attrs.get("elapsedtime"), tags=attrs.get("tags", []), tid=self.tid)
         self.test = ""
+        self.tid = ""
 
     # ---- keywords ----
     def start_keyword(self, name, attrs):
         self.depth += 1
         self.emit(t="kw_start", name=attrs.get("kwname") or name, lib=attrs.get("libname", ""), args=[str(a) for a in attrs.get("args", [])][:8],
-                  kind=attrs.get("type", ""), depth=self.depth, test=self.test)
+                  kind=attrs.get("type", ""), depth=self.depth, test=self.test, tid=self.tid)
 
     def end_keyword(self, name, attrs):
         lib = attrs.get("libname", "")
@@ -87,7 +96,7 @@ class robot_listener:
         if shot and STEP_DELAY:
             time.sleep(STEP_DELAY)  # so a person watching ApiMan can follow what the test does
         self.emit(t="kw_end", name=attrs.get("kwname") or name, lib=lib, status=attrs.get("status"), ms=attrs.get("elapsedtime"),
-                  depth=self.depth, test=self.test, **({"shot": shot} if shot else {}))
+                  kind=attrs.get("type", ""), depth=self.depth, test=self.test, tid=self.tid, **({"shot": shot} if shot else {}))
         self.depth -= 1
 
     def log_message(self, message):

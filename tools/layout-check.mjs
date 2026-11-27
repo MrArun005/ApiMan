@@ -1,5 +1,5 @@
 // ApiMan layout check: drives the real app through every width / sidebar / layout / text / density /
-// divider combination, and the Diff / Tests / Scripts / OAuth surfaces, and asserts the layout rules a reviewer
+// divider combination, the Diff / Tests / Scripts / OAuth surfaces and Automation (dashboard, project, History), and asserts the layout rules a reviewer
 // checks by hand (see DESIGN.md). Read-only: it never saves.
 //
 //   PLAYWRIGHT=/path/to/node_modules/playwright CHROMIUM=/path/to/Chromium node tools/layout-check.mjs
@@ -256,7 +256,7 @@ for (const theme of ['light', 'dark']) for (const f of await contrast(theme)) re
 // Keyboard focus is always visible: Tab through the first 60 stops and compare focused vs unfocused look.
 const focusFails = await page.evaluate(async () => {
   const out = [];
-  const stops = [...document.querySelectorAll('a[href], button, input, select, textarea, [tabindex="0"]')].filter((el) => el.getClientRects().length && !el.disabled && !el.closest('[hidden], dialog:not([open])')).slice(0, 80);
+  const stops = [...document.querySelectorAll('a[href], button, input, select, textarea, [tabindex="0"]')].filter((el) => el.getClientRects().length && !el.disabled && !el.closest('[hidden], dialog:not([open])') && getComputedStyle(el).visibility !== 'hidden').slice(0, 80); // visibility:hidden can't take focus
   for (const el of stops) {
     const before = (() => { const c = getComputedStyle(el); return [c.outlineStyle, c.outlineWidth, c.boxShadow, c.borderColor, c.backgroundColor].join('|'); })();
     el.focus({ focusVisible: true });
@@ -269,6 +269,61 @@ const focusFails = await page.evaluate(async () => {
   return out;
 }).catch((e) => [`focus check failed: ${e.message}`]);
 for (const f of focusFails) results.set(f, { example: f, combos: ['focus'] });
+
+// Automation (its own window, #automation): the dashboard's Cards and Charts, the project's tabs and History tables, at
+// every width and two text sizes. The server's answers come from tools/automation-fixture.json (two projects, runs with
+// 40 tests, a linked project with a long name and path), so no Robot project or run is needed.
+{
+  const fx = JSON.parse(await (await import('fs/promises')).readFile(new URL('./automation-fixture.json', import.meta.url), 'utf8'));
+  const auto = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  auto.on('pageerror', (e) => pageErrors.push(`automation: ${e.message}`));
+  await auto.route(/\/api\/robot\//, (route) => {
+    const u = new URL(route.request().url()), p = u.pathname;
+    const body = p === '/api/robot/projects' ? fx.projects
+      : p === '/api/robot/dashboard' ? fx.dashboard
+      : p === '/api/robot/apps/check' || p === '/api/robot/apps/scan' ? []
+      : p.startsWith('/api/robot/projects/') && !p.endsWith('/file') ? fx.project[decodeURIComponent(p.split('/')[4])] || fx.project['order-tests']
+      : p === '/api/robot/runs' ? (fx.runs[u.searchParams.get('project')] || [])
+      : null;
+    return body ? route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) }) : route.continue();
+  });
+  // nothing inside the dialog reaches past its body, tables never clip their content, no text cut in a control
+  const spill = (view) => auto.evaluate((view) => {
+    const out = [], body = document.querySelector('#dlgBody'), br = body.getBoundingClientRect();
+    const seen = (el) => el.getClientRects().length && !el.closest('[hidden]');
+    for (const el of body.querySelectorAll('table, .card, .cards, .btn, select, input, .seg, .meta, .chart, .preview, .console, .section-head, .pane-tools')) {
+      if (!seen(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.right > br.right + 1) out.push(`automation ${view}: ${el.tagName.toLowerCase()}.${String(el.className).split(' ')[0]} reaches past the dialog`);
+    }
+    for (const t of body.querySelectorAll('table')) if (seen(t) && t.scrollWidth > t.clientWidth + 1) out.push(`automation ${view}: a table's content is clipped`);
+    for (const el of body.querySelectorAll('.btn, .seg-btn, .pill')) if (seen(el) && el.scrollWidth > el.clientWidth + 1) out.push(`automation ${view}: text cut in "${el.textContent.trim().slice(0, 20)}"`);
+    const seg = body.querySelector('.dlg-tabs');
+    if (seg && seen(seg) && seg.scrollWidth > seg.clientWidth + 1) out.push(`automation ${view}: tabs overflow (no More menu)`);
+    return out;
+  }, view);
+  for (const [w, h] of WIDTHS) for (const sc of [1, 1.4]) {
+    await auto.setViewportSize({ width: w, height: h });
+    await auto.goto('about:blank'); await auto.goto(APP + '#automation'); // a fresh window each time
+    await auto.evaluate((sc) => { state.settings.textScale = sc; applyAppearance(state.settings); }, sc);
+    await auto.waitForSelector('#dlg[open] #dlgBody .card');
+    const tag = `${w} automation text${sc}`;
+    const add = (fs) => { combos++; for (const f of fs) { if (!results.has(f)) results.set(f, { example: f, combos: [] }); results.get(f).combos.push(tag); } };
+    add(await spill('dashboard'));
+    await auto.locator('#dlgBody .card', { hasText: 'order-tests' }).locator('button', { hasText: 'Open' }).click();
+    await auto.waitForFunction(() => /tests\)/.test(document.querySelector('#dlgBody .grid-3')?.textContent || ''));
+    await auto.waitForTimeout(150);
+    add(await spill('project'));
+    for (const name of ['History', 'API calls', 'Collection']) {
+      const visible = auto.locator('#dlgBody .dlg-tabs .seg-btn:visible', { hasText: name });
+      if (await visible.count()) await visible.click();
+      else { await auto.locator('#dlgBody .seg-more').first().click(); await auto.locator('.popover .mi', { hasText: name }).click(); }
+      await auto.waitForTimeout(name === 'History' ? 400 : 150);
+      add(await spill(name));
+    }
+  }
+  await auto.close();
+}
 
 await browser.close();
 console.log(`${combos} combinations checked`);

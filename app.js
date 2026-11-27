@@ -72,8 +72,8 @@ const TONES = ['ok', 'warn', 'err', 'muted'];
 const toneOf = (t) => (TONES.includes(t) ? t : '');
 const ui = {
   /** Button. variant: '' | 'primary' | 'ghost' | 'danger' | 'danger solid'; size: '' | 'small'. Other keys are attributes. */
-  button({ label, icon: ic = null, variant = '', size = '', cls = '', onClick, ...attrs } = {}) {
-    return h('button', { type: 'button', class: cx('btn', variant, size, cls), onclick: onClick, ...attrs },
+  button({ label, icon: ic = null, variant = '', size = '', cls = '', pressed = null, onClick, ...attrs } = {}) {
+    return h('button', { type: 'button', class: cx('btn', variant, size, cls), onclick: onClick, 'aria-pressed': pressed == null ? null : String(pressed), ...attrs },
       ic ? icon(ic) : null, ic && label != null ? h('span', { class: 'lbl' }, label) : label);
   },
   /** Icon-only Button: always labelled (title + aria-label). stop: the click doesn't reach the row behind it. */
@@ -150,7 +150,7 @@ const ui = {
     return h('span', { class: cx('status-code', code ? `s${String(code)[0]}` : 'err', small && 'small'), ...attrs }, label ?? (code ? String(code) : 'Error'));
   },
   method(m) { return h('span', { class: `mtag ${m}` }, m); },
-  /** Dot: tone 'ok' = live, 'warn' = unsaved; off keeps its place but hides it. */
+  /** Dot: tone 'ok' = live / answering / passed, 'warn' = unsaved / running, 'err' = failed / not answering; off keeps its place but hides it. */
   dot({ tone = '', off = false, label = null, ...attrs } = {}) {
     return h('span', { class: cx('dot', toneOf(tone), off && 'off'), role: label ? 'img' : null, 'aria-label': label, title: label, ...attrs });
   },
@@ -349,7 +349,7 @@ const isLocalHost = (host) => ['localhost', '127.0.0.1', '[::1]'].includes(host)
 // Settings & state
 // =====================================================================================================
 const DEFAULT_SETTINGS = {
-  theme: 'system', timeout: 60, followRedirects: true, history: true, insecure: false,
+  theme: 'system', timeout: 60, followRedirects: true, maxRedirects: 10, cookies: true, history: true, insecure: false,
   textScale: 1, codeSize: 13, density: 'comfortable', layout: 'auto', wrap: true,
   densityScale: null, lineHeight: 1.6, tabSize: 2, tabStyle: 'subtle', sendStyle: 'method', uiFont: 'geist', codeFont: 'geist-mono', accent: 'blue', accentCustom: '#2560cf',
   sidePosition: 'left', sideHidden: false,
@@ -393,7 +393,7 @@ function applyAppearance(s = state.settings) {
     if (!cm) return;
     cm.setOption('tabSize', tab);
     cm.setOption('indentUnit', tab);
-    if (el.closest('.code-editor.fill')) cm.setOption('lineWrapping', s.wrap !== false);
+    if (el.closest('.code-editor.fill, #bodyEditor')) cm.setOption('lineWrapping', s.wrap !== false);
   });
   document.querySelectorAll('.CodeMirror').forEach((el) => el.CodeMirror && el.CodeMirror.refresh());
   root.dataset.layout = s.layout === 'stacked' ? 'stacked' : 'auto';
@@ -703,6 +703,7 @@ async function serverSend(wire, signal) {
   const spec = {
     method: wire.method, url: wire.url, headers: wire.headers,
     timeout: state.settings.timeout, followRedirects: wire.followRedirects ?? state.settings.followRedirects, insecure: state.settings.insecure,
+    maxRedirects: state.settings.maxRedirects || 10, cookies: wire.cookies ?? state.settings.cookies !== false,
   };
   const { payload, isForm } = await materializeBody(wire.body);
   if (typeof payload === 'string') spec.body = payload;
@@ -1053,7 +1054,14 @@ function scopesFor(cid, envId = state.activeEnv) {
 const merged = (sc) => ({ ...sc.globals, ...sc.collection, ...sc.environment, ...(sc.data || {}), ...sc.local });
 
 const FIRST = ['Ada', 'Lin', 'Sam', 'Ravi', 'Mia', 'Noah', 'Zoe', 'Omar'];
+let dynMemo = null; // while a view needs stable values (Generate code): each {{$dynamic}} keeps the value it got first
 function dynamicVar(name) {
+  if (dynMemo && dynMemo.has(name)) return dynMemo.get(name);
+  const v = dynamicVarNow(name);
+  if (dynMemo && v !== undefined) dynMemo.set(name, v);
+  return v;
+}
+function dynamicVarNow(name) {
   const rnd = (n) => Math.floor(Math.random() * n);
   switch (name) {
     case '$guid': case '$randomUUID': return uid();
@@ -1069,8 +1077,33 @@ function dynamicVar(name) {
 const VAR_RE = /{{\s*([^{}]+?)\s*}}/g;
 function resolve(str, vars) {
   let s = String(str ?? '');
-  for (let pass = 0; pass < 4 && s.includes('{{'); pass++) {
+  for (let pass = 0; pass < 10 && s.includes('{{'); pass++) {
     const next = s.replace(VAR_RE, (m, k) => (Object.hasOwn(vars, k) ? vars[k] : (dynamicVar(k) ?? m)));
+    if (next === s) break;
+    s = next;
+  }
+  return s;
+}
+/** The loop a variable is part of ({{a}} → {{b}} → {{a}}), as names, or null. */
+function varCycle(name, vars, path = []) {
+  if (path.includes(name)) return [...path.slice(path.indexOf(name)), name];
+  if (!Object.hasOwn(vars, name)) return null;
+  for (const m of String(vars[name]).matchAll(VAR_RE)) { const c = varCycle(m[1], vars, [...path, name]); if (c) return c; }
+  return null;
+}
+/** Why {{names}} didn't resolve: one that refers to itself says so; the others aren't defined. */
+function missingVarMessage(missing, vars) {
+  const loop = missing.map((k) => varCycle(k, vars)).find(Boolean);
+  if (loop) return `Variable {{${loop[0]}}} refers to itself (${loop.join(' → ')}). Change one of them to a value.`;
+  const deep = missing.filter((k) => Object.hasOwn(vars, k));
+  if (deep.length) return `Variable {{${deep[0]}}} nests other variables more than 10 levels deep.`;
+  return `Unknown variable${missing.length > 1 ? 's' : ''} ${missing.map((v) => `{{${v}}}`).join(', ')}. Define ${missing.length > 1 ? 'them' : 'it'} in the environment, the collection, or Globals.`;
+}
+/** The preview of a value: nested variables resolved like a send, {{$dynamic}} ones shown as ‹$name›. */
+function resolvePreview(str, vars) {
+  let s = String(str ?? '');
+  for (let pass = 0; pass < 10 && s.includes('{{'); pass++) {
+    const next = s.replace(VAR_RE, (m, k) => (Object.hasOwn(vars, k) ? vars[k] : k.startsWith('$') && dynamicVarNow(k) !== undefined ? `‹${k}›` : m));
     if (next === s) break;
     s = next;
   }
@@ -1330,6 +1363,11 @@ self.onmessage = async (e) => {
     },
     iterationData, execution,
     request, response,
+    cookies: (() => { // pm.cookies, read-only like Postman's: get, has, toObject, all
+      const list = Array.isArray(ctx.cookies) ? ctx.cookies.map((c) => ({ ...c })) : [];
+      const find = (n) => list.find((c) => c.name === String(n));
+      return { get: (n) => (find(n) || {}).value, has: (n) => !!find(n), toObject: () => Object.fromEntries(list.map((c) => [c.name, c.value])), all: () => list.map((c) => ({ ...c })), count: () => list.length };
+    })(),
     info: ctx.info,
     expect,
     test: (name, fn) => {
@@ -1584,9 +1622,7 @@ function buildWire(ed, req, vars, authInfo) {
   if (!url) return { error: 'Enter a URL.' };
   if (!/^[A-Z]{1,16}$/.test(req.method)) return { error: `"${req.method}" isn't a valid HTTP method.` };
   const missingVars = unresolved(checks.map(r));
-  if (missingVars.length) {
-    return { error: `Unknown variable${missingVars.length > 1 ? 's' : ''} ${missingVars.map((v) => `{{${v}}}`).join(', ')}. Define ${missingVars.length > 1 ? 'them' : 'it'} in the environment, the collection, or Globals.` };
-  }
+  if (missingVars.length) return { error: missingVarMessage(missingVars, vars) };
   try { new URL(url); } catch { return { error: `"${url}" isn't a valid URL.` }; }
   return { wire: { method: req.method, url, headers, body }, shown };
 }
@@ -1992,15 +2028,19 @@ async function execute({ ed, cid, itemId, iteration = 0, iterationCount = 1, ite
     warnings.push(`Redirected to another site, so these headers were removed to protect your credentials: ${res.redirectStripped.join(', ')}.`);
   }
   for (const n of res.notes || []) warnings.push(n);
+  if (res.redirectLimitHit) warnings.push(`Stopped after ${res.redirectLimit} redirects: the server kept redirecting. This is its last answer; raise the limit in Settings → Requests if the chain is expected.`);
+  if (res.decodeNote) warnings.push(res.decodeNote);
 
   if (!res.error) {
     info.eventName = 'test';
     const response = { code: res.status, status: res.reason || '', headers: res.headers || [], body: res.body ?? '', responseTime: res.timeMs, size: res.size };
+    // pm.cookies: the jar's cookies for this URL (local), or what the response set (browser mode)
+    const cookies = res.cookies || parseCookies(res.headers || []).map((c) => ({ name: c.name, value: c.value, domain: c.domain || '', path: c.path || '' }));
     // Test scripts see the request that went out (variables and path variables resolved), like Postman,
     // but not the auth ApiMan added to it.
     const sentReq = { method: wire.method, url: built.shown.url, headers: built.shown.headers, body: wire.body.kind === 'text' ? wire.body.text : req.body };
     for (const s of scriptChain(cid, itemId, ed, 'test')) {
-      const out = await runWithSend(s.code, { vars: scopes, request: sentReq, response, info, envName, iterationData }, `tests ${s.src}`);
+      const out = await runWithSend(s.code, { vars: scopes, request: sentReq, response, info, envName, iterationData, cookies }, `tests ${s.src}`);
       scopes = out.vars;
       logs.push(...out.logs.map((l) => ({ ...l, src: `tests (${s.src})` })), ...out.sent);
       noteNext(out, `tests (${s.src})`);
@@ -3077,8 +3117,11 @@ function renderResolved() {
   const shown = applyPathVars(t.ed.url, t.ed.pathVars, (x) => x); // fill :id path variables for display
   for (const m of shown.matchAll(VAR_RE)) {
     parts.push(shown.slice(last, m.index));
-    const v = Object.hasOwn(vars, m[1]) ? vars[m[1]] : dynamicVar(m[1]);
-    parts.push(v === undefined ? h('span', { class: 'err', title: 'Not defined in the environment, collection or Globals' }, m[0]) : (m[1].startsWith('$') ? `‹${m[1]}›` : v));
+    const loop = varCycle(m[1], vars);
+    const v = Object.hasOwn(vars, m[1]) ? resolvePreview(vars[m[1]], vars) : dynamicVarNow(m[1]);
+    parts.push(loop ? h('span', { class: 'err', title: `Refers to itself: ${loop.join(' → ')}` }, m[0])
+      : v === undefined ? h('span', { class: 'err', title: 'Not defined in the environment, collection or Globals' }, m[0])
+        : (m[1].startsWith('$') ? `‹${m[1]}›` : v));
     last = m.index + m[0].length;
   }
   parts.push(shown.slice(last));
@@ -3286,7 +3329,7 @@ function renderBody() {
   const box = $('#bodyEditor');
   if (b.mode === 'none') box.replaceChildren(ui.emptyPane({ title: 'No body', text: 'Pick a body type above to send one.' }));
   else if (b.mode === 'raw') {
-    box.replaceChildren(codeEditor({ value: b.raw, mode: b.lang, label: 'Request body', placeholder: b.lang === 'json' ? '{ "name": "{{$randomFirstName}}" }' : 'Request body',
+    box.replaceChildren(codeEditor({ value: b.raw, mode: b.lang, label: 'Request body', wrap: state.settings.wrap !== false, placeholder: b.lang === 'json' ? '{ "name": "{{$randomFirstName}}" }' : 'Request body',
       onChange: (v) => { b.raw = v; renderCounts(); markDirty(); } }));
   }
   else if (b.mode === 'urlencoded') { box.replaceChildren(); kvTable(box, b.urlencoded, { onChange: markDirty }); }
@@ -3301,6 +3344,12 @@ function renderBody() {
       ui.field('Query', codeEditor({ value: b.gqlQuery, mode: 'graphql', label: 'GraphQL query', placeholder: 'query { users { id name } }', onChange: (v) => { b.gqlQuery = v; renderCounts(); markDirty(); } }), { grow: true }),
       ui.field('Variables (JSON)', codeEditor({ value: b.gqlVars, mode: 'json', label: 'GraphQL variables', placeholder: '{ "id": 1 }', cls: 'short', onChange: (v) => { b.gqlVars = v; markDirty(); } })));
   } else box.replaceChildren(ui.note(`The "${b.unsupported.mode}" body from Postman isn't supported. It's kept in the file but not sent. Pick another body type to replace it.`, 'warn'));
+  const m = t.ed.method;
+  if (b.mode !== 'none' && (m === 'HEAD' || m === 'GET')) {
+    box.append(ui.note(m === 'HEAD' ? 'HEAD requests never carry a body: this one is left out.'
+      : backend.mode === 'local' ? 'Sent with GET, like Postman does. Some servers ignore a GET body (Elasticsearch reads it).'
+        : 'Browsers can\'t send a body with GET: it is left out here. Run ApiMan locally to send it.', m === 'HEAD' || backend.mode !== 'local' ? 'warn' : 'muted'));
+  }
 }
 
 const CM_MODES = {
@@ -3450,13 +3499,13 @@ function renderResponse() {
   // body
   $('#respTools').hidden = false;
   $('#respTools').classList.toggle('no-body', !hasRes);
-  const previewable = hasRes && (/html|xml|svg/.test(contentType(res)) || (res.binary && /^image\//.test(contentType(res))));
+  const previewable = hasRes && (/html|xml|svg/.test(contentType(res)) || (res.binary && /^image\//.test(contentType(res))) || (!res.binary && !!res.body));
   const view = t.bodyView === 'preview' && !previewable ? 'pretty' : t.bodyView; // nothing to preview: show Pretty, keep the choice for HTML
   $$('#respTools .seg-btn').forEach((b) => { const on = b.dataset.view === view; b.classList.toggle('on', on); b.setAttribute('aria-checked', String(on)); });
   const pv = $('#respTools [data-view="preview"]');
   pv.disabled = false;
   pv.setAttribute('aria-disabled', String(!previewable));
-  pv.title = previewable ? '' : 'Preview shows HTML and images; this response is neither.';
+  pv.title = previewable ? '' : 'Preview shows HTML, images and text; this response has none.';
   clearFind();
   if (!$('#findBar').hidden) setTimeout(() => runFind(0), 0); // keep the open Find bar in sync with the new response
   $('#respBody').replaceChildren(...notes, ...(hasRes ? [bodyView(res, view)] : []));
@@ -3468,6 +3517,7 @@ function renderResponse() {
     ? h('table', { class: 'grid' }, h('thead', null, h('tr', null, ...['Name', 'Value', 'Domain', 'Path', 'Expires', 'Flags'].map((x) => h('th', null, x)))),
       h('tbody', null, cookies.map((c) => h('tr', null, h('td', null, c.name), h('td', { class: 'mono' }, c.value), h('td', null, c.domain || ''), h('td', null, c.path || ''), h('td', null, c.expires || ''), h('td', null, c.flags.join(', '))))))
     : ui.emptyPane({ title: 'No cookies', text: backend.mode === 'local' ? 'The response didn\'t set any.' : 'The response set none that browsers let pages read. Run ApiMan locally to see Set-Cookie headers.' }));
+  if (backend.mode === 'local') $('#respCookies').append(ui.actions(ui.button({ label: 'Manage cookies…', size: 'small', onClick: () => openCookies() })));
   // tests
   $('#respTests').replaceChildren(tests.length
     ? h('div', null, ui.hint(`${passed} passed, ${failed} failed${tests.length - passed - failed ? `, ${tests.length - passed - failed} skipped` : ''}`),
@@ -3475,7 +3525,7 @@ function renderResponse() {
     : ui.emptyPane({ icon: 'check', title: 'No tests ran', text: 'Right-click a value in the JSON body to add a test for it, or write one in Scripts → Tests:',
       example: 'pm.test("Status is 200", () => {\n  pm.response.to.have.status(200);\n});' }));
   // console
-  $('#respConsole').replaceChildren(...(out.logs && out.logs.length
+  $('#respConsole').replaceChildren(...(stale ? [ui.emptyPane({ title: 'Sending…', text: 'This send\'s logs appear when it finishes.' })] : out.logs && out.logs.length
     ? out.logs.map((l) => ui.logLine(l.src || '', l.text, { error: 'err', warn: 'warn' }[l.level] || ''))
     : [ui.emptyPane({ title: 'Nothing logged', text: 'console.log() output from scripts appears here.' })]));
   renderDiff();
@@ -3604,11 +3654,15 @@ function bodyView(res, view) {
   const ct = contentType(res);
   if (view === 'preview') {
     if (res.binary && /^image\//.test(ct) && res.bodyBase64) return h('img', { class: 'preview', alt: 'Response image', src: `data:${ct.split(';')[0]};base64,${res.bodyBase64}` });
-    if (!res.binary && /html|xml|svg/.test(ct)) {
+    if (!res.binary && (/html|xml|svg/.test(ct) || res.asHtml)) {
       // No scripts, no network: sandbox="" plus a CSP that only allows inline styles and data: images.
       const frame = h('iframe', { class: 'preview', sandbox: '', title: 'Response preview', referrerpolicy: 'no-referrer' });
       frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">${inertHtml(res.body)}`;
       return frame;
+    }
+    if (!res.binary && res.body) {
+      return ui.emptyPane({ title: `Served as ${ct.split(';')[0] || 'text'}, not HTML`, text: 'Render it as HTML anyway, in the same sandbox (no scripts, no network)?',
+        actions: [ui.button({ label: 'Render as HTML anyway', size: 'small', onClick: () => { res.asHtml = true; renderResponse(); } })] });
     }
     return ui.hint('Preview works for HTML and images. Use Pretty or Raw for this response.');
   }
@@ -4107,7 +4161,7 @@ function wsConnect(t) {
   const vars = merged(scopesFor(t.cid));
   const url = resolve(t.ed.url, vars).trim();
   const missing = unresolved([url]);
-  if (missing.length) { toast(`Unknown variable {{${missing[0]}}}. Define it in the environment, the collection, or Globals.`, 'err'); return; }
+  if (missing.length) { toast(missingVarMessage(missing, vars), 'err'); return; }
   try { new URL(url); } catch { toast(`"${url}" isn't a valid URL.`, 'err'); return; }
   const headers = t.ed.headers.filter((x) => !x.disabled && x.key);
   const proto = headers.find((x) => /^sec-websocket-protocol$/i.test(x.key));
@@ -4304,6 +4358,7 @@ const dialogQueue = [];
 let dialogSeq = 0, closingSeq = null;
 /** Automation's own window (#automation): it never saves the API client's tabs (they're the main window's, and would be stale). */
 const automationWin = { only: location.hash === '#automation', aside: false };
+if (automationWin.only) window.name = 'apiman-automation'; // Run → Automation brings this window forward, however it was opened
 // aborts the collection run going in this page; outlives one Automation view (Edit environment reopens it), so Stop still reaches it
 let suiteCtrl = null;
 const dialogCloses = new Map(); // dialog number -> its onClose
@@ -4327,12 +4382,13 @@ function updateDock() {
   if (focused && dlg.contains(focused)) focused.focus({ preventScroll: true });
 }
 window.addEventListener('resize', () => requestAnimationFrame(updateDock));
-function renderDialog({ title, body, buttons = [], wide = false, full = false, confirm = false, tall = false, drawer = false, cancel = 'Cancel', closable = true, onClose, focus, onOpen }) {
+function renderDialog({ title, body, buttons = [], wide = false, full = false, page = false, confirm = false, tall = false, drawer = false, cancel = 'Cancel', closable = true, onClose, focus, onOpen }) {
   const dlg = $('#dlg');
   $('.dlg-head .btn.icon').hidden = !closable; // closable: false = a whole window (Automation's), no ✕ and no Esc
   dlg.dataset.locked = closable ? '' : '1';
   dlg.classList.toggle('wide', wide);
   dlg.classList.toggle('full', full);
+  dlg.classList.toggle('page', full && page); // the whole window, no scrim or frame (Automation's own window)
   dlg.classList.toggle('confirm', confirm);
   $('#dlgBody').classList.toggle('tall', tall); // dialogs with tabs keep one height, so nothing jumps under the cursor
   $('#dlg').classList.toggle('drawer', drawer); // docked at the side: the app shrinks beside it, so previews stay visible
@@ -4489,7 +4545,15 @@ async function editEnvironment(id, folder = '') {
   const openedKeys = new Set(rows.map((r) => r.key)); // to tell variables added elsewhere from ones deleted here
   const nameIn = ui.input({ value: isGlobals ? 'Globals' : doc.name, placeholder: 'e.g. Local, Staging, Production', disabled: isGlobals, spellcheck: 'false' });
   const box = h('div');
-  kvTable(box, rows, { secret: true, placeholders: ['Variable', 'Value'] });
+  const dupNote = h('div');
+  const checkDups = () => { // the last one wins (like Postman): say so, rather than quietly sending somewhere else
+    const seen = new Map();
+    for (const r of rows) if (r.key && !r.disabled) seen.set(r.key, (seen.get(r.key) || 0) + 1);
+    const dups = [...seen].filter(([, n]) => n > 1).map(([k]) => k);
+    dupNote.replaceChildren(dups.length ? ui.note(`${dups.map((k) => `"${k}"`).join(', ')} ${dups.length > 1 ? 'are' : 'is'} defined more than once: only the last one is used. Delete or rename the others.`, 'warn') : '');
+  };
+  kvTable(box, rows, { secret: true, placeholders: ['Variable', 'Value'], onChange: checkDups });
+  checkDups();
   const activateCheck = ui.check({ label: 'Use this environment', checked: !id || id === state.activeEnv });
   const activate = activateCheck.input;
   openDialog({
@@ -4498,6 +4562,7 @@ async function editEnvironment(id, folder = '') {
     body: [
       isGlobals ? ui.hint('Globals apply everywhere, with the lowest priority: environment and collection values win.') : ui.field('Name', nameIn),
       box,
+      dupNote,
       ui.hint('Secret values are hidden on screen. Like everything in ApiMan they are stored only on this computer.'),
       isGlobals ? null : activateCheck,
     ],
@@ -5253,6 +5318,13 @@ function parseCurl(cmd) {
     else if (!url) url = tk;
   }
   if (!url) throw new Error('No URL found in the cURL command.');
+  const userinfo = /^([a-z][a-z0-9+.-]*:\/\/)([^/@?#]*)@/i.exec(url);
+  if (userinfo) {
+    const [user, ...rest] = userinfo[2].split(':');
+    const dec = (x) => { try { return decodeURIComponent(x); } catch { return x; } };
+    if (ed.auth.type !== 'basic') ed.auth = { type: 'basic', username: dec(user), password: dec(rest.join(':')) };
+    url = userinfo[1] + url.slice(userinfo[0].length);
+  }
   if (getMode && data.length) { url += (url.includes('?') ? '&' : '?') + data.join('&'); data.length = 0; }
   ed.method = method || (data.length || form.length ? 'POST' : 'GET');
   ed.url = url;
@@ -5285,6 +5357,20 @@ function codeWire(mask) {
   const built = buildWire(t.ed, requestSnapshot(t.ed), merged(sc), ai);
   if (built.error) return built;
   const w = built.wire;
+  try { // the URL as the server sends it: spaces and non-ASCII encoded, user:password@ turned into Basic auth
+    const u = new URL(w.url);
+    if (u.username || u.password) {
+      const user = decodeURIComponent(u.username), pw = decodeURIComponent(u.password);
+      u.username = ''; u.password = '';
+      if (!w.headers.some(([k]) => /^authorization$/i.test(k))) w.headers.push(['Authorization', `Basic ${btoa(unescape(encodeURIComponent(`${user}:${pw}`)))}`]);
+    }
+    u.hash = '';
+    w.url = u.href;
+  } catch { /* buildWire checked it */ }
+  if (w.method === 'HEAD' || (w.method === 'GET' && backend.mode !== 'local')) { // what send() does with these bodies
+    if (w.body.kind !== 'none') w.headers = w.headers.filter(([k]) => k.toLowerCase() !== 'content-type');
+    w.body = { kind: 'none' };
+  }
   if (mask) {
     const a = effectiveAuth(t.ed, t.cid, t.itemId).auth;
     const vars = merged(sc);
@@ -5337,9 +5423,10 @@ const GENERATORS = {
     }
     lines.push(`const response = await fetch(${dq(w.url)}, {`, `  method: ${dq(w.method)},`);
     if (headers.length) { lines.push('  headers: {'); for (const [k, v] of headers) lines.push(`    ${dq(k)}: ${dq(v)},`); lines.push('  },'); }
-    if (w.body.kind === 'text') lines.push(`  body: ${dq(w.body.text)},`);
-    if (w.body.kind === 'formdata') lines.push('  body: form,');
-    if (w.body.kind === 'file') lines.push(`  body: file, // ${w.body.file.name}`);
+    if (w.method === 'GET' && w.body.kind !== 'none') lines.push('  // fetch() can\'t send a body with GET (it throws): ApiMan sends it from its local server');
+    else if (w.body.kind === 'text') lines.push(`  body: ${dq(w.body.text)},`);
+    else if (w.body.kind === 'formdata') lines.push('  body: form,');
+    else if (w.body.kind === 'file') lines.push(`  body: file, // ${w.body.file.name}`);
     lines.push('});', 'console.log(response.status, await response.text());');
     return lines.join('\n');
   } },
@@ -5425,10 +5512,12 @@ function openCode() {
     pre.textContent = r.error ? `// ${r.error}` : GENERATORS[lang].gen(r.wire);
   };
   mask.addEventListener('change', draw);
+  dynMemo = new Map(); // {{$guid}} and friends keep one value while the dialog is open
   draw();
   openDialog({
     title: 'Generate code',
     cancel: 'Close',
+    onClose: () => { dynMemo = null; },
     focus: '#dlgFoot .btn.primary',
     wide: true,
     body: [tabsBar, viewer, maskCheck],
@@ -5823,6 +5912,21 @@ async function openRunner(cid, folderId) {
   const results = h('div', { id: 'runResults', hidden: true }, summary, bar, exportBar,
     h('table', { class: 'grid' }, h('thead', null, head), tbody));
   let ctrl = null;
+  const runErr = h('div');
+  /** Iterations: a whole number 1–1000; delay: a whole number of ms 0–60000. Run is off until both are. */
+  const checkInputs = () => {
+    const it = iterIn.value.trim(), dl = delayIn.value.trim();
+    const bad = !/^\d+$/.test(it) || +it < 1 || +it > 1000 ? 'Iterations must be a whole number from 1 to 1000.'
+      : dl !== '' && (!/^\d+$/.test(dl) || +dl > 60000) ? 'The delay must be a whole number of milliseconds from 0 to 60000.' : '';
+    iterIn.setAttribute('aria-invalid', String(bad.startsWith('Iterations')));
+    delayIn.setAttribute('aria-invalid', String(bad.startsWith('The delay')));
+    runErr.replaceChildren(bad ? ui.note(bad, 'err') : '');
+    const b = $('#dlgFoot .btn.primary');
+    if (b && !ctrl) b.disabled = !!bad;
+    return !bad;
+  };
+  iterIn.addEventListener('input', checkInputs);
+  delayIn.addEventListener('input', checkInputs);
 
   openDialog({
     title: 'Collection runner',
@@ -5830,6 +5934,7 @@ async function openRunner(cid, folderId) {
     body: [
       h('div', { class: 'grid-2' }, ui.field('Collection', colSel), ui.field('Folder', folderSel)),
       h('div', { class: 'grid-2' }, ui.field('Iterations', iterIn), ui.field('Delay between requests (ms)', delayIn)),
+      runErr,
       dataField,
       keepCheck,
       stopCheck,
@@ -5839,6 +5944,7 @@ async function openRunner(cid, folderId) {
     // Not awaited, so the button stays clickable as "Stop" while the run is in progress.
     buttons: [{ label: 'Run', primary: true, onClick: () => {
       if (ctrl) { ctrl.abort(); return false; }
+      if (!checkInputs()) return false;
       run().catch((e) => { toast(e.message, 'err'); ctrl = null; const b = $('#dlgFoot .btn.primary'); if (b) b.textContent = 'Run again'; });
       return false;
     } }],
@@ -6367,13 +6473,17 @@ function showAutomation() {
     win.focus();
     return;
   }
-  toast('The browser blocked the Automation window, so it opens here. Allow pop-ups for ApiMan to give it its own window.', 'warn');
+  toast('Pop-ups are blocked, so Automation opens here: allow them to give it its own window.', 'warn');
   openAutomation().catch((err) => toast(err.message, 'err'));
 }
+/** A test's identity across runs: its file and name (newer runs), else suite and name. */
+const testKey = (t) => t.key || `${t.suite} › ${t.name}`;
+const MAX_HTTP_ROWS = 3000; // API calls a run view keeps in memory
 async function openAutomation() {
   let projects = await api('GET', '/api/robot/projects');
   const saved = ls.get('apiman:automation', {});
   const remember = (k, v) => { saved[k] = v; ls.set('apiman:automation', saved); };
+  const rememberTags = () => { if (project) remember('includes', { ...(saved.includes || {}), [project.id]: tagsIn.value }); };
   let project = null;      // the open project's details
   let run = null;          // { id, offset, timer, meta } of the run shown
   let shotUrl = null;      // blob URL of the screenshot shown
@@ -6413,7 +6523,7 @@ async function openAutomation() {
     envSel.value = [...envSel.options].some((o) => o.value === keep) ? keep : '';
   };
   fillEnvs();
-  const tagsIn = ui.input({ code: true, placeholder: 'e.g. smoke, api (empty: every test)', value: saved.include || '', spellcheck: 'false', onInput: () => remember('include', tagsIn.value) });
+  const tagsIn = ui.input({ code: true, placeholder: 'e.g. smoke, api (empty: every test)', value: '', spellcheck: 'false', onInput: () => rememberTags() });
   const tagChips = h('div', { class: 'actions' });
   const speedSel = ui.select([['watch', 'Watch: each browser step stays on screen'], ['full', 'Full speed']], { value: saved.speed || 'watch', onChange: () => remember('speed', speedSel.value) });
 
@@ -6421,25 +6531,27 @@ async function openAutomation() {
   const summary = ui.meta([h('span', null, 'Choose what to run, then Run.')]);
   const bar = ui.progress();
   const shotImg = h('img', { class: 'preview', alt: 'The browser as the last UI step left it', hidden: true });
-  const shotEmpty = ui.hint('The browser appears here, step by step, as soon as a UI test (Browser library) opens a page. Suite setup (starting servers, API calls) comes first.');
+  const shotEmpty = ui.emptyPane({ icon: 'play', title: 'No page yet', text: 'The browser shows here, step by step, once a UI test opens a page.' });
   const shotCaption = ui.hint('', { oneLine: true });
   const steps = h('div', { class: 'console scroll', role: 'log', 'aria-label': 'Steps', tabindex: '0' });
   const failures = h('div', { class: 'dlg-after', hidden: true });
-  const live = [summary, bar, h('div', { class: 'grid-2 lead' },
-    h('div', null, ui.sectionHead('Browser', null, null), shotEmpty, shotImg, shotCaption),
-    h('div', null, ui.sectionHead('Steps', null, null), steps)), failures];
+  const browserCol = h('div', null, ui.sectionHead('Browser', null, null), shotEmpty, shotImg, shotCaption);
+  const liveGrid = h('div', { class: 'grid-2 lead' }, browserCol, h('div', null, ui.sectionHead('Steps', null, null), steps));
+  const live = [summary, bar, liveGrid, failures];
+  /** A collection (API) run has no browser: the steps take the whole width. */
+  const liveFor = (kind) => { const api = kind === 'collection'; browserCol.hidden = api; liveGrid.classList.toggle('grid-2', !api); liveGrid.classList.toggle('lead', !api); };
   /** A failed test: its error and, for UI tests, the screen at the moment it failed. */
   const addFailure = (e, runId) => {
-    if (failures.hidden) { failures.hidden = false; failures.replaceChildren(ui.sectionHead('Failures', 'the screen when each UI test failed', null)); }
+    if (failures.hidden) { failures.hidden = false; failures.replaceChildren(ui.sectionHead('Failures', run && run.meta && run.meta.kind === 'collection' ? 'what each failed request answered' : 'the screen when each UI test failed', null)); }
     const img = h('img', { class: 'preview', alt: `The browser when "${e.name}" failed`, hidden: true });
-    failures.append(ui.result('err', 'Fail', `${e.name}`, `${e.suite ? `${e.suite}: ` : ''}${e.message || 'Failed'}`), img);
+    failures.append(ui.result('err', 'Failed', `${e.name}`, `${e.suite ? `${e.suite}: ` : ''}${e.message || 'Failed'}`), img);
     if (e.shot) runFile(runId, e.shot).then((url) => { img.src = url; img.hidden = false; }).catch(() => {});
   };
 
   // ---- API calls tab ----
   const httpBody = h('tbody');
   const httpDetail = h('div', { class: 'dlg-after' });
-  const httpEmpty = ui.hint('Every HTTP call the tests make through requests (RequestsLibrary or your own Python keywords) is listed here as it happens: request, response and errors.');
+  const httpEmpty = ui.emptyPane({ title: 'No API calls yet', text: 'Every HTTP call the tests make (RequestsLibrary, requests) is listed here as it happens.' });
   const apiPane = [httpEmpty, h('table', { class: 'grid boxed', hidden: true }, h('thead', null, h('tr', null,
     h('th', { class: 'tight' }, '#'), h('th', null, 'Request'), h('th', null, 'Test'), ...['Status', 'Time'].map((x) => h('th', { class: 'num' }, x)))), httpBody), httpDetail];
   const showHttp = (e, i) => {
@@ -6453,12 +6565,16 @@ async function openAutomation() {
       e.error ? ui.note(e.error, 'err') : codeEditor({ value: `${heads(e.resHeaders)}\n\n${pretty(e.resBody)}`, mode: /^\s*[[{]/.test(e.resBody || '') ? 'json' : 'text', readOnly: true, label: 'Response', fold: true }));
   };
   const addHttp = (e) => {
+    if (http.length >= MAX_HTTP_ROWS) { // a long run: the run log on disk has every call; the page keeps the first ones
+      if (http.length === MAX_HTTP_ROWS) { http.push(null); line('ApiMan', `Showing the first ${MAX_HTTP_ROWS.toLocaleString()} API calls; Robot's log has them all.`, 'muted'); }
+      return;
+    }
     http.push(e);
     const i = http.length - 1;
     apiPane[1].hidden = false; httpEmpty.hidden = true;
     httpBody.append(h('tr', { tabindex: '0', 'data-i': String(i), onclick: () => showHttp(e, i), onkeydown: (ev) => { if (ev.key === 'Enter') showHttp(e, i); } },
       h('td', { class: 'tight' }, String(i + 1)),
-      h('td', { class: 'mono' }, ui.method(e.method), ' ', e.url),
+      h('td', { class: 'mono clip', title: e.url }, ui.method(e.method), ' ', e.url),
       h('td', null, e.test || '–'),
       h('td', { class: 'num' }, e.error ? ui.status(null) : ui.status(e.status, { small: true })),
       h('td', { class: 'num' }, e.ms != null ? fmtMs(e.ms) : '–')));
@@ -6513,7 +6629,9 @@ async function openAutomation() {
       toast(`Using ${state.envs[existing].name}: it already points at this project's app.`, 'muted');
       return;
     }
-    const doc = { name: project.name, values: project.keys.map((k) => ({ key: k.name, value: '', type: /pass|secret|token|key/i.test(k.name) ? 'secret' : 'default', enabled: true })), _postman_variable_scope: 'environment' };
+    const norm = (k) => String(k).replace(/[\s_]/g, '').toLowerCase(); // Robot ignores case, spaces and _: one key serves both
+    const keys = [...new Map(need.map((k) => [norm(k), k])).values()];
+    const doc = { name: project.name, values: keys.map((k) => ({ key: k, value: '', type: /pass|secret|token|key/i.test(k) ? 'secret' : 'default', enabled: true })), _postman_variable_scope: 'environment' };
     const id = await backend.environments.create(doc);
     await refreshEnvironments();
     renderEnvPicker();
@@ -6570,14 +6688,14 @@ async function openAutomation() {
     releaseHistory();
     const runs = await api('GET', `/api/robot/runs?project=${encodeURIComponent(project.id)}`);
     const done = runs.filter((r) => r.status !== 'running');
-    if (!done.length) { historyPane.replaceChildren(ui.hint('Every run is kept here, with its report and log, so you can see trends: pass rate, slow tests and flaky ones.')); return; }
+    if (!done.length) { historyPane.replaceChildren(ui.emptyPane({ title: 'No runs yet', text: 'Each run is kept here with its report and log: pass rate, what changed, flaky tests.' })); return; }
     const rate = (r) => { const n = (r.passed || 0) + (r.failed || 0); return n ? r.passed / n : 0; };
     const dur = (r) => (r.ended && r.started ? Math.round((r.ended - r.started) * 1000) : 0);
     const same = (a, b) => a.kind === b.kind && a.target === b.target && (a.test || '') === (b.test || '') && (a.include || '') === (b.include || '');
     // every test across runs (newest first): its results, times, and the screen of its latest failure
     const byTest = new Map();
     for (const r of done) for (const t of r.tests || []) {
-      const k = `${t.suite} › ${t.name}`;
+      const k = testKey(t);
       const e = byTest.get(k) || { key: k, name: t.name, suite: t.suite, results: [], ms: [], lastFail: null };
       e.results.push({ status: t.status, run: r });
       if (t.ms != null) e.ms.push(t.ms);
@@ -6587,15 +6705,15 @@ async function openAutomation() {
     // since the last comparable run (same kind and same selection): what broke, what got fixed, what got slower
     const latest = done[0];
     const prev = done.slice(1).find((r) => same(r, latest));
-    const now = new Map((latest.tests || []).map((t) => [`${t.suite} › ${t.name}`, t]));
-    const before = new Map(((prev && prev.tests) || []).map((t) => [`${t.suite} › ${t.name}`, t]));
-    const broke = [...now.values()].filter((t) => t.status === 'FAIL' && (before.get(`${t.suite} › ${t.name}`) || {}).status === 'PASS');
-    const fixed = [...now.values()].filter((t) => t.status === 'PASS' && (before.get(`${t.suite} › ${t.name}`) || {}).status === 'FAIL');
-    const slower = [...now.values()].filter((t) => { const b = before.get(`${t.suite} › ${t.name}`); return b && t.status === 'PASS' && t.ms != null && b.ms != null && t.ms > b.ms * 1.5 && t.ms - b.ms > 100; });
+    const now = new Map((latest.tests || []).map((t) => [testKey(t), t]));
+    const before = new Map(((prev && prev.tests) || []).map((t) => [testKey(t), t]));
+    const broke = [...now.values()].filter((t) => t.status === 'FAIL' && (before.get(testKey(t)) || {}).status === 'PASS');
+    const fixed = [...now.values()].filter((t) => t.status === 'PASS' && (before.get(testKey(t)) || {}).status === 'FAIL');
+    const slower = [...now.values()].filter((t) => { const b = before.get(testKey(t)); return b && t.status === 'PASS' && t.ms != null && b.ms != null && t.ms > b.ms * 1.5 && t.ms - b.ms > 100; });
     const badge = (e) => {
       const st = e.results.map((x) => x.status).filter((x) => x === 'PASS' || x === 'FAIL');
-      if (broke.some((t) => `${t.suite} › ${t.name}` === e.key)) return ui.pill('New failure', 'err');
-      if (fixed.some((t) => `${t.suite} › ${t.name}` === e.key)) return ui.pill('Fixed', 'ok');
+      if (broke.some((t) => testKey(t) === e.key)) return ui.pill('New failure', 'err');
+      if (fixed.some((t) => testKey(t) === e.key)) return ui.pill('Fixed', 'ok');
       if (st.includes('PASS') && st.includes('FAIL')) return ui.pill('Flaky', 'warn');
       if (st.length && st.every((x) => x === 'FAIL')) return ui.pill('Failing', 'err');
       return null;
@@ -6620,18 +6738,18 @@ async function openAutomation() {
       ]),
       ui.sectionHead('Since the last run', prev ? `${runLabel(latest)}, ${fmtWhen(latest.started)} vs ${fmtWhen(prev.started)}` : `${runLabel(latest)}: no earlier run of the same selection to compare with`, null),
       prev ? (broke.length || fixed.length || slower.length ? h('div', null,
-        ...broke.map((t) => ui.result('err', 'New failure', t.name, `${t.suite}: ${t.message || 'failed'}`)),
+        ...broke.map((t) => ui.result('err', 'New failure', t.name, t.suite)),
         ...fixed.map((t) => ui.result('ok', 'Fixed', t.name, t.suite)),
-        ...slower.map((t) => ui.result('warn', 'Slower', t.name, `${t.suite}: ${fmtMs(before.get(`${t.suite} › ${t.name}`).ms)} → ${fmtMs(t.ms)}`)))
+        ...slower.map((t) => ui.result('warn', 'Slower', t.name, `${t.suite}: ${fmtMs(before.get(testKey(t)).ms)} → ${fmtMs(t.ms)}`)))
         : ui.note('Nothing changed: the same tests passed and failed, at about the same speed.', 'ok')) : null,
       gallery.length ? ui.sectionHead('Failures in the last run', gallery.some((t) => t.shot) ? 'the screen when each failed; replay a test step by step' : null, null) : null,
       gallery.length ? h('div', { class: 'cards' }, ...gallery.map((t) => {
         const img = h('img', { class: 'preview', alt: `The screen when "${t.name}" failed`, hidden: true });
         if (t.shot) runFile(latest.id, t.shot).then((url) => { historyUrls.push(url); img.src = url; img.hidden = false; }).catch(() => {});
-        return ui.card({ title: t.name, badge: ui.pill('Fail', 'err'), body: [ui.hint(t.suite, { oneLine: true }), img, ui.hint(t.message || 'Failed')],
+        return ui.card({ title: t.name, badge: ui.pill('Failed', 'err'), body: [ui.hint(t.suite, { oneLine: true }), img, ui.hint(t.message || 'Failed')],
           actions: latest.kind === 'collection' ? [] : [ // API runs have no screens or Robot log
             ui.button({ label: 'Replay', size: 'small', onClick: () => replay(latest, t).catch((e) => toast(e.message, 'err')) }),
-            ui.button({ label: 'Log', variant: 'ghost', size: 'small', onClick: () => showRobotPage(latest.id, 'log.html') })] });
+            ui.button({ label: 'Log', size: 'small', onClick: () => showRobotPage(latest.id, 'log.html') })] });
       })) : null,
       ui.sectionHead('Tests', `${tests.length > shownTests.length ? `the first ${shownTests.length} of ${tests.length}; ` : ''}last 10 results, oldest to newest`, null),
       h('table', { class: 'grid boxed' }, h('thead', null, h('tr', null, h('th', null, 'Test'), h('th', null, 'Last 10'), h('th', { class: 'num' }, 'Passed'), h('th', { class: 'num' }, 'Average'), h('th', { class: 'tight' }, ''))),
@@ -6651,23 +6769,25 @@ async function openAutomation() {
       ui.sectionHead('Duration per run', null, null),
       ui.chart(chartRuns.map((r) => ({ value: dur(r) / Math.max(1, ...chartRuns.map(dur)), tone: 'muted', title: `${fmtWhen(r.started)}: ${fmtMs(dur(r))}` })), { label: 'Duration per run' }),
       ui.sectionHead('Runs', null, null),
-      h('table', { class: 'grid boxed' }, h('thead', null, h('tr', null, h('th', null, 'Started'), h('th', null, 'Ran'), h('th', null, 'Environment'), h('th', null, 'Result'), h('th', { class: 'num' }, 'Time'), h('th', { class: 'tight' }, ''))),
+      h('table', { class: 'grid boxed' }, h('thead', null, h('tr', null, h('th', null, 'Started'), h('th', null, 'Ran'), h('th', { class: 'desktop-only' }, 'Environment'), h('th', null, 'Result'), h('th', { class: 'num desktop-only' }, 'Time'), h('th', { class: 'tight' }, ''))),
         h('tbody', null, ...done.map((r) => h('tr', null,
           h('td', null, fmtWhen(r.started)),
-          h('td', { class: 'mono' }, r.kind === 'collection' ? ui.pill('API', 'muted') : null, r.kind === 'collection' ? ' ' : null,
+          h('td', { class: 'mono clip', title: runLabel(r) }, r.kind === 'collection' ? ui.pill('API', 'muted') : null, r.kind === 'collection' ? ' ' : null,
             [r.target === '.' ? 'Everything' : r.target, r.test && ` › ${r.test}`, r.include && ` [${r.include}]`].filter(Boolean).join('')),
-          h('td', null, r.env || '–'),
+          h('td', { class: 'desktop-only' }, r.env || '–'),
           h('td', null, ui.pill(r.status === 'stopped' ? 'Stopped' : r.status === 'passed' ? 'Passed' : r.failed ? `${r.failed} failed` : 'Error', runTone(r.status)), ' ', `${r.passed || 0} passed`),
-          h('td', { class: 'num' }, fmtMs(dur(r))),
+          h('td', { class: 'num desktop-only' }, fmtMs(dur(r))),
           h('td', { class: 'tight' }, ui.button({ label: 'Show', variant: 'ghost', size: 'small', onClick: () => follow(r.id, true) }),
-            r.kind === 'collection' ? null : ui.button({ label: 'Report', variant: 'ghost', size: 'small', onClick: () => showRobotPage(r.id, 'report.html') }),
-            r.kind === 'collection' ? null : ui.button({ label: 'Log', variant: 'ghost', size: 'small', onClick: () => showRobotPage(r.id, 'log.html') })))))),
+            r.kind === 'collection' ? null : ui.button({ label: 'Report', variant: 'ghost', size: 'small', cls: 'desktop-only', onClick: () => showRobotPage(r.id, 'report.html') }),
+            r.kind === 'collection' ? null : ui.button({ label: 'Log', variant: 'ghost', size: 'small', cls: 'desktop-only', onClick: () => showRobotPage(r.id, 'log.html') })))))),
     ].filter(Boolean));
   }
   /** Replay one test of a run, frame by frame: every screen the live view showed, with the step that made it. */
   async function replay(runMeta, t) {
     const res = await api('GET', `/api/robot/runs/${encodeURIComponent(runMeta.id)}?from=0`);
-    const frames = res.events.filter((e) => e.shot && (e.test === t.name || (e.t === 'test_end' && e.name === t.name)))
+    // by the test's file and name when the run recorded them: two tests with the same name never mix
+    const mine = (e) => (t.key && e.tid ? e.tid === t.key : (e.t === 'test_end' ? e.name : e.test) === t.name);
+    const frames = res.events.filter((e) => e.shot && mine(e))
       .map((e) => ({ shot: e.shot, step: e.t === 'test_end' ? `${t.name} ended: ${e.status}${e.message ? `, ${e.message}` : ''}` : `${e.lib ? `${e.lib}.` : ''}${e.name}`, fail: e.status === 'FAIL' }));
     if (!frames.length) { toast('No screens were captured for this test (it never opened a page).', 'muted'); return; }
     const urls = new Map();
@@ -6684,10 +6804,10 @@ async function openAutomation() {
     slider.addEventListener('input', () => show(Number(slider.value)));
     const step = (d) => show(Math.max(0, Math.min(frames.length - 1, Number(slider.value) + d)));
     historyPane.replaceChildren(
-      ui.toolbar([ui.sectionHead(`Replay: ${t.name}`, `${fmtWhen(runMeta.started)} · ${frames.length} screens`, null)], [
+      ui.toolbar([ui.button({ label: 'Back to history', variant: 'ghost', size: 'small', onClick: () => renderHistory().catch((e) => toast(e.message, 'err')) }),
+        ui.sectionHead(`Replay: ${t.name}`, `${fmtWhen(runMeta.started)} · ${frames.length} screens`, null)], [
         ui.button({ label: 'Previous', variant: 'ghost', size: 'small', onClick: () => step(-1) }),
-        ui.button({ label: 'Next', variant: 'ghost', size: 'small', onClick: () => step(1) }),
-        ui.button({ label: 'Back to history', variant: 'ghost', size: 'small', onClick: () => renderHistory().catch((e) => toast(e.message, 'err')) })]),
+        ui.button({ label: 'Next', variant: 'ghost', size: 'small', onClick: () => step(1) })]),
       ui.field(null, slider), caption, img);
     await show(frames.length - 1); // start on the moment it failed
   }
@@ -6696,8 +6816,8 @@ async function openAutomation() {
       const html = await runFile(runId, name, 'text');
       // Robot's own page, here in the History tab and sandboxed: its scripts run, but it can't reach ApiMan's API or storage
       historyPane.replaceChildren(
-        ui.toolbar([ui.sectionHead(name === 'log.html' ? 'Robot log' : 'Robot report', runId, null)],
-          [ui.button({ label: 'Back to history', variant: 'ghost', size: 'small', onClick: () => renderHistory().catch((e) => toast(e.message, 'err')) })]),
+        ui.toolbar([ui.button({ label: 'Back to history', variant: 'ghost', size: 'small', onClick: () => renderHistory().catch((e) => toast(e.message, 'err')) }),
+          ui.sectionHead(name === 'log.html' ? 'Robot log' : 'Robot report', runId, null)], []),
         h('iframe', { class: 'preview tall', sandbox: 'allow-scripts', srcdoc: html, title: name }));
     } catch (e) { toast(e.message, 'err'); }
   }
@@ -6737,9 +6857,21 @@ async function openAutomation() {
     projSel.replaceChildren(...ui.select(projects.map((x) => [x.id, x.name]), { value: projSel.value }).childNodes);
   }
   const showDashboard = () => { projectView.hidden = true; dash.hidden = false; setRunButton(false); renderDashboard().catch((e) => toast(e.message, 'err')); };
+  /** The server refused a run because another is going (from History's Show, another window…): show that one instead. */
+  async function showGoing(err) {
+    if (!/Another run is going/.test(err.message)) return false;
+    const going = (await api('GET', '/api/robot/runs')).find((r) => r.status === 'running');
+    if (!going) return false;
+    toast('Another run is going: showing it.', 'warn');
+    if (going.project !== (project && project.id) && projects.some((x) => x.id === going.project)) await openProject(going.project);
+    $$('.seg-btn', tabBar)[0].click();
+    follow(going.id).catch(() => {});
+    return true;
+  }
   async function openProject(id, runNow = false) {
     projSel.value = id; remember('project', id);
     dash.hidden = true; projectView.hidden = false; setRunButton(false);
+    requestAnimationFrame(() => fitTabs(tabBar)); // measured now that it's visible: a More menu on a phone
     await loadProject();
     if (runNow) await start();
   }
@@ -6771,9 +6903,9 @@ async function openAutomation() {
       return ui.card({
         title: r.name,
         badge: ui.pill(r.linked ? 'Linked' : 'Data folder', 'muted'),
-        dot: running ? ui.dot({ tone: 'warn', label: 'Running now' }) : last ? ui.dot({ tone: last.status === 'passed' ? 'ok' : '', label: `Last run ${last.status}` }) : null,
+        dot: running ? ui.dot({ tone: 'warn', label: 'Running now' }) : last ? ui.dot({ tone: last.status === 'passed' ? 'ok' : last.status === 'stopped' ? 'muted' : 'err', label: `Last run ${last.status}` }) : null,
         body: [
-          ui.path(r.linked ? r.path : `${state.dataDir || 'data folder'}/${r.path}`),
+          r.linked ? ui.path(r.path) : null,
           r.error ? ui.note(r.error, 'err') : ui.meta([
             h('span', null, ui.value(String(r.tests || 0)), ` tests in ${r.suites || 0} suites`),
             r.tags && r.tags.length ? h('span', null, r.tags.slice(0, 4).join(', ')) : null,
@@ -6783,19 +6915,19 @@ async function openAutomation() {
           runs.length > 1 ? ui.chart(runs.map((x) => { const n = (x.passed || 0) + (x.failed || 0); return { value: n ? (x.passed || 0) / n : 0.05, tone: runTone(x.status), title: `${fmtWhen(x.started)}: ${x.passed || 0} passed, ${x.failed || 0} failed` }; }), { small: true, label: 'Recent runs' }) : null,
           env ? ui.meta([h('span', null, 'Environment ', ui.value(env.name)), ...urls.slice(0, 2).map((u) => {
             const c = up.get(u.url);
-            return h('span', { title: u.url }, ui.dot({ tone: c && c.up ? 'ok' : '', label: c && c.up ? 'Answering' : 'Not answering' }), ` ${u.key} ${c && c.up ? 'up' : 'down'}`);
+            return h('span', { title: u.url }, ui.dot({ tone: c && c.up ? 'ok' : 'err', label: c && c.up ? 'Answering' : 'Not answering' }), ` ${u.key} ${c && c.up ? 'up' : 'down'}`);
           })]) : ui.hint(r.keys && r.keys.length ? `Needs ${r.keys.slice(0, 4).join(', ')}: pick an environment when you open it.` : 'Needs no environment.'),
           pairs.get(r.id) ? ui.meta([h('span', null, ui.pill('API', 'muted')), h('span', null, (state.colList.find((c) => c.id === pairs.get(r.id).cid) || {}).name || ''),
             h('span', null, ui.value(String(pairs.get(r.id).covered.size)), ` of ${pairs.get(r.id).total} requests in the tests`)]) : null,
         ].filter(Boolean),
         actions: [
           ui.button({ label: running ? 'Show run' : 'Open', size: 'small', onClick: () => openProject(r.id).then(() => running && follow(running.id)).catch((e) => toast(e.message, 'err')) }),
-          running || anyRunning || r.error ? null : ui.button({ label: 'Run', size: 'small', onClick: () => openProject(r.id, true).catch((e) => toast(e.message, 'err')) }),
+          running || anyRunning || r.error ? null : ui.button({ label: 'Run tests', size: 'small', title: 'Run this project\'s Robot Framework tests', onClick: () => openProject(r.id, true).catch((e) => toast(e.message, 'err')) }),
           running || anyRunning || r.error || !pairs.get(r.id) ? null : ui.button({ label: 'Run API', size: 'small', title: 'Run the paired collection with this project\'s test data',
             onClick: () => openProject(r.id).then(() => loadSuiteDataNow()).then(() => runSuite()).catch((e) => toast(e.message, 'err')) }),
-          r.linked ? ui.button({ label: 'Unlink', variant: 'ghost', size: 'small', onClick: async () => {
+          r.linked ? ui.button({ label: 'Unlink', size: 'small', onClick: async () => {
             try { await api('DELETE', `/api/robot/links/${encodeURIComponent(r.id)}`); } catch (e) { toast(e.message, 'err'); return; }
-            toast(`Unlinked ${r.name}: its folder and runs are untouched. Link it again any time.`, 'muted');
+            toast(`Unlinked ${r.name}: its folder and runs are untouched.`, 'muted');
             await renderDashboard();
           } }) : null,
         ].filter(Boolean),
@@ -6812,7 +6944,7 @@ async function openAutomation() {
         h('span', null, ui.value(String(rows.length)), rows.length === 1 ? ' project' : ' projects'),
         h('span', null, ui.value(String(tests)), ' tests'),
         h('span', null, ui.value(String(allRuns.length)), ' runs'),
-        h('span', null, 'Runs passing ', ui.value(allRuns.length ? `${Math.round((passedRuns / allRuns.length) * 100)}%` : '–', passedRuns === allRuns.length ? 'ok' : 'warn')),
+        h('span', null, 'Runs passing ', ui.value(allRuns.length ? `${Math.round((passedRuns / allRuns.length) * 100)}%` : '–', !allRuns.length ? 'muted' : passedRuns === allRuns.length ? 'ok' : 'warn')),
         h('span', null, ui.value(String(lastRuns.filter((x) => x.status === 'passed').length)), ` of ${lastRuns.length} projects green on their last run`),
         h('span', null, ui.value(String(appRows.length)), ' apps running'),
       ]) : null,
@@ -6834,7 +6966,7 @@ async function openAutomation() {
       allUrls.length ? ui.sectionHead('Environments', 'is each one\'s app answering?', null) : null,
       allUrls.length ? h('table', { class: 'grid boxed' }, h('tbody', null, ...state.envList.filter((e) => envUrls(state.envs[e.id]).length).map((e) => h('tr', null,
         h('td', null, e.name),
-        h('td', { class: 'mono' }, ...envUrls(state.envs[e.id]).flatMap((u) => { const c = up.get(u.url); return [h('div', { title: c && !c.up ? c.error : null }, ui.dot({ tone: c && c.up ? 'ok' : '', label: c && c.up ? 'Answering' : 'Not answering' }), ` ${u.key} = ${u.url}`)]; })),
+        h('td', { class: 'mono clip' }, ...envUrls(state.envs[e.id]).flatMap((u) => { const c = up.get(u.url); return [h('div', { class: 'one-line', title: c && !c.up ? `${u.url}: ${c.error}` : u.url }, ui.dot({ tone: c && c.up ? 'ok' : 'err', label: c && c.up ? 'Answering' : 'Not answering' }), ` ${u.key} = ${u.url}`)]; })),
         h('td', { class: 'tight' }, ui.button({ label: 'Edit', variant: 'ghost', size: 'small', onClick: () => aside(() => editEnvironment(e.id)) }))))))
         : null,
     ].filter(Boolean));
@@ -6849,7 +6981,7 @@ async function openAutomation() {
       h('table', { class: 'grid boxed' }, h('tbody', null, ...left.map((c) => {
         const sel = ui.select([['', 'Pair with…'], ...projectsOk.map((r) => [r.id, r.name])], { size: 'small', 'aria-label': `Pair ${c.name} with a project`,
           onChange: () => { if (!sel.value) return; saved.pairs[sel.value] = c.id; remember('pairs', saved.pairs); toast(`Paired ${c.name} with ${projectsOk.find((r) => r.id === sel.value).name}.`, 'ok'); renderDashboard().catch((e) => toast(e.message, 'err')); } });
-        return h('tr', null, h('td', null, c.name), h('td', { class: 'num' }, state.cols[c.id] ? `${countRequests(state.cols[c.id].item)} requests` : ''), h('td', { class: 'tight' }, sel));
+        return h('tr', null, h('td', null, c.name), h('td', { class: 'num' }, state.cols[c.id] ? plural(countRequests(state.cols[c.id].item), 'request') : ''), h('td', { class: 'tight' }, sel));
       })))];
   }
   /** The project's test data is read in the background on load; a Run from a card waits for it. */
@@ -6865,7 +6997,7 @@ async function openAutomation() {
     await backend.environments.create({ name, values: [{ key: 'BASE_URL', value: base, type: 'default', enabled: true }], _postman_variable_scope: 'environment' });
     await refreshEnvironments();
     renderEnvPicker();
-    toast(`Created the "${name}" environment (BASE_URL = ${base}). Pick it on a project.`, 'ok');
+    toast(`Created the "${name}" environment (BASE_URL = ${base}): pick it on a project.`, 'ok');
     await renderDashboard();
   }
 
@@ -6982,8 +7114,11 @@ async function openAutomation() {
     const plan = planSuite(cid, envId, suite.datasets, project.endpoints);
     const runnable = plan.plan.filter((x) => x.cases.length && !x.hostMissing);
     if (!runnable.length) throw new Error(plan.plan.some((x) => x.hostMissing) ? `Nothing can run: the environment has no {{${plan.plan.find((x) => x.hostMissing).hostVar}}}.` : 'This collection has no requests to run.');
-    const meta = await api('POST', '/api/robot/runs/collection', { project: project.id, projectName: project.name, collection: cid, collectionName: col.info.name,
-      env: envId ? state.envs[envId].name : '', cases: plan.cases });
+    let meta;
+    try {
+      meta = await api('POST', '/api/robot/runs/collection', { project: project.id, projectName: project.name, collection: cid, collectionName: col.info.name,
+        env: envId ? state.envs[envId].name : '', cases: plan.cases });
+    } catch (e) { if (!(await showGoing(e))) throw e; return; }
     let buf = [], posting = Promise.resolve(), failedPost = null, lastPost = Date.now();
     const flush = (done) => {
       const events = buf; buf = []; lastPost = Date.now();
@@ -7060,14 +7195,21 @@ async function openAutomation() {
       [s.path, `All of ${s.name} (${s.tests.length})`], ...s.tests.map((t) => [`${s.path}::${t.name}`, `${t.name}${t.tags.length ? `  [${t.tags.join(', ')}]` : ''}`])] }))], { value: saved.target || '' }).childNodes);
     targetSel.value = [...targetSel.options].some((o) => o.value === saved.target) ? saved.target : '';
     const tags = [...new Set(project.suites.flatMap((x) => x.tests.flatMap((t) => t.tags)))].sort((x, y) => x.localeCompare(y)).slice(0, 12);
+    // this project's own remembered tags, and only ones it still has (another project's matched nothing: Robot exit 252)
+    tagsIn.value = String((saved.includes || {})[project.id] || '').split(',').map((x) => x.trim()).filter((x) => x && tags.includes(x)).join(', ');
     const toggleTag = (tg) => {
       const cur = tagsIn.value.split(',').map((x) => x.trim()).filter(Boolean);
       tagsIn.value = (cur.includes(tg) ? cur.filter((x) => x !== tg) : [...cur, tg]).join(', ');
-      remember('include', tagsIn.value);
+      rememberTags();
+      drawChips();
     };
-    tagChips.replaceChildren(...tags.map((tg) => ui.button({ label: tg, variant: 'ghost', size: 'small', title: `Only tests tagged ${tg} (click again to remove)`, onClick: () => toggleTag(tg) })));
+    const drawChips = () => {
+      const on = tagsIn.value.split(',').map((x) => x.trim());
+      tagChips.replaceChildren(...tags.map((tg) => ui.button({ label: tg, variant: 'ghost', size: 'small', pressed: on.includes(tg), title: `Only tests tagged ${tg} (click again to remove)`, onClick: () => toggleTag(tg) })));
+    };
+    drawChips();
     pythonNote.replaceChildren(project.python.error ? ui.note(project.python.error, 'err')
-      : ui.hint(project.python.version ? `Robot Framework ${project.python.version} · ${project.python.path}` : `Python: ${project.python.path} (checked when you run)`, { title: project.python.path }));
+      : h('div', null, ui.hint(project.python.version ? `Robot Framework ${project.python.version}` : 'Python, checked when you run'), ui.path(project.python.path)));
     await Promise.all(state.colList.map((c) => withCol(c.id).catch(() => null)));
     suite = { pair: pairFor(project, saved.pairs), datasets: [], unread: [], read: 0 };
     fillEnvs();
@@ -7077,7 +7219,7 @@ async function openAutomation() {
     renderKeys();
     renderFiles();
     fileView.replaceChildren();
-    suitePane.replaceChildren(ui.hint('Reading the test data…'));
+    suitePane.replaceChildren(ui.emptyPane({ title: 'Reading the test data…' }));
     const mine = suite; // a slower load for a project you've left must not land on this one
     mine.loading = loadSuiteData().then((d) => { if (suite === mine) { Object.assign(mine, d); renderSuite(); } }).catch((e) => { if (suite === mine) suitePane.replaceChildren(ui.note(e.message, 'err')); });
   }
@@ -7096,19 +7238,21 @@ async function openAutomation() {
     while (steps.childElementCount > 1500) steps.firstChild.remove();
     if (atEnd) steps.scrollTop = steps.scrollHeight;
   };
-  let latestShot = null;
+  let latestShot = null, shotSeq = 0, lastHttpError = '';
   function apply(e) {
     if (e.t === 'suite_start' && !counts.tests) counts.tests = e.tests || 0;
     else if (e.t === 'suite_start') line('Suite', e.longname, 'muted');
     else if (e.t === 'test_start') line('Test', e.name);
     else if (e.t === 'kw_end' && e.depth <= 3 && e.kind !== 'SETUP' || e.t === 'kw_end' && e.status === 'FAIL' && e.depth <= 3) {
-      line(fmtMs(e.ms || 0), `${'  '.repeat(Math.max(0, e.depth - 1))}${e.lib ? `${e.lib}.` : ''}${e.name}`, e.status === 'FAIL' ? 'err' : e.status === 'PASS' ? '' : 'muted');
+      line(e.ms ? fmtMs(e.ms) : '', `${'  '.repeat(Math.max(0, e.depth - 1))}${e.lib ? `${e.lib}.` : ''}${e.name}`, e.status === 'FAIL' ? 'err' : e.status === 'PASS' ? '' : 'muted');
     } else if (e.t === 'test_end') {
       counts.done++; if (e.status === 'PASS') counts.pass++; else if (e.status === 'FAIL') counts.fail++; else counts.skip++;
-      line(e.status, `${e.name}${e.message ? `: ${e.message}` : ''}`, runTone(e.status));
+      const word = { PASS: 'Passed', FAIL: 'Failed', SKIP: 'Skipped' }[e.status] || e.status;
+      const msg = e.message && e.message !== lastHttpError ? `: ${e.message}` : ''; // 43: an HTTP error already shown above isn't repeated
+      line(word, `${e.name}${msg}`, runTone(e.status));
       if (e.status === 'FAIL' && run) addFailure(e, run.id);
     } else if (e.t === 'log') line(e.level, e.text, e.level === 'WARN' ? 'warn' : 'err');
-    else if (e.t === 'http') { addHttp(e); line(e.error ? 'HTTP error' : String(e.status), `${e.method} ${e.url}${e.error ? `: ${e.error}` : ''}`, e.error || e.status >= 500 ? 'err' : e.status >= 400 ? 'warn' : 'muted'); }
+    else if (e.t === 'http') { lastHttpError = e.error || ''; addHttp(e); line(e.error ? 'HTTP error' : String(e.status), `${e.method} ${e.url}${e.error ? `: ${e.error}` : ''}`, e.error || e.status >= 500 ? 'err' : e.status >= 400 ? 'warn' : 'muted'); }
     if (e.shot) latestShot = { name: e.shot, step: e.name };
   }
   function renderSummary(meta, console) {
@@ -7146,10 +7290,11 @@ async function openAutomation() {
       latestShot = null;
       res.events.forEach(apply);
       run.offset = res.next; run.meta = res.meta;
+      liveFor(res.meta.kind);
       if (latestShot) {
-        const shot = latestShot;
+        const shot = latestShot, seq = ++shotSeq;
         runFile(runId, shot.name).then((url) => {
-          if (!run || run.id !== runId) return URL.revokeObjectURL(url);
+          if (!run || run.id !== runId || seq !== shotSeq) return URL.revokeObjectURL(url); // a newer screen is already up
           if (shotUrl) URL.revokeObjectURL(shotUrl);
           shotUrl = url; shotImg.src = url; shotImg.hidden = false; shotEmpty.hidden = true;
           shotCaption.textContent = `After: ${shot.step}`;
@@ -7168,7 +7313,7 @@ async function openAutomation() {
     await tick();
   }
   /** The footer's Run (Stop while a run goes); hidden on the dashboard, where each project has its own Run. */
-  const setRunButton = (running) => { const b = $('#dlgFoot .btn.primary'); if (b) { b.textContent = running ? 'Stop' : 'Run'; b.hidden = !dash.hidden; } };
+  const setRunButton = (running) => { const b = $('#dlgFoot .btn.primary'); if (b) { b.textContent = running ? 'Stop' : 'Run tests'; b.hidden = !dash.hidden; } };
   async function start() {
     if (suiteCtrl) { suiteCtrl.abort(); return; } // Stop: a collection run going here stops, whatever else is happening
     if (starting) return; // a double click starts one run
@@ -7193,6 +7338,7 @@ async function openAutomation() {
       run.meta.status = 'stopped'; // the server isn't running it any more: start a new run
     }
     await loading;
+    if (!project || project.id !== projSel.value) { toast('Still opening that project: try again in a moment.', 'muted'); return; }
     let data = null;
     if (dataText.trim()) {
       try { data = JSON.parse(dataText); } catch (e) { throw new Error(`Test data isn't valid JSON: ${e.message}`); }
@@ -7201,7 +7347,10 @@ async function openAutomation() {
     const cut = targetSel.value.indexOf('::');
     const [suite, test] = cut < 0 ? [targetSel.value, ''] : [targetSel.value.slice(0, cut), targetSel.value.slice(cut + 2)];
     const file = envSel.value.startsWith('file:') ? envSel.value.slice(5) : '';
-    const meta = await api('POST', '/api/robot/runs', { project: project.id, suite: suite || '.', test: test || '', include: tagsIn.value, envId: file ? '' : envSel.value, varfile: file, data, speed: speedSel.value });
+    let meta;
+    try {
+      meta = await api('POST', '/api/robot/runs', { project: project.id, suite: suite || '.', test: test || '', include: tagsIn.value, envId: file ? '' : envSel.value, varfile: file, data, speed: speedSel.value });
+    } catch (e) { if (!(await showGoing(e))) throw e; return; }
     $$('.seg-btn', tabBar)[0].click();
     summary.scrollIntoView({ block: 'start', behavior: 'smooth' }); // the live browser and steps fill the view
     await follow(meta.id);
@@ -7213,7 +7362,7 @@ async function openAutomation() {
     h('div', { class: 'grid-3' }, h('div', null, ui.field('Only tests tagged', tagsIn), tagChips), ui.field('Speed', speedSel), h('div', { class: 'field' }, pythonNote)),
     tabBar, ...panes);
   openDialog({
-    title: 'Automation', full: true, tall: true,
+    title: 'Automation', full: true, page: automationWin.only, tall: true,
     body: [dash, projectView],
     // Automation's own window: the whole window, nothing to close (the API client is in the other window).
     // Opened here only when the browser blocked that window: then it closes like any dialog.
@@ -7224,7 +7373,7 @@ async function openAutomation() {
       document.title = 'ApiMan';
       if (location.hash === '#automation') history.replaceState(null, '', location.pathname + location.search);
     },
-    buttons: [{ label: 'Run', primary: true, onClick: () => { start().catch((e) => toast(e.message, 'err')); return false; } }],
+    buttons: [{ label: 'Run tests', primary: true, onClick: () => { start().catch((e) => toast(e.message, 'err')); return false; } }],
   });
   setRunButton(false);
   document.title = 'Automation · ApiMan';
@@ -7236,6 +7385,41 @@ async function openAutomation() {
     try { await openProject(going.project); follow(going.id).catch(() => {}); return; } catch (e) { toast(e.message, 'err'); showDashboard(); return; }
   }
   await renderDashboard();
+}
+
+// ---------- cookies (local mode): the data folder's jar ----------
+async function openCookies() {
+  const box = h('div');
+  const draw = async () => {
+    let list;
+    try { list = await api('GET', '/api/cookies'); } catch (e) { box.replaceChildren(ui.note(e.message, 'err')); return; }
+    const del = (q, what) => api('DELETE', `/api/cookies${q}`).then(() => { toast(`Deleted ${what}`, 'muted'); draw(); }, (e) => toast(e.message, 'err'));
+    const domains = [...new Set(list.map((c) => c.domain))].sort();
+    box.replaceChildren(list.length ? h('table', { class: 'grid boxed' },
+      h('thead', null, h('tr', null, h('th', null, 'Name'), h('th', null, 'Value'), h('th', { class: 'desktop-only' }, 'Domain'), h('th', { class: 'desktop-only' }, 'Path'), h('th', { class: 'desktop-only' }, 'Expires'), h('th', { class: 'tight' }, ''))),
+      h('tbody', null, ...domains.flatMap((d) => list.filter((c) => c.domain === d).map((c) => h('tr', null,
+        h('td', null, c.name), h('td', { class: 'mono clip', title: c.value }, c.value),
+        h('td', { class: 'desktop-only' }, c.domain), h('td', { class: 'desktop-only' }, c.path),
+        h('td', { class: 'desktop-only' }, c.expires ? fmtWhen(c.expires) : 'Session'),
+        h('td', { class: 'tight' }, ui.iconButton('trash', `Delete cookie ${c.name}`, () => del(`?${new URLSearchParams({ domain: c.domain, path: c.path, name: c.name })}`, c.name), { size: 'small' })))))))
+      : ui.emptyPane({ title: 'No cookies', text: 'Cookies that responses set show here, by site.' }));
+  };
+  const domainIn = ui.input({ placeholder: 'api.example.com', spellcheck: 'false' });
+  const nameIn = ui.input({ placeholder: 'session', spellcheck: 'false' });
+  const valueIn = ui.input({ code: true, placeholder: 'value', spellcheck: 'false' });
+  await draw();
+  openDialog({
+    title: 'Cookies', wide: true, cancel: 'Close',
+    body: [ui.hint('Kept in the data folder and sent with requests to the matching site. Turn them off in Settings → Requests.'), box,
+      ui.sectionHead('Add a cookie', null, null), h('div', { class: 'grid-3' }, ui.field('Domain', domainIn), ui.field('Name', nameIn), ui.field('Value', valueIn))],
+    buttons: [
+      { label: 'Delete all', danger: true, left: true, onClick: async () => { if (await ask({ title: 'Delete every cookie?', message: 'Logins that use a session cookie will need to sign in again.', ok: 'Delete all', danger: true })) { await api('DELETE', '/api/cookies'); toast('Cookies deleted', 'muted'); } openCookies(); return true; } },
+      { label: 'Add', primary: true, onClick: async () => {
+        await api('PUT', '/api/cookies', { domain: domainIn.value.trim(), name: nameIn.value.trim(), value: valueIn.value, path: '/' });
+        nameIn.value = ''; valueIn.value = ''; toast('Cookie added', 'ok'); await draw(); return false;
+      } },
+    ],
+  });
 }
 
 // ---------- settings ----------
@@ -7298,9 +7482,11 @@ function openSettings(initial = null, layoutSnap = null) {
   drawSwatches();
   const timeout = ui.input({ type: 'number', num: true, min: '1', max: '600', value: String(s.timeout) });
   const followCheck = ui.check({ label: 'Follow redirects', help: 'Credentials are never forwarded to a different site, and HTTPS never downgrades to HTTP.', checked: s.followRedirects });
+  const maxRedirectsIn = ui.input({ type: 'number', num: true, min: '1', max: '50', value: String(s.maxRedirects || 10), 'aria-label': 'Most redirects to follow' });
+  const cookiesCheck = ui.check({ label: 'Keep cookies', help: 'Cookies a response sets are sent with later requests to the same site, like Postman. Stored in the data folder.', checked: s.cookies !== false });
   const histCheck = ui.check({ label: 'Keep request history', help: 'Stored only in this browser. It includes request details as you typed them.', checked: s.history });
   const insecureCheck = ui.check({ label: 'Skip TLS certificate checks', help: ['Last resort for internal servers with self-signed certificates: it lets an attacker on the network read your traffic. Prefer starting the server with ', h('code', { class: 'inline' }, '--ca-file'), '.'], checked: s.insecure });
-  const wrapCheck = ui.check({ label: 'Wrap long lines in responses', checked: draft.wrap !== false, cls: 'align-end', onChange: (e) => { draft.wrap = e.target.checked; preview(); } });
+  const wrapCheck = ui.check({ label: 'Wrap long lines (responses and request bodies)', checked: draft.wrap !== false, cls: 'align-end', onChange: (e) => { draft.wrap = e.target.checked; preview(); } });
   const follow = followCheck.input, hist = histCheck.input, insecure = insecureCheck.input;
 
   const appearance = [
@@ -7335,6 +7521,8 @@ function openSettings(initial = null, layoutSnap = null) {
   const requests = [
     ui.field('Request timeout (seconds)', timeout, { narrow: true }),
     followCheck,
+    backend.mode === 'local' ? ui.field('Most redirects to follow', maxRedirectsIn, { narrow: true }) : null,
+    backend.mode === 'local' ? h('div', { class: 'field-row' }, cookiesCheck, ui.button({ label: 'Manage cookies…', size: 'small', onClick: () => openCookies() })) : null,
     histCheck,
     backend.mode === 'local' ? insecureCheck
       : ui.hint('Website mode: the browser sends requests, so certificate and CORS rules apply. Run ApiMan locally (python3 server.py) to call any API, including internal ones over VPN.'),
@@ -7363,6 +7551,7 @@ function openSettings(initial = null, layoutSnap = null) {
           accent: draft.accent, accentCustom: draft.accentCustom, tabStyle: draft.tabStyle, sendStyle: draft.sendStyle, sidePosition: draft.sidePosition, sideHidden: !!draft.sideHidden,
           timeout: Math.max(1, Math.min(600, Number(timeout.value) || 60)),
           followRedirects: follow.checked, history: hist.checked, insecure: backend.mode === 'local' && insecure.checked,
+          maxRedirects: Math.max(1, Math.min(50, Math.round(Number(maxRedirectsIn.value)) || 10)), cookies: cookiesCheck.input.checked,
         });
         saved = true;
         saveSettings();
@@ -7379,13 +7568,26 @@ function openSettings(initial = null, layoutSnap = null) {
 // =====================================================================================================
 // Wiring
 // =====================================================================================================
+/** Unsaved requests named after their method and path ("GET /anything", from a cURL import or the default) keep
+ *  that name in step with the URL; a name you typed yourself is never touched. */
+function autoTitle(t) {
+  if (!t || t.cid) return;
+  const name = t.ed.name || '';
+  if (name && name !== 'Untitled request' && !/^[A-Z]{1,16} \/\S*$/.test(name)) return;
+  let path = '/';
+  try { path = new URL(t.ed.url.includes('://') ? t.ed.url : `http://${t.ed.url}`).pathname; } catch { return; }
+  t.ed.name = `${t.ed.method} ${decodeURIComponent(path)}`;
+  if ($('#reqName') && document.activeElement !== $('#reqName')) $('#reqName').value = t.ed.name;
+  renderTabs();
+}
 function bindEditor() {
   const ed = () => cur().ed;
   $('#reqName').addEventListener('input', (e) => { ed().name = e.target.value; markDirty(); renderTabs(); });
-  $('#method').addEventListener('change', (e) => { ed().method = e.target.value; $('#reqbar').dataset.method = e.target.value; markDirty(); renderTabs(); });
+  $('#method').addEventListener('change', (e) => { ed().method = e.target.value; $('#reqbar').dataset.method = e.target.value; autoTitle(cur()); markDirty(); renderTabs(); if (cur().reqTab === 'body') renderBody(); });
   $('#url').addEventListener('input', (e) => {
     const t = cur();
     t.ed.url = e.target.value;
+    autoTitle(t);
     t.ed.params = [...parseQuery(t.ed.url), ...t.ed.params.filter((p) => p.disabled)];
     t.ed.pathVars = syncPathVars(t.ed.url, t.ed.pathVars || []);
     if (t.reqTab === 'params') renderParams();
