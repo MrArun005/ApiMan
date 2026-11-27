@@ -1,13 +1,88 @@
 # ApiMan
 
-A private, local API client in the spirit of Postman. You don't need an account, and nothing syncs to the cloud. It reads and writes Postman files, so you can move your collections back and forth.
+**A private, local API client, with Robot Framework automation built in.** Send requests, script them and test them
+like in Postman, then run your Robot Framework UI and API suites in the same app and watch the browser live. There's no
+account and no cloud: your collections are plain Postman files in a folder you choose, and ApiMan updates itself when
+that folder changes.
 
-- **Local mode** (`python3 server.py`): requests go out from your own computer, so they work over your VPN, reach internal hosts, and have no CORS limits. Everything is saved in the data folder (`collections/`, or `--data`).
-- **Website mode** (GitHub Pages): open the page and send requests straight from the browser. The API must allow cross-site requests (CORS). In Chrome and Edge, ApiMan asks on start which folder on your computer to keep your data in (and offers to copy in what the browser already holds); you can also keep it in the browser for now. Firefox and Safari can't open folders, so data stays in the browser there.
+[**Download for macOS or Windows**](../../releases/latest) · [Run from source](#run-from-source) · [What makes it different](#what-makes-apiman-different) · [Screenshots](#a-quick-tour)
 
-**Where your data lives.** In the data folder, collections are `*.json`, environments are `environments/*.json`, and your workspace (settings, open tabs, history, layout) is `.apiman/state.json`. The browser only keeps a cache of it, so clearing browser storage loses nothing. OAuth tokens and kept responses are never written to the folder: they last only as long as the browser tab.
+![ApiMan: a POST request with its JSON body, the JSON answer with a bearer token, and the collection in the sidebar](docs/images/request.png)
 
-**Folders become categories.** Organise the data folder in any tree of folders (`payments/v2/Refunds.json`, `team/staging.postman_environment.json`, …): ApiMan finds every collection and environment in it, up to 8 levels deep, by what the file contains rather than its name or place, so Postman exports work as they are. Other JSON files are left alone, and so are hidden folders (`.git`, `.apiman`) and `node_modules`. The sidebar shows each folder as a category you can open and close, collections and environments save back to their own file, and a category's menu creates or imports straight into that folder. The environment picker shows a folder in front of the name (`payments / Staging`). The same works in website mode with a folder; data kept only in the browser has no folders.
+## What makes ApiMan different
+
+- **Robot Framework automation, built in.** Point ApiMan at any Robot project (a folder, a zip, or one in your data
+  folder). It finds the suites, tests, tags, test data and the environment keys they need, runs them with the
+  project's own Python, and shows a **UI test's browser live inside the app**, step by step. Every HTTP call is
+  listed, failures keep a screenshot, and History tracks pass rate, flaky tests, what changed since the last run, and a
+  frame-by-frame **replay** of any UI test.
+- **Your collection and your test data become one suite.** ApiMan pairs a Postman collection with the Robot project
+  that calls the same APIs, by method and path. It then runs every request with that project's CSV or JSON test data
+  (`expectedStatus`, skip rows, negative cases), using the same environment as the Robot tests. The results land in the
+  same History.
+- **Plain Postman files in your own folder.** Collections are Postman v2.1 `.json` files and environments are Postman
+  environment files. They live in any tree of folders, are found by their content, and are ready for git. There's no
+  import or export step, and nothing to convert.
+- **The folder is the source of truth.** A `git pull`, an editor or a synced team folder: ApiMan notices the change
+  within seconds and shows it. Tabs with unsaved edits are left alone.
+- **No account, no cloud, no telemetry.** Requests go out from your computer, so they work over a VPN, reach internal
+  hosts, and have no CORS limits. The local server listens on `127.0.0.1` only, behind a per-launch token and a Host
+  check.
+- **Imported scripts can't phone home.** Collection scripts run in a sandboxed worker with no network access. If a
+  script tries to change where a request goes, ApiMan asks you first, and credentials never follow a redirect to
+  another site.
+- **Small, with nothing to install.** The desktop app is a native window of about 25 MB, not a bundled browser. From
+  source it's one Python file using only the standard library, plus a static page: `python3 server.py` and you're in.
+- **Details that save time.** Diff a response against the previous one, a pinned one, or **another environment**.
+  Right-click a JSON value to generate a test for it. See exactly where `{{variables}}` resolve before you send.
+  Generated code (cURL, HTTPie, PowerShell, fetch, Python, Java, Go) matches what is actually sent.
+
+### Compared with other API clients
+
+| | **ApiMan** | Postman | Insomnia | Bruno | Hoppscotch |
+|---|---|---|---|---|---|
+| Robot Framework UI and API runs, with a live browser view | **Yes** | No | No | No | No |
+| A collection run with your automation project's test data, in one suite | **Yes** | No | No | No | No |
+| Storage is plain Postman v2.1 files in your folder (git-friendly) | **Yes** | Cloud workspace; files by export | Own format | Own `.bru` files | Own format |
+| Use without an account | **Yes** | Needed to save collections | Optional | Yes | Optional |
+| Updates itself when files change on disk | **Yes** | No | No | Yes | No |
+| Desktop app technology | **Native web view, ~25 MB** | Electron | Electron | Electron | Tauri / web |
+| Runs from source with no dependencies | **Yes** (Python standard library) | No | No | No | No |
+| Command-line runner with JUnit output | Yes (`server.py run`) | Yes (Newman) | Yes (Inso) | Yes | Yes |
+
+<sub>Compared from each product's public documentation in November 2026. Plans and features change, so check theirs
+for the current state. ApiMan reads and writes Postman files, so you can move back and forth.</sub>
+
+## A quick tour
+
+**Automation: a UI test running, with the browser inside ApiMan.** Each step updates the view, and the steps and API
+calls are listed beside it.
+
+![A Robot Framework UI test running in ApiMan's Automation window: the live browser on the left, the steps on the right](docs/images/automation-live.png)
+
+**The Automation dashboard.** Every project at a glance: its last result, a trend of recent runs, its environment and
+whether that environment's app is answering, its paired collection, and the apps running on this computer.
+
+![The Automation dashboard with two project cards, unpaired collections, running apps and environment health](docs/images/automation-dashboard.png)
+
+**A collection as a test suite.** The order-service collection, paired with its Robot project. Each request finds its
+test data (`login.csv`, `list-products.csv`, ...) and which fields that data fills. 108 cases run from one click.
+
+![The Collection tab: each request with its test data file, the fields it fills and the number of cases](docs/images/api-suite.png)
+
+**History.** Pass rate, flaky tests, what changed since the last comparable run, and every test's recent results.
+
+![Automation History: run statistics and every test with its last results](docs/images/automation-history.png)
+
+**Tests in scripts, like Postman's.** `pm.test`, `pm.expect`, variables and the Console all work.
+
+![A Login request with its test script and two passing tests](docs/images/tests.png)
+
+**Light, dark, or your own accent colour.**
+
+![ApiMan in dark mode: a GET request with query parameters and a JSON list of products](docs/images/request-dark.png)
+
+## Run from source
 
 ```bash
 git clone https://github.com/MrArun005/ApiMan.git && cd ApiMan
@@ -16,11 +91,20 @@ python3 server.py --data ~/my-apis    # keep collections + environments somewher
 python3 server.py --ca-file ~/company-root-ca.pem   # trust internal HTTPS certificates
 python3 server.py run api.json -e staging.json --junit report.xml   # run a collection headlessly (CI)
 python3 test_server.py                # server self-check
-node tools/layout-check.mjs           # layout check: 544 combinations of width, sidebar, layout, text, density, divider and panel (needs Playwright and ApiMan running; no other server)
+node tools/layout-check.mjs           # layout check: 634 combinations of width, sidebar, layout, text, density, divider and panel, Automation included (needs Playwright and ApiMan running; no other server)
 node tools/ui-lint.mjs                # the design system (DESIGN.md): every class, control and colour must come from it
 ```
 
 You only need Python 3. There's nothing to install.
+
+## Your data
+
+- **Local mode** (`python3 server.py`): requests go out from your own computer, so they work over your VPN, reach internal hosts, and have no CORS limits. Everything is saved in the data folder (`collections/`, or `--data`).
+- **Website mode** (GitHub Pages): open the page and send requests straight from the browser. The API must allow cross-site requests (CORS). In Chrome and Edge, ApiMan asks on start which folder on your computer to keep your data in (and offers to copy in what the browser already holds); you can also keep it in the browser for now. Firefox and Safari can't open folders, so data stays in the browser there.
+
+**Where your data lives.** In the data folder, collections are `*.json`, environments are `environments/*.json`, and your workspace (settings, open tabs, history, layout) is `.apiman/state.json`. The browser only keeps a cache of it, so clearing browser storage loses nothing. OAuth tokens and kept responses are never written to the folder: they last only as long as the browser tab.
+
+**Folders become categories.** Organise the data folder in any tree of folders (`payments/v2/Refunds.json`, `team/staging.postman_environment.json`, …): ApiMan finds every collection and environment in it, up to 8 levels deep, by what the file contains rather than its name or place, so Postman exports work as they are. Other JSON files are left alone, and so are hidden folders (`.git`, `.apiman`) and `node_modules`. The sidebar shows each folder as a category you can open and close, collections and environments save back to their own file, and a category's menu creates or imports straight into that folder. The environment picker shows a folder in front of the name (`payments / Staging`). The same works in website mode with a folder; data kept only in the browser has no folders.
 
 ## Desktop app
 
@@ -28,7 +112,7 @@ Download **ApiMan-macOS.zip** or **ApiMan-Windows.zip** from the latest [release
 
 **The data folder updates ApiMan by itself.** Add, edit or delete files in it (a `git pull`, an editor, a synced team folder, a new Robot project) and within a few seconds ApiMan shows the change: collections, environments, request tabs you haven't edited, and the Automation dashboard. Tabs with unsaved edits are kept as they are.
 
-The builds aren't signed yet, so the first time, macOS needs right-click → **Open**, and Windows needs **More info → Run anyway**. To run Robot projects, Robot Framework must be installed on that computer: use the project's own `.venv`, a `.venv-robot` in `~/ApiMan`, or `python3`.
+The builds aren't signed yet, so the first time, macOS needs right-click → **Open**, and Windows needs **More info → Run anyway**. To run Robot projects, Robot Framework must be installed on that computer: use the project's own `.venv`, a `.venv-robot` in your data folder, or `python3`.
 
 To build it yourself: `python3 -m pip install pyinstaller pillow pywebview && python3 tools/build_desktop.py`, which puts the app in `dist/`. A version tag (`git tag v1.0.0 && git push --tags`) publishes both builds as a release.
 
